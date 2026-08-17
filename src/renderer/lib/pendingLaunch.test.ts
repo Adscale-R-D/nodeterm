@@ -1,5 +1,12 @@
 import { describe, it, expect } from 'vitest'
-import { dependencyEdges, launchesToFire, unmetDeps, type ArmedNode, type StatusById } from './pendingLaunch'
+import {
+  dependencyEdges,
+  launchesToFire,
+  mountLaunchAction,
+  unmetDeps,
+  type ArmedNode,
+  type StatusById
+} from './pendingLaunch'
 
 const armed = (id: string, after: string[], command = `echo ${id}`): ArmedNode => ({
   id,
@@ -76,5 +83,48 @@ describe('dependencyEdges', () => {
 
   it('draws nothing once the node is no longer armed', () => {
     expect(dependencyEdges([plain('c')], new Set(['c']))).toEqual([])
+  })
+})
+
+describe('mountLaunchAction — who owns the first keystroke', () => {
+  const base = { fresh: true, agentId: 'claude', resumable: true }
+
+  it('an ARMED node types NOTHING, even though it looks cold-restorable', () => {
+    // THE REGRESSION, in the shape it was reported: armAfter leaves initialCommand unset, so an
+    // armed node is indistinguishable from a cold restore from inside the mount effect. It used to
+    // fall through to 'resume' and run `claude --resume <mintedSessionId>` for a session whose
+    // launch had not run yet — "No conversation found with session ID: …", in every reviewer of a
+    // verify panel, each with its own uuid.
+    expect(
+      mountLaunchAction({ ...base, pendingLaunch: { after: ['n-1'], command: 'claude -p "review"' } })
+    ).toBe('armed')
+  })
+
+  it('stays armed on a WARM reattach too — the launch is pending either way', () => {
+    expect(
+      mountLaunchAction({ ...base, fresh: false, pendingLaunch: { after: ['n-1'], command: 'x' } })
+    ).toBe('armed')
+  })
+
+  it('armed outranks initialCommand only in the impossible case — initialCommand still wins', () => {
+    // armAfter moves the command, so both should never be set at once. If they somehow are, running
+    // the one-shot is the safe answer: it is what the node would have done before it was armed, and
+    // Canvas's launchInFlight ledger still keeps the pending delivery exactly-once.
+    expect(
+      mountLaunchAction({ ...base, initialCommand: 'claude', pendingLaunch: { after: [], command: 'y' } })
+    ).toBe('initial')
+  })
+
+  it('a cold start of a resumable agent still resumes — the fix must not disable cold restore', () => {
+    expect(mountLaunchAction(base)).toBe('resume')
+  })
+
+  it('a warm reattach types nothing (tmux redraws its own screen)', () => {
+    expect(mountLaunchAction({ ...base, fresh: false })).toBe('none')
+  })
+
+  it('a plain terminal and a non-resumable agent get nothing but the restored shell', () => {
+    expect(mountLaunchAction({ ...base, agentId: undefined, resumable: false })).toBe('none')
+    expect(mountLaunchAction({ ...base, resumable: false })).toBe('none')
   })
 })

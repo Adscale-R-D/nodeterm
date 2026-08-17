@@ -295,6 +295,7 @@ import {
   type RelayTab,
 } from '../session/relay-tab'
 import { buildBackgroundLinkMaps, buildContextLinkNote, buildLinkMap, buildNotePushMessage, classifyLink, hiddenLinkIds, linkIdsCoveredByRopes, pairKey, planBridges, type LinkEndpoint } from '../lib/noteLink'
+import { resolveInheritedCwd } from '../lib/nodeCwd'
 import { dependencyEdges, launchesToFire, unmetDeps, type ArmedNode } from '../lib/pendingLaunch'
 import { freeSpot } from '../lib/placement'
 import { pushSessionRename } from '../lib/sessionRename'
@@ -2875,23 +2876,15 @@ export function Canvas() {
   // dir and means nothing on the host (only a legacy / hand-edited binding can even exist there —
   // worktrees are unsupported in SSH projects in v1). This also keeps the two ↪ guards below honest,
   // since both decide by comparing against what this returns.
+  // Delegates to the pure walk (lib/nodeCwd.ts) so the canvas-control `verify` verb can resolve the
+  // same answer without this closure — its effect has an empty dep array and would capture a stale
+  // `isSshProject`. See that module's header.
   const cwdForNewNodeIn = useCallback(
-    (parentId: string | undefined): string | undefined => {
-      // Frames nest, so the answer is the NEAREST ancestor that states one — a node dropped in a
-      // sub-frame of a worktree frame still belongs to that worktree checkout.
-      const seen = new Set<string>()
-      let currentId = parentId
-      while (currentId && !seen.has(currentId)) {
-        seen.add(currentId)
-        const parent = nodesRef.current.find((n) => n.id === currentId)
-        if (!parent) return undefined
-        const stale = useWorktrees.getState().staleGroupIds.includes(currentId)
-        if (parent.data.worktree && !stale && !isSshProject) return parent.data.worktree.path
-        if (parent.data.cwd) return parent.data.cwd
-        currentId = parent.parentId
-      }
-      return undefined
-    },
+    (parentId: string | undefined): string | undefined =>
+      resolveInheritedCwd(nodesRef.current, parentId, {
+        staleGroupIds: useWorktrees.getState().staleGroupIds,
+        isSshProject
+      }),
     [isSshProject]
   )
 
@@ -7110,7 +7103,27 @@ export function Canvas() {
             const wantJudge = (args.synthesis ?? 'on').trim().toLowerCase() !== 'off'
             const { shimPath: vShim } = await window.nodeTerminal.contextLink.info()
             const targetTitle = (target.data.title as string) || targetId
-            const targetCwd = target.data.cwd as string | undefined
+            // WHERE THE REVIEWERS RUN, in three falling steps. Reported from a live panel: the
+            // reviewers opened in the PROJECT cwd while the code under review sat in a worktree, so
+            // a read-only `git diff` would still work (shared object store) but reading a file at
+            // that revision would not — a reviewer silently looking at the wrong tree.
+            //  1. an explicit `--cwd`, for the case no inheritance can guess;
+            //  2. the target's own `data.cwd`;
+            //  3. the target's FRAME — `cwdForNewNodeIn` walks up to the nearest worktree-bound
+            //     group, which is exactly what a hand-opened node in that frame would have got.
+            // (2) alone was the old behaviour and it is undefined for any node opened without an
+            // explicit cwd, which is the common case: `data.cwd` stores what it was GIVEN, not the
+            // project default it fell back to. So the inheritance existed and was routinely empty.
+            // Resolved through the pure walk with the CURRENT ssh answer (`ctlSsh`), not the
+            // component callback: this effect's deps are `[]` and would have pinned the first
+            // render's project.
+            const targetCwd =
+              args.cwd?.trim() ||
+              (target.data.cwd as string | undefined) ||
+              resolveInheritedCwd(nodesRef.current, target.parentId, {
+                staleGroupIds: useWorktrees.getState().staleGroupIds,
+                isSshProject: !!ctlSsh
+              })
             const live = nodesRef.current as CanvasNode[]
             const vStore = useProjects.getState()
             // Reviewers inherit the TARGET's account, not the caller's: they read that node's

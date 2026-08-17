@@ -98,3 +98,41 @@ export function dependencyEdges(
   }
   return out
 }
+
+/**
+ * WHAT A TERMINAL NODE TYPES INTO ITS PANE THE MOMENT IT MOUNTS — the ordering between three
+ * features that each own that first keystroke, and which read alike from inside the mount effect.
+ *
+ *  - `initial`  — a one-shot `initialCommand` (first open of a fresh node: the agent CLI, or a
+ *                 `gh auth login`). Consumed and cleared by the caller.
+ *  - `armed`    — NOTHING. An `--after` node's launch has not run yet; Canvas fires
+ *                 `pendingLaunch.command` when its dependencies report done.
+ *  - `resume`   — cold restore (machine reboot, first open post-`fresh`) of a resumable agent:
+ *                 relaunch the CLI, resuming its prior conversation when an id is known.
+ *  - `none`     — a warm reattach (tmux redraws), or a plain terminal (just the restored shell).
+ *
+ * `armed` OUTRANKS `resume`, and that ordering is the whole reason this function exists. `armAfter`
+ * moves the factory's command into `pendingLaunch` and leaves `initialCommand` unset, so an armed
+ * node is byte-identical to a cold-restored one from inside the effect — it fell through to
+ * `resume` and resumed `data.agentSessionId`, the id `createAgentNode` MINTS up front and bakes into
+ * the launch as `--session-id`. That session does not exist yet (the pending launch is what would
+ * create it), so every armed node opened with `claude --resume <uuid>` → "No conversation found with
+ * session ID: …". Reported from a live `verify` panel whose four reviewers all read as dead; it hit
+ * every `--after` node. Both features are correct alone — minting is what stops a cold restore from
+ * opening a BLANK conversation — so this is an ordering fix, not a repair of either.
+ */
+export function mountLaunchAction(input: {
+  initialCommand?: string
+  pendingLaunch?: PendingLaunch
+  /** `PtyCreateResult.fresh` — a cold start (first open or post-reboot), not a warm reattach. */
+  fresh: boolean
+  /** The node's agent, if any. A plain terminal has none. */
+  agentId?: string
+  /** `canResume(agentId)` — membership of RESUMABLE_AGENTS, injected to keep this leaf pure. */
+  resumable: boolean
+}): 'initial' | 'armed' | 'resume' | 'none' {
+  if (input.initialCommand) return 'initial'
+  if (input.pendingLaunch) return 'armed'
+  if (input.fresh && input.agentId && input.resumable) return 'resume'
+  return 'none'
+}

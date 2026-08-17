@@ -226,10 +226,11 @@ export function buildCanvasControlInstructions(shimPath: string): string {
     '  on demand (nodeterm linked-context CLI). `--from` defaults to you; nothing is pushed into the',
     '  linked sessions. Agent sessions you open are linked to you automatically — use `link` for nodes',
     '  you did not open, or to link two OTHER nodes together.',
-    '- `verify --node <id> [--lenses correctness,security,tests] [--focus "..."] [--synthesis off]` — open a',
+    '- `verify --node <id> [--lenses correctness,security,tests] [--focus "..."] [--cwd P] [--synthesis off]` — open a',
     '  review panel over that node\'s work: one reviewer per lens, each armed behind the target and linked',
     '  to it, plus a judge armed behind the panel that merges the findings into one verdict. Reviewers are',
-    '  told not to change files. Prefer this over asking one agent to double-check itself.',
+    '  told not to change files. Prefer this over asking one agent to double-check itself. They run in the',
+    '  target\'s directory (its own cwd, else its frame\'s worktree); pass `--cwd` when neither is set.',
     '- `spawn-team --label L --team \'[{"title":"UI","prompt":"...","agent":"claude"}]\'` — one agent per',
     '  role (max 8), arranged in a grid, wrapped in a labeled group, each connected + context-linked to you.',
     '- `open-worktree --branch <name> [--base <ref>] [--path P] [--group <id>]` — create a git worktree',
@@ -484,12 +485,16 @@ Verbs:
   pushed into the linked sessions — reading is on demand, so linking never interrupts anyone.
   Agent sessions you open (\`open-claude\`/\`open-agent\`/\`spawn-team\`) are linked to you
   automatically; use \`link\` for nodes you did not open, or to link two OTHER nodes together.
-- \`verify --node <id> [--lenses correctness,security,tests] [--focus "..."] [--agent <id>] [--synthesis off] [--label L]\` —
+- \`verify --node <id> [--lenses correctness,security,tests] [--focus "..."] [--cwd P] [--agent <id>] [--synthesis off] [--label L]\` —
   open a review PANEL over that node's work: one reviewer per lens, each armed behind the target
   (they start when it goes idle) and linked to it so they can read what it actually did, plus a
   judge armed behind the whole panel that merges their findings into one verdict
   (\`--synthesis off\` skips the judge). Default lenses are correctness, security, tests; any word
-  works as a lens, known ones just get a sharper brief. Reviewers are told NOT to change files —
+  works as a lens, known ones just get a sharper brief. The panel runs in the TARGET's directory:
+  its own cwd if it has one, else the worktree of the frame it sits in — so a review of work done on
+  a branch reads that branch's files, not the main checkout's. Pass \`--cwd\` when the target has
+  neither (a node opened with no explicit cwd stores none) and the reviewers would otherwise land in
+  the project root. Reviewers are told NOT to change files —
   they share one checkout, and finding is a separate job from fixing. Use this instead of asking
   one agent "are you sure?": several INDEPENDENT looks from different angles catch what one pass,
   or several identical passes, cannot.

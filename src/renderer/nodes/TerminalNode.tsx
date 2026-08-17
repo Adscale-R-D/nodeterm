@@ -31,6 +31,7 @@ import {
   makeDirListingLookup
 } from '../terminal/file-links'
 import { sshFs } from '../terminal/ssh-fs'
+import { mountLaunchAction } from '../lib/pendingLaunch'
 import type { FsApi, PendingLaunch } from '@shared/types'
 import {
   attachReplay,
@@ -2827,10 +2828,40 @@ export function TerminalNode({
         }
         // Run a one-shot command on first open (e.g. "gh auth login" or the agent CLI), then
         // forget it.
-        if (data.initialCommand) {
-          writeWhenShellReady(data.initialCommand)
+        // WHICH of the three first-keystroke owners acts here is decided by ONE pure function
+        // (lib/pendingLaunch.ts `mountLaunchAction`), because from inside this effect an armed node
+        // and a cold-restored one look identical — see that function's header for the bug that cost.
+        const launchAction = mountLaunchAction({
+          initialCommand: data.initialCommand as string | undefined,
+          pendingLaunch: data.pendingLaunch as PendingLaunch | undefined,
+          fresh,
+          agentId,
+          resumable: !!agentId && canResume(agentId)
+        })
+        if (launchAction === 'initial') {
+          writeWhenShellReady(data.initialCommand!)
           updateNodeData(id, { initialCommand: undefined })
-        } else if (fresh && agentId && canResume(agentId)) {
+        } else if (launchAction === 'armed') {
+          // ARMED (`--after`): this node's launch has NOT run yet — Canvas fires
+          // `pendingLaunch.command` once every dependency reports done. So there is nothing to
+          // start here and, crucially, nothing to RESUME: skip both branches.
+          //
+          // Without this the `fresh` branch below ran, because `armAfter` moves the factory's
+          // command into `pendingLaunch` and leaves `initialCommand` unset — so an armed node looked
+          // exactly like a cold-restored one. It then resumed `data.agentSessionId`, the id
+          // `createAgentNode` MINTS up front and bakes into the launch as `--session-id`. That
+          // session does not exist yet (its launch is what would create it), so every armed node
+          // opened with `claude --resume <uuid>` → "No conversation found with session ID: …" and
+          // the pane fell back to a bare shell. Reported from a live `verify` panel where all four
+          // reviewers read as dead; it hit every `--after` node, not just verify's.
+          //
+          // Two correct features interacting: session-id minting is what stops a cold restore from
+          // opening a BLANK conversation (see the branch below), and `--after` is what makes the
+          // canvas a DAG. Neither is wrong; the ordering between them was missing. Do not "simplify"
+          // this into the `fresh` condition — a pending launch is a distinct state from both a
+          // first open and a cold restore, and it must produce NO typing at all.
+          // `&& agentId` is a type NARROWING only: 'resume' is returned solely when it is set.
+        } else if (launchAction === 'resume' && agentId) {
           // Cold restart of an agent node: the live agent is gone, so re-launch it. Resume the
           // prior conversation by its session id when we have one; otherwise start the agent
           // fresh. Plain terminals get nothing here — just the restored shell.

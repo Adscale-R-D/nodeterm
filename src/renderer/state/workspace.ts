@@ -920,6 +920,38 @@ function rootPosition(node: CanvasNode, nodes: CanvasNode[]): { x: number; y: nu
   return { x, y }
 }
 
+/**
+ * A frame plus EVERY node inside it, to any depth — the set a "close this frame and its contents"
+ * action operates on, and the set its confirmation counts. One answer, so the sentence the user
+ * approves and the nodes that actually die cannot disagree.
+ *
+ * Frames NEST, so this is a walk rather than a `parentId === id` filter: a review panel wrapped in an
+ * outer frame would otherwise lose the frame and keep the reviewers, which is the bug this closes in
+ * the other direction. Cycle-safe (`seen`) for the same reason `isDescendant` is: `reparentNode`
+ * refuses to build one, but a hand-edited `project.json` can still contain one.
+ *
+ * The frame's own id comes FIRST, which callers rely on for the group-vs-node split in messaging.
+ */
+export function groupSubtreeIds(nodes: readonly CanvasNode[], groupId: string): string[] {
+  const children = new Map<string, string[]>()
+  for (const n of nodes) {
+    if (!n.parentId) continue
+    const list = children.get(n.parentId)
+    if (list) list.push(n.id)
+    else children.set(n.parentId, [n.id])
+  }
+  const out: string[] = []
+  const seen = new Set<string>()
+  const walk = (id: string): void => {
+    if (seen.has(id)) return
+    seen.add(id)
+    out.push(id)
+    for (const child of children.get(id) ?? []) walk(child)
+  }
+  walk(groupId)
+  return out
+}
+
 function isDescendant(nodes: CanvasNode[], candidateId: string, ancestorId: string): boolean {
   const byId = new Map(nodes.map((node) => [node.id, node]))
   const seen = new Set<string>()

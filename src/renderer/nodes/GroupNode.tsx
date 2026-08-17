@@ -21,6 +21,21 @@ export function setWorktreeActionHandler(
 }
 
 /**
+ * "Close this frame AND everything in it" — the same bridge pattern, because this action cannot live
+ * in here: it destroys tmux sessions, so it owes the confirm dialog, `transport.destroy`, the agent
+ * status cleanup and the worktree unbind, all of which are Canvas's (`deleteNodes`).
+ *
+ * It exists because the `×` used to call `ungroup`, exactly like the button beside it: two controls,
+ * one behaviour, and no way to close a frame with its contents — you had to delete each child by
+ * hand. Reported for a `Verify:` panel, where the frame IS the unit of work and four reviewer
+ * sessions is the normal size of it.
+ */
+let groupCloseHandler: ((groupId: string) => void) | null = null
+export function setGroupCloseHandler(fn: ((groupId: string) => void) | null): void {
+  groupCloseHandler = fn
+}
+
+/**
  * A group frame: a dashed, rounded, translucent box that contains child nodes. A floating
  * label pill (color dot + name) sits on the top border; ungroup/× appear top-right on hover.
  * Children are real React Flow nodes parented to this one, so dragging the frame moves them
@@ -250,8 +265,11 @@ export function GroupNode({ id, data, selected }: NodeProps<CanvasNode>) {
         </button>
         <button
           className="group-node__close"
-          title="Remove group (keeps nodes)"
-          onClick={ungroup}
+          // The two buttons must READ as different, since they now do different things: `ungroup`
+          // keeps the work, `×` ends it. The nodes-inside count is left out of the title on purpose —
+          // it would go stale while the frame sits there; the confirm dialog states it at click time.
+          title="Close group and the nodes inside it"
+          onClick={() => groupCloseHandler?.(id)}
         >
           ×
         </button>

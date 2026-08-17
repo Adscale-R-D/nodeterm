@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import {
+  groupSubtreeIds,
   addSelectionToGroup,
   alignNodes,
   arrangeNodes,
@@ -782,5 +783,48 @@ describe('createAgentNode prompt injection', () => {
   it('keeps argv injection byte-identical for codex and gemini', () => {
     expect(createAgentNode('codex', 0, undefined, undefined, 'do X').data.initialCommand).toBe("codex 'do X'")
     expect(createAgentNode('gemini', 0, undefined, undefined, 'do X').data.initialCommand).toBe("gemini 'do X'")
+  })
+})
+
+describe('groupSubtreeIds — what "close this frame and its contents" means', () => {
+  const g = (id: string, parentId?: string): CanvasNode =>
+    ({ id, type: 'group', parentId, position: { x: 0, y: 0 }, data: {} }) as unknown as CanvasNode
+  const t = (id: string, parentId?: string): CanvasNode =>
+    ({ id, type: 'terminal', parentId, position: { x: 0, y: 0 }, data: {} }) as unknown as CanvasNode
+
+  it('returns the frame first, then its children', () => {
+    const nodes = [g('g1'), t('a', 'g1'), t('b', 'g1'), t('loose')]
+    const ids = groupSubtreeIds(nodes, 'g1')
+    expect(ids[0]).toBe('g1')
+    expect(new Set(ids)).toEqual(new Set(['g1', 'a', 'b']))
+  })
+
+  it('walks NESTED frames to any depth — a flat parentId filter would orphan the grandchildren', () => {
+    // The case that matters in practice: a `verify` panel wrapped in an outer frame. Closing the
+    // outer one must not leave four reviewer sessions behind with no frame.
+    const nodes = [g('outer'), g('inner', 'outer'), t('deep', 'inner'), t('mid', 'outer')]
+    expect(new Set(groupSubtreeIds(nodes, 'outer'))).toEqual(
+      new Set(['outer', 'inner', 'deep', 'mid'])
+    )
+  })
+
+  it('never reaches outside the frame', () => {
+    const nodes = [g('g1'), t('in', 'g1'), g('g2'), t('other', 'g2')]
+    expect(groupSubtreeIds(nodes, 'g1')).toEqual(['g1', 'in'])
+  })
+
+  it('an empty frame is just itself', () => {
+    expect(groupSubtreeIds([g('g1'), t('loose')], 'g1')).toEqual(['g1'])
+  })
+
+  it('terminates on a parentId cycle instead of hanging', () => {
+    // reparentNode refuses to create one; a hand-edited project.json can still contain one, and this
+    // walk runs on whatever is loaded.
+    const nodes = [g('a', 'b'), g('b', 'a')]
+    expect(groupSubtreeIds(nodes, 'a').length).toBeLessThanOrEqual(2)
+  })
+
+  it('an unknown id yields just that id, so a stale click deletes nothing extra', () => {
+    expect(groupSubtreeIds([g('g1')], 'gone')).toEqual(['gone'])
   })
 })

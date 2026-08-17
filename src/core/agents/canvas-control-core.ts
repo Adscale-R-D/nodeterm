@@ -239,7 +239,8 @@ export function buildCanvasControlInstructions(shimPath: string): string {
     '  the user to confirm deletion.',
     '- `branch --node <id>` — branch a Claude node\'s conversation (Claude nodes only).',
     '- `rename --node <id> --title "New Name"` — rename any node (terminals, groups, stickies…).',
-    '- `write --node <id> --text "..."` / `close --node <id>` — type into / close a node.',
+    '- `write --node <id> --text "..."` / `close --node <id>` — type into / close a node. Closing a',
+    '  GROUP closes everything inside it too; `ungroup` removes just the frame and keeps the nodes.',
     '  Both ask the user to confirm a dialog and may be denied.',
     '- `send --node <id> --text "..."` / `reply --node <id> --text "..."` — deliver a message into',
     '  another AGENT node in this project (no confirm dialog: verified-only, gated by the project\'s',
@@ -511,7 +512,10 @@ Verbs:
   branch and a new node opens resuming the original. Target must be a Claude agent node.
 - \`rename --node <id> --title "New Name"\` — rename any node (terminals, groups, stickies…).
 - \`write --node <id> --text "..."\` — type text into a terminal node. (Asks the user to confirm.)
-- \`close --node <id>\` — close a node. (Asks the user to confirm.)
+- \`close --node <id>\` — close a node. (Asks the user to confirm.) Given a GROUP id it closes the
+  frame AND every node inside it, to any depth — so a panel or team you wrapped in a frame is torn
+  down in one call, and the confirm dialog names how many sessions that ends. Use \`ungroup\` when you
+  want the frame gone but the work kept.
 - \`send --node <id> --text "..."\` — deliver a message INTO another agent node's session, in this
   project only. No confirm dialog; instead it is verified-only, gated by the project's
   agent-messaging switch (Settings → Agents, OFF by default), and rate-limited. Delivery lands when

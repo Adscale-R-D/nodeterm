@@ -634,6 +634,18 @@ session.
   outer frame cannot swallow the clicks meant for a frame drawn inside it. The
   `NodeResizer` line is hidden (`lineStyle` transparent) so it can't draw a sharp-cornered
   box; the selection ring is a `box-shadow` instead, which follows the same `border-radius`.
+  **A frame has TWO outcomes and they must stay distinguishable** (2026-08-17): `ungroup` removes
+  the frame and KEEPS the nodes; the `×` **closes the frame and everything inside it, to any depth**
+  (`groupSubtreeIds`, confirm-gated, then the ordinary `deleteNodes` — so tmux sessions really end).
+  Before this, BOTH the `×` and the context menu's "Delete (keeps nodes)" called `ungroup`: two
+  controls per surface, one behaviour, and no way at all to close a frame with its contents — a
+  four-reviewer `verify` panel had to be dismantled node by node. The agent-facing `close --node
+  <groupId>` closes the subtree for the same reason (the frame is the unit of work for `spawn-team` /
+  `verify`), and its confirm names how many sessions that ends. **`deleteNodes` itself still FREES
+  children** — do not "fix" that instead: it is the contract `releaseWorktreeBinding` depends on (a
+  dropped binding strips the dead cwd off surviving children), and box-selection already includes the
+  children it deletes. The subtree walk is pure and cycle-safe because a hand-edited `project.json`
+  can contain a parent cycle that `reparentNode` would refuse to create.
 - **editor** (`EditorNode.tsx`) — Monaco code editor for a `filePath`; reads/writes via
   `fs:read`/`fs:write`, auto-detects language from the path, ⌘S saves, dirty dot. A
   **Preview / Edit** toggle (or ⌘M while hovered) renders the live content as markdown.

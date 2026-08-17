@@ -68,7 +68,7 @@ import {
   WEBGL_GESTURE_SETTLE_MS
 } from '../terminal/webgl-budget'
 import { StickyNode } from '../nodes/StickyNode'
-import { GroupNode, setWorktreeActionHandler } from '../nodes/GroupNode'
+import { GroupNode, setGroupCloseHandler, setWorktreeActionHandler } from '../nodes/GroupNode'
 import { LazyEditorNode, LazyDiffNode } from '../nodes/lazyMonacoNodes'
 import { DinoNode } from '../nodes/DinoNode'
 import BrowserNode from '../nodes/BrowserNode'
@@ -385,6 +385,7 @@ import {
   resolveNewNodeAccount,
   accountsForProject,
   sshAccountsHint,
+  groupSubtreeIds,
   ungroupNodes,
   type CanvasNode
 } from '../state/workspace'
@@ -4504,6 +4505,56 @@ export function Canvas() {
     return () => setWorktreeActionHandler(null)
   }, [onWorktreeAction])
 
+  /**
+   * The frame's `×`: close the frame AND everything inside it, to any depth.
+   *
+   * It used to call `ungroup`, identically to the button beside it — so a frame could not be closed
+   * with its contents at all, and a four-reviewer `verify` panel had to be dismantled node by node.
+   *
+   * Routed through the SAME confirm + `deleteNodes` as the Delete key rather than a shortcut of its
+   * own, because everything that makes deletion safe lives there: `transport.destroy` (a tmux session
+   * is permanent), `disposeTerminalOnUnmount` (dispose, never park), the agent-status cleanup, and
+   * `releaseWorktreeBinding` for a bound frame. The one thing added here is honesty in the prompt: it
+   * counts the SESSIONS separately from the frames, because "delete 7 nodes" reads very differently
+   * from "5 sessions will end" when three of those nodes are just frames.
+   */
+  const closeGroupWithChildren = useCallback(
+    (groupId: string) => {
+      const ids = groupSubtreeIds(nodesRef.current, groupId)
+      const inside = ids.slice(1)
+      // A frame with nothing in it needs no ceremony — there is no work to lose.
+      if (inside.length === 0) {
+        deleteNodes(ids)
+        return
+      }
+      const label = (nodesRef.current.find((n) => n.id === groupId)?.data.title as string) || 'group'
+      const sessions = nodesRef.current.filter(
+        (n) => ids.includes(n.id) && n.type === 'terminal'
+      ).length
+      const frames = inside.length - sessions
+      const parts = [
+        `${sessions} ${sessions === 1 ? 'session' : 'sessions'}`,
+        ...(frames > 0 ? [`${frames} other ${frames === 1 ? 'node' : 'nodes'}`] : [])
+      ]
+      setConfirm({
+        message:
+          `Close "${label}" and everything inside it (${parts.join(' + ')})?` +
+          (sessions > 0 ? ' Those terminal sessions will end permanently.' : '') +
+          ' Use "ungroup" instead to remove just the frame and keep the nodes.',
+        onConfirm: () => {
+          deleteNodes(ids)
+          setConfirm(null)
+        }
+      })
+    },
+    [deleteNodes]
+  )
+
+  useEffect(() => {
+    setGroupCloseHandler(closeGroupWithChildren)
+    return () => setGroupCloseHandler(null)
+  }, [closeGroupWithChildren])
+
   // Same reason as worktreeControlRef below: the agent-control handler needs the CURRENT
   // travelToProject (defined far below, after the project actions it composes).
   const travelToProjectRef = useRef<(projectId: string) => void>(() => {})
@@ -5715,18 +5766,22 @@ export function Canvas() {
                 onClick: () => openWorktreeDialog(groupId)
               } as MenuItem
             ]),
-        { label: 'Ungroup', icon: <IconUngroup />, onClick: () => ungroup(groupId) },
+        // The frame's two outcomes, and they must be distinguishable. Both of these rows used to
+        // call `ungroup`: "Delete (keeps nodes)" was a second name for the row above it, so the menu
+        // offered no way to close a frame with its contents — same defect as the frame's own `×`.
+        { label: 'Ungroup (keeps nodes)', icon: <IconUngroup />, onClick: () => ungroup(groupId) },
         {
-          label: 'Delete (keeps nodes)',
+          label: 'Close group and its nodes',
           icon: <IconTrash />,
           danger: true,
-          onClick: () => ungroup(groupId)
+          onClick: () => closeGroupWithChildren(groupId)
         }
       ])
     },
     [
       setNodesColor,
       ungroup,
+      closeGroupWithChildren,
       groupHasWorktree,
       openWorktreeDialog,
       isSshProject,
@@ -7626,9 +7681,23 @@ export function Canvas() {
               reply({ ok: false, error: 'a confirmation is already pending — try again' })
               return
             }
-            // Destructive → confirm. Replies on confirm AND cancel.
+            // A FRAME closes with its contents, matching what its `×` and its context menu do. An
+            // agent that wraps a fan-out in a group (spawn-team, verify) treats that frame as the unit
+            // of work, so closing it and leaving four reviewer sessions running was never the intent —
+            // and `deleteNodes` alone would do exactly that (it frees children by design).
+            const closeIds =
+              nodesRef.current.find((n) => n.id === args.node)?.type === 'group'
+                ? groupSubtreeIds(nodesRef.current, args.node)
+                : [args.node]
+            const closeInside = closeIds.length - 1
+            // Destructive → confirm. Replies on confirm AND cancel. The count is IN the prompt: the
+            // user is approving the sessions, not the frame.
             setConfirm({
-              message: `Agent "${srcTitle}" wants to close node ${args.node}. Close it?`,
+              message:
+                `Agent "${srcTitle}" wants to close ${args.node}` +
+                (closeInside > 0
+                  ? ` and the ${closeInside} node(s) inside it. Any terminal sessions will end. Close them?`
+                  : '. Close it?'),
               requestedBy: srcTitle,
               confirmLabel: 'Close',
               danger: true,
@@ -7636,11 +7705,17 @@ export function Canvas() {
                 setConfirm(null)
                 // Canonical teardown: deleteNodes() destroys the local tmux session (remote-guarded),
                 // drops persisted agentStatus, and reparents any group children. Don't hand-roll it.
-                deleteNodes([args.node])
+                deleteNodes(closeIds)
                 setControlEdges((es) =>
-                  es.filter((e) => e.source !== args.node && e.target !== args.node)
+                  es.filter((e) => !closeIds.includes(e.source) && !closeIds.includes(e.target))
                 )
-                reply({ ok: true, message: `closed ${args.node}` })
+                reply({
+                  ok: true,
+                  message:
+                    closeInside > 0
+                      ? `closed ${args.node} and ${closeInside} node(s) inside it`
+                      : `closed ${args.node}`
+                })
               },
               onCancel: () => reply({ ok: false, error: 'denied by user' })
             })

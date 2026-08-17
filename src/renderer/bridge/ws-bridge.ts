@@ -588,6 +588,32 @@ export function buildAgentApi(
 }
 
 /**
+ * The `contextLink` namespace — REAL, not a stub, and it was the last thing keeping canvas control
+ * from being whole in the browser.
+ *
+ * `info()` answers one field, the path of the `context.sh` shim, and core has always served it
+ * (`initContextLink` → `platform().handle(IPC.contextLinkInfo)`, booted here by
+ * `src/server/context-link.ts`). The browser stubbed it as `E_UNSUPPORTED` anyway, which took down
+ * two things that had nothing else wrong with them: the connect-time discovery note for
+ * codex/gemini sessions, and the `verify` VERB — a review panel's brief tells each reviewer how to
+ * read the target's context, so a rejected `info()` aborted the whole panel and the caller fell back
+ * to opening a bare reviewer with no context link. Reported from a live session, 2026-08-17.
+ *
+ * `setLinks` deliberately stays with the stubs' no-op: the server derives the link map from the
+ * persisted `bridges[]` of every canvas (`deriveLinkMap`), because with no browser attached there is
+ * nobody to push it — so a push from here would be a second, weaker source of the same truth.
+ */
+export function buildContextLinkApi(client: RpcClient, stub: NodeTerminalApi['contextLink']):
+  Pick<NodeTerminalApi, 'contextLink'> {
+  return {
+    contextLink: {
+      ...stub,
+      info: () => client.request(IPC.contextLinkInfo) as Promise<{ shimPath: string }>
+    }
+  }
+}
+
+/**
  * Build the `canvas` namespace over an RpcClient: a cast out (`canvas:mut`) and a subscription in on
  * the same channel. The server stamps each mutation with the total order (`seq`) and reflects it to
  * every client, us included — our own frame coming back is the ACK that carries our place in that
@@ -893,6 +919,9 @@ export async function installWsBridge(): Promise<boolean> {
     ...buildFilesApi(client),
     ...buildAgentApi(client),
     ...buildCanvasApi(client),
+    // Only in the BROWSER assembly, never the relay one: the shim path this returns is a path on
+    // the machine running core, which over a relay is somebody else's disk.
+    ...buildContextLinkApi(client, stubApi.contextLink),
     ...buildPresenceApi(client),
     ...buildSpeechApi(client),
     ...buildUsageApi(client),

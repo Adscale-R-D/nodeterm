@@ -227,6 +227,15 @@ export function buildStubApi(): Omit<
       releaseOthers: U('license.releaseOthers'),
       onChange: noopUnsub
     },
+    // Superseded by the real WS-backed namespace in ws-bridge (`buildContextLinkApi`): core's
+    // `initContextLink` registers `context-link:info` through `platform().handle`, and
+    // `src/server/context-link.ts` boots it, so the server has always served this — only the
+    // browser refused it. Kept to satisfy `satisfies NodeTerminalApi`, and still the RELAY answer
+    // (a shim path on the host is not the path in the guest's own sessions).
+    //
+    // `setLinks` stays a silent no-op on BOTH surfaces, and that is not a gap: the server derives
+    // the same link map from the persisted `bridges[]` of every canvas (`deriveLinkMap`), because
+    // headless there may be no browser attached to push it at all.
     contextLink: {
       setLinks: pnoop,
       info: U('contextLink.info')

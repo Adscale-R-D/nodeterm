@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { buildAgentApi } from './ws-bridge'
+import { buildAgentApi, buildContextLinkApi } from './ws-bridge'
 import { IPC } from '../../shared/ipc'
 
 function fakeClient() {
@@ -53,6 +53,31 @@ describe('buildAgentApi', () => {
     expect(c.casts).toEqual([
       { method: IPC.agentControlResult, args: [{ requestId: 'r-1', ok: true, message: 'opened' }] }
     ])
+  })
+
+  it('contextLink.info is a real request, because the `verify` verb depends on it', () => {
+    // Reported from a live session: with `info` stubbed as E_UNSUPPORTED, `verify` could not build
+    // a reviewer's brief (it needs the shim path so each reviewer can read the target's context),
+    // so the whole review panel aborted and the caller fell back to a bare reviewer with no link.
+    // core has always served this channel; only the browser refused it.
+    const c = fakeClient()
+    const { contextLink } = buildContextLinkApi(c as never, {
+      setLinks: async () => {},
+      info: async () => {
+        throw new Error('the stub must not survive')
+      }
+    })
+    void contextLink.info()
+    expect(c.requests).toEqual([{ channel: IPC.contextLinkInfo, arg: undefined }])
+  })
+
+  it('leaves setLinks alone — the server derives the map from persisted bridges', () => {
+    // Not an oversight: with no browser attached there is nobody to push a link map, so the server
+    // deriving it from `bridges[]` is the authority. A push from here would be a weaker second one.
+    const c = fakeClient()
+    const stub = { setLinks: async () => {}, info: async () => ({ shimPath: '/x' }) }
+    const { contextLink } = buildContextLinkApi(c as never, stub)
+    expect(contextLink.setLinks).toBe(stub.setLinks)
   })
 
   it('ackDone fires a fire-and-forget request on the ack-done channel', () => {

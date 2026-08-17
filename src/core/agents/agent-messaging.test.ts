@@ -16,14 +16,14 @@ import {
   createDeliveryQueue,
   type AgentMessagingDeps
 } from './agent-messaging'
-import type { BoardLogEntry } from '../shared/types'
-import { RETRYABLE, type AgentMessageOutcome } from '../core/agents/agent-message-decide'
-import { resetMessageFlow, FANOUT_PER_TURN } from '../core/agents/agent-message-flow'
-import { NOTIFY_BODY } from '../shared/agents/agent-messaging'
-import { resetAgentMessageTraceForTests } from '../core/agents/agent-message-trace'
-import { MANAGED_SCRIPT_REVISION } from '../core/agents/hooks/managed-script'
-import { DeliveryQueue } from '../core/agents/delivery-queue'
-import type { MirrorEntry } from '../core/agent-status-mirror'
+import type { BoardLogEntry } from '../../shared/types'
+import { RETRYABLE, type AgentMessageOutcome } from './agent-message-decide'
+import { resetMessageFlow, FANOUT_PER_TURN } from './agent-message-flow'
+import { NOTIFY_BODY } from '../../shared/agents/agent-messaging'
+import { resetAgentMessageTraceForTests } from './agent-message-trace'
+import { MANAGED_SCRIPT_REVISION } from './hooks/managed-script'
+import { DeliveryQueue } from './delivery-queue'
+import type { MirrorEntry } from '../agent-status-mirror'
 
 const idle: MirrorEntry = {
   state: 'done',

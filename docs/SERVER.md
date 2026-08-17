@@ -491,10 +491,10 @@ Consequences worth knowing:
   outage. `browser` additionally names why it is **structural** rather than unimplemented —
   a browser node on this edition renders in the **viewer's own** browser tab, which this
   server has no debugger for, and never can. See `src/server/control-unsupported.ts`.
-  The agent-messaging verbs (`send`/`reply`/`notify`) are additionally **verified-only at
-  the route** on every edition, so on this one an unverified caller gets the flat 403
-  messaging refusal and a verified caller gets the same
-  `control-unsupported-on-this-edition` — both terminal, neither an invitation to retry.
+  The agent-messaging verbs (`send`/`reply`/`notify`) are **verified-only at the route** on
+  every edition, so an unverified caller gets the flat 403 messaging refusal here as well;
+  a verified one now reaches the real delivery path (see the agent-messaging note below),
+  where the per-project capability grant — off by default — is the next gate.
 - The **`ptyDestroy` tail-teardown** — *resolved in Phase 3c.* Phase 3b left this skipped
   (agent tails self-cleared only on `SessionEnd`, so a node closed *without* one left an
   idle file-tail); the server now untracks agent tails on node close, at desktop parity.
@@ -533,11 +533,25 @@ the browser owes the two preload members (`buildAgentApi` in `ws-bridge.ts`). Th
 - **The request is unicast to ONE tab** (the last attached), never broadcast: three tabs each
   performing `open-claude` would be three nodes and a rev fight. `canvas-sync` reflects the acting
   tab's mutation to its peers, exactly as it does for a human's edit.
-- **Still permanently refused here** (`EDITION_UNSUPPORTED_VERBS`): `browser` (no `<webview>`, no
-  `webContents`, no CDP on this host — a browser node renders in the *viewer's* own tab) and
-  `send`/`reply`/`notify`, because agent messaging lives in `src/main/agent-messaging.ts` with no core
-  service behind it. Both are refused **in front of** the bridge, so a tabless host still hears the
-  honest "do not retry" instead of a retryable no-UI message.
+- **Still permanently refused here** (`EDITION_UNSUPPORTED_VERBS`): just `browser` — no `<webview>`,
+  no `webContents`, no CDP on this host, since a browser node renders in the *viewer's* own tab. It is
+  refused **in front of** the bridge, so a tabless host hears the honest "do not retry" rather than a
+  retryable no-UI message. The refusal names the VERB, not the feature: it used to say "canvas control
+  is not available on this edition", which became a lie the moment most verbs worked, and cost one
+  agent a round trip asking its user to flip an unrelated setting.
+
+**Agent messaging (`send` / `reply` / `notify`) works here too.** It was on the refused list because
+`agent-messaging.ts` lived in `src/main` — but nothing in it needed Electron (every import was
+`core`/`shared`, and its whole surface is an injected deps object); only its *wiring* sat in main's
+boot. Both shells now boot `core/agents/agent-messaging-boot.ts`, which builds the deps, arms the
+deliver-on-idle queue and registers the handler. Every gate is unchanged and lives inside that
+factory: the per-project capability **grant** (OFF by default — the strict `=== true` flag in the
+git-shared `project.json` *and* this machine's recorded `kept` ack), the runtime **pane-ownership**
+check, the flow budgets, and hook-server's verified-only route. Two shell-specific answers:
+`isRemoteNode` is a constant `false` (SSH projects are desktop-only here, so no pane is on another
+machine), and the queue-flush leg is fed through `wireAgentStatus`'s `onMessagingEvent` — without it a
+message to a *busy* target is answered `queued` and waits forever, since the flush trigger is that
+target's own `done` event. `agent-messaging-both-shells.test.ts` pins both legs at source level.
 
 The **discovery** half ships too: `initCanvasControl()` runs at boot, so the shim lands in the data
 dir and the skill / instruction blocks land in the agents' config dirs. Wiring the verbs without this

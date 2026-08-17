@@ -22,20 +22,20 @@ import {
   messagingEnabledVia,
   type AgentMessagingDeps
 } from './agent-messaging'
-import type { CapabilityAckMap } from '../core/project-capability-consent'
-import { resetMessageFlow } from '../core/agents/agent-message-flow'
+import type { CapabilityAckMap } from '../project-capability-consent'
+import { resetMessageFlow } from './agent-message-flow'
 import {
   recordFreshSpawnOwner,
   paneOwnerProject,
   resetPaneOwnershipForTests
-} from '../core/agents/pane-ownership'
-import { resetAgentMessageTraceForTests } from '../core/agents/agent-message-trace'
-import { MANAGED_SCRIPT_REVISION } from '../core/agents/hooks/managed-script'
-import type { MirrorEntry } from '../core/agent-status-mirror'
-import { initPlatform, resetPlatformForTests } from '../core/platform'
-import { fakePlatform } from '../core/platform-fake'
-import { WorkspaceStore } from '../core/workspace-store'
-import type { Project, Workspace } from '../shared/types'
+} from './pane-ownership'
+import { resetAgentMessageTraceForTests } from './agent-message-trace'
+import { MANAGED_SCRIPT_REVISION } from './hooks/managed-script'
+import type { MirrorEntry } from '../agent-status-mirror'
+import { initPlatform, resetPlatformForTests } from '../platform'
+import { fakePlatform } from '../platform-fake'
+import { WorkspaceStore } from '../workspace-store'
+import type { Project, Workspace } from '../../shared/types'
 
 const idle: MirrorEntry = {
   state: 'done',

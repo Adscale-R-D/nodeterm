@@ -415,12 +415,13 @@ export function buildStubApi(): Omit<
     // missing, so check both files.
     onAgentControl: noopUnsub,
     sendAgentControlResult: noop,
-    // Messaging never runs in the browser. It used to be UNREACHABLE here (`onAgentControl` was inert
-    // on every browser surface); the Server Edition now dispatches control for real, so a
-    // `send`/`reply`/`notify` verb does arrive and this is what answers it — at the layer that knows
-    // the reason. Agent messaging lives in `src/main/agent-messaging.ts`: no core service, no server
-    // handler, nothing on this edition to deliver through. Keep it TERMINAL ("Do not retry") — the
-    // bridge's own no-UI refusal is the retryable one, and an agent must be able to tell them apart.
+    // Superseded in the BROWSER by `buildAgentApi`'s real implementation: agent messaging moved to
+    // core (`agents/agent-messaging-boot.ts`) and both shells boot it, so the Server Edition delivers
+    // for real under the same gates as the desktop. This stays as the RELAY answer — a delivery over
+    // the relay would type into a pane on the HOST while the gate chain (pane ownership, the
+    // project's capability grant) was evaluated against the guest's own stores — and as the honest
+    // refusal for any surface with no messaging service behind it. Terminal ("Do not retry") because
+    // no setting on the reading machine can change it.
     agentMessage: {
       deliver: async () => ({
         ok: false as const,

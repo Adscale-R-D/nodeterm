@@ -25,15 +25,7 @@ import {
   type BrowserSurfaceKind
 } from './browser-guest-registry'
 import { appendBoardLogVia, registerBoardLogHandlers, type BoardLogRoute } from '../core/board-log-handlers'
-import {
-  createDeliveryQueue,
-  deliverFromControl,
-  isDeliverRequest,
-  messagingEnabledVia,
-  onMessagingAgentEvent,
-  setDeliveryQueue,
-  type AgentMessagingDeps
-} from './agent-messaging'
+import { initAgentMessaging } from '../core/agents/agent-messaging-boot'
 import type { RemoteLogExec } from '../core/board-log'
 import { boardLogRemotePath } from '../core/board-log'
 import { PtyManager } from '../core/pty-manager'
@@ -1134,41 +1126,22 @@ app.whenReady().then(async () => {
   // Agent messaging (the `send`/`reply` control verbs). Canvas.tsx forwards the validated verb
   // here; everything that authorizes or performs the delivery reads MAIN's stores. See
   // src/main/agent-messaging.ts for the whole map.
-  const messagingDeps: AgentMessagingDeps = {
-    paneOwner: (id) => ptyManager.paneOwner(id),
-    sendFramedPayload: (id, payload) => ptyManager.sendFramedPayload(id, payload),
-    hasLiveSession: (id) => ptyManager.hasLiveSession(id),
+  // Agent messaging: deps, the deliver-on-idle queue and the `agent-message:deliver` handler, all
+  // from the ONE core factory both shells use (core/agents/agent-messaging-boot.ts). This module was
+  // desktop-only for no reason but where its wiring sat — every dependency it has is core or shared.
+  //
+  // `isRemoteNode` is the one genuinely shell-specific answer: only the desktop has SSH projects.
+  //
+  // `wake`/`isHibernated` remain RENDERER state (Eco lives in `useAgentStatus`, the wake registry in
+  // the renderer's agent-restart) with no main-side signal: the BUSY-target leg is fully wired, the
+  // hibernated leg's renderer->main wake is a recorded residual. Unchanged by the move.
+  const messaging = initAgentMessaging({
+    ptyManager,
     projects: () => workspaceStore.persistedCanvases(),
+    settings: { customAgents: () => settingsStore.get().customAgents },
+    appendBoardLog: (projectId, entry) => appendBoardLogVia(boardLogRouter, projectId, entry),
     isRemoteNode: (id) => !!ptyManager.sshRemoteForNode(id),
-    // GLOBAL CONSTRAINT 11: every delivery path is gated behind the per-project switch, OFF by
-    // default. The switch is the `agentMessaging` capability GRANT: the strict `=== true` flag
-    // in the hostile git-shared project.json AND this machine's recorded 'kept' answer to the
-    // clone notice (projectCapabilityGrantedFor — never the raw file bit). Read per call off
-    // the store's index, so a decline or an off-toggle refuses the very next delivery.
-    messagingEnabled: messagingEnabledVia((id) => workspaceStore.capabilityProjectFor(id)),
-    // Runtime pane ownership: which project actually SPAWNED the target's pane this run
-    // (core/agents/pane-ownership.ts). The gate trusts this over the attacker-writable store to
-    // decide whose grant applies; unproven ⇒ refused (PR #237 fix round 2).
-    paneOwnerProject: (id) => paneOwnerProject(id),
-    customAgents: () => settingsStore.get().customAgents,
-    appendBoardLog: (projectId, entry) => appendBoardLogVia(boardLogRouter, projectId, entry)
-  }
-  // Deliver-on-idle (PR 7): the process-lifetime bounded queue, built by the service factory so its
-  // trace + sender-facing legs are wired (and unit-tested) in one place. Its `deliver` is
-  // `runDelivery` against these SAME deps, so a flush re-runs the whole gate chain (ownership, grant,
-  // flow) against live state — the flush-time re-validation. The flush trigger is the target's own
-  // `done` event, already fed to `onMessagingAgentEvent` below. A TTL expiry is board-logged to the
-  // sender's project AND held in the trace ring (never a silent drop). `wake`/`isHibernated` are
-  // RENDERER state (Eco lives in `useAgentStatus`, the wake registry in the renderer's
-  // agent-restart) with no main-side signal today: the BUSY-target leg is fully wired here, and the
-  // hibernated leg's renderer→main wake is an explicitly-recorded residual (see the PR body).
-  messagingDeps.queue = createDeliveryQueue(messagingDeps)
-  setDeliveryQueue(messagingDeps.queue)
-  ipcMain.handle(IPC.agentMessageDeliver, async (_e, raw: unknown) => {
-    if (!isDeliverRequest(raw))
-      return { ok: false, error: 'malformed agent-message request. Do not retry.' }
-    const { reply } = await deliverFromControl(raw, messagingDeps)
-    return reply
+    capabilityProjectFor: (id) => workspaceStore.capabilityProjectFor(id)
   })
 
   ipcMain.handle(IPC.dialogSelectFolder, async () => {
@@ -1868,7 +1841,7 @@ app.whenReady().then(async () => {
     notchHudOnAgentEvent(enriched)
     // Agent messaging taps the SAME stream: the sender's newTurn resets its fan-out budget, and
     // an open delivery receipt watch is satisfied by the target's verified advance.
-    onMessagingAgentEvent(enriched)
+    messaging.onAgentEvent(enriched)
   }
   hookServer.setListener(emitAgentStatus)
   // Deterministic hook-reply approvals (docs/hook-reply-approvals.md): the canvas Approve/Deny

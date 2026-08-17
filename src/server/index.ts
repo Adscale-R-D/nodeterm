@@ -30,7 +30,7 @@ import {
   ModelGatewayCredentialService
 } from '../core/model-gateway-credentials'
 import { DownloadTickets } from '../core/download-tickets'
-import { registerBoardLogHandlers, type BoardLogRoute } from '../core/board-log-handlers'
+import { appendBoardLogVia, registerBoardLogHandlers, type BoardLogRoute } from '../core/board-log-handlers'
 import { LogBuffer } from '../core/log-buffer'
 import { installLogSink } from '../core/log-sink'
 import { registerLogHandlers } from '../core/log-handlers'
@@ -38,6 +38,7 @@ import os from 'os'
 import { hookServer } from '../core/agents/hook-server'
 import { initCanvasControlBridge } from '../core/agents/canvas-control-bridge'
 import { initCanvasControl } from '../core/agents/canvas-control-install'
+import { initAgentMessaging } from '../core/agents/agent-messaging-boot'
 import { withEditionRefusals } from './control-unsupported'
 import { loadOrCreateNodeAuthSecret } from '../core/agents/node-auth-secret'
 import { initNodeTokens, refreshNodeTokens } from '../core/agents/node-token-service'
@@ -281,11 +282,33 @@ export async function startServer(
   // Board-log: same CorePlatform registrar as desktop, but the Server Edition has no SSH projects
   // (terminals are local), so the router only ever resolves a local folder cwd or unsupported —
   // an SSH-ref project answers `{ entries: [], unsupported: true }` (v1: no remote board log here).
-  registerBoardLogHandlers(platform, {
+  // Named, because agent messaging appends through the same router (`appendBoardLogVia`) — a
+  // delivery is board-logged like any other card event.
+  const boardLogRouter = {
     route: (projectId: string): BoardLogRoute => {
       const cwd = workspaceStore.localCwdForProject(projectId)
       return cwd ? { kind: 'local', cwd } : { kind: 'unsupported' }
     }
+  }
+  registerBoardLogHandlers(platform, boardLogRouter)
+
+  // Agent messaging (`send`/`reply`/`notify`), from the SAME core factory the desktop boots — the
+  // module was never Electron-dependent, only its wiring was, so this edition refused the three verbs
+  // by name and an author↔reviewer handoff had to route through the human.
+  //
+  // `isRemoteNode` is a constant `false`, and that is COMPLETE here rather than lazy: SSH projects are
+  // a desktop-only concept on this edition, so no node's pane is ever on another machine.
+  //
+  // Every gate the desktop applies applies here, because they live inside the factory: the per-project
+  // capability GRANT (OFF by default), the runtime pane-ownership check, flow budgets, and the
+  // verified-only route gate in hook-server. Nothing is loosened to make this edition work.
+  const messaging = initAgentMessaging({
+    ptyManager,
+    projects: () => workspaceStore.persistedCanvases(),
+    settings: { customAgents: () => settingsStore.get().customAgents },
+    appendBoardLog: (projectId, entry) => appendBoardLogVia(boardLogRouter, projectId, entry),
+    isRemoteNode: () => false,
+    capabilityProjectFor: (id) => workspaceStore.capabilityProjectFor(id)
   })
 
   // Debug log ring (issue #78) — same core registrar as desktop. Headless is where a swallowed
@@ -351,7 +374,12 @@ export async function startServer(
   // missing/corrupt file simply yields no block.
   const installMeta = readInstallMeta(config.dataDir)
   setMirrorServerProvider(() => installMeta)
-  const { contextTail, geminiContextTail } = wireAgentStatus(platform)
+  // `onMessagingEvent` is the queue-flush leg: without it a delivery to a BUSY target is answered
+  // `queued` and then waits forever, because the flush trigger is the target's own `done` event.
+  // Desktop feeds the same enriched event from its raw listener.
+  const { contextTail, geminiContextTail } = wireAgentStatus(platform, {
+    onMessagingEvent: messaging.onAgentEvent
+  })
   // The ⌘M chat view + the find-bar's transcript index. Registered HERE rather than with the rest
   // of the handlers because the hook-fed path authority is the tail created just above. No remote
   // leg: the Server Edition runs ON the host whose transcripts it reads, so local resolution is

@@ -555,6 +555,7 @@ export function buildAgentApi(
   | 'ackDone'
   | 'onAgentControl'
   | 'sendAgentControlResult'
+  | 'agentMessage'
 > {
   return {
     onAgentStatus: (listener) => client.subscribe(IPC.agentStatus, listener as Listener),
@@ -569,6 +570,18 @@ export function buildAgentApi(
     // converged — the same path a human's edit takes.
     onAgentControl: (listener) => client.subscribe(IPC.agentControl, listener as Listener),
     sendAgentControlResult: (payload) => client.cast(IPC.agentControlResult, payload),
+    // Agent messaging, REAL here too. It was refused on this edition because `agent-messaging.ts`
+    // lived in `src/main` — not because it needed Electron (every import was core/shared) but because
+    // its WIRING sat inline in main's boot. Both shells now boot the same core factory
+    // (`initAgentMessaging`), so this is a plain request to the same handler the desktop registers.
+    // Every gate still applies, unchanged and inside core: the per-project capability GRANT (off by
+    // default), the runtime pane-ownership check, flow budgets, and hook-server's verified-only route.
+    agentMessage: {
+      deliver: (req) =>
+        client.request(IPC.agentMessageDeliver, req) as ReturnType<
+          NodeTerminalApi['agentMessage']['deliver']
+        >
+    },
     // Host swept a phone read-ack → drop this browser canvas's unread flag (external clear, no re-ack).
     onUnreadClear: (listener) => client.subscribe(IPC.agentUnreadClear, listener as Listener),
     onSubagentActivity: (listener) =>

@@ -43,6 +43,16 @@ export interface WireAgentStatusOptions {
   hooks?: HookLike
   subagentTail?: SubagentTail
   contextTail?: ContextTail
+  /**
+   * Agent messaging's event sink (`initAgentMessaging(...).onAgentEvent`). Every normalized event
+   * must reach it or the deliver-on-idle QUEUE never flushes on this shell: a message to a busy
+   * target is answered `queued` and then waits forever, because the flush trigger is the target's
+   * own `done` event. Desktop feeds it from its raw listener in `src/main/index.ts`; this is the
+   * matching leg, and `agent-messaging-both-shells.test.ts` asserts neither shell drops it.
+   *
+   * Optional so the existing tests (which fire events with no messaging wired) are unchanged.
+   */
+  onMessagingEvent?(event: NormalizedAgentEvent): void
 }
 
 /**
@@ -146,6 +156,14 @@ export function wireAgentStatus(
     // keys off the same single source of truth as the mirror/phone. Then broadcast the enriched one.
     const enriched = recordAgentEvent(e) ?? e
     platform.broadcast(IPC.agentStatus, enriched)
+    // Agent messaging's queue flush — the SAME enriched event the desktop hands it, so a `queued`
+    // delivery lands the moment its target goes idle. Fail-soft: a throw here must not cost the
+    // broadcast above, which every badge on every attached tab depends on.
+    try {
+      opts.onMessagingEvent?.(enriched)
+    } catch (err) {
+      console.warn('[nodeterm-server] messaging event sink threw', err)
+    }
   })
 
   // Security: hook POSTs can be forged, so a forged POST could set transcript_path to an

@@ -18,40 +18,40 @@
  * - **Mobile (phone):** never a sender (it drives canvas control over relay→IPC, not `/control/*`);
  *   a phone-spawned node is a valid TARGET and resolves like any other store node.
  */
-import type { NormalizedAgentEvent } from '../shared/agents/normalize'
-import { binariesFor, type PaneOwner } from '../shared/agents/pane-owner-predicate'
-import type { BoardLogEntry } from '../shared/types'
+import type { NormalizedAgentEvent } from '../../shared/agents/normalize'
+import { binariesFor, type PaneOwner } from '../../shared/agents/pane-owner-predicate'
+import type { BoardLogEntry } from '../../shared/types'
 import type {
   AgentMessageDeliverRequest,
   AgentMessageReply
-} from '../shared/agents/agent-messaging'
-import { AGENT_MESSAGE_VERBS, NOTIFY_BODY } from '../shared/agents/agent-messaging'
+} from '../../shared/agents/agent-messaging'
+import { AGENT_MESSAGE_VERBS, NOTIFY_BODY } from '../../shared/agents/agent-messaging'
 import {
   deliverAgentMessage,
   type DeliveryDeps,
   type ReceiptEvent
-} from '../core/agents/agent-message'
+} from './agent-message'
 import {
   RETRYABLE,
   type AgentMessageOutcome,
   type NotPermittedReason
-} from '../core/agents/agent-message-decide'
-import { noteNewTurn, noteSent, reserveFlow } from '../core/agents/agent-message-flow'
-import { recordDelivery } from '../core/agents/agent-message-trace'
-import { resolveDeliveryScope, scopeRefusal } from '../core/agents/agent-message-scope'
+} from './agent-message-decide'
+import { noteNewTurn, noteSent, reserveFlow } from './agent-message-flow'
+import { recordDelivery } from './agent-message-trace'
+import { resolveDeliveryScope, scopeRefusal } from './agent-message-scope'
 import {
   DeliveryQueue,
   type DeliveryQueueDeps,
   type QueuedDeliveryRequest
-} from '../core/agents/delivery-queue'
+} from './delivery-queue'
 import { randomUUID } from 'crypto'
-import { nodeTokenFilePresent } from '../core/agents/node-token-files'
-import { mirrorEntry as coreMirrorEntry, type MirrorEntry } from '../core/agent-status-mirror'
+import { nodeTokenFilePresent } from './node-token-files'
+import { mirrorEntry as coreMirrorEntry, type MirrorEntry } from '../agent-status-mirror'
 import {
   projectCapabilityGrantedFor,
   type CapabilityAckMap
-} from '../core/project-capability-consent'
-import type { ProjectCapability } from '../shared/project-capabilities'
+} from '../project-capability-consent'
+import type { ProjectCapability } from '../../shared/project-capabilities'
 
 /** The little the service needs to know about a stored node. */
 export interface MessagingStoredNode {

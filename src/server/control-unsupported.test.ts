@@ -116,18 +116,16 @@ describe('with no UI attached, the refusal is RETRYABLE and says so', () => {
     expect(text.trimEnd()).not.toContain('\n')
   })
 
-  it('the messaging verbs keep the PERMANENT refusal — a browser tab would not have helped', async () => {
-    // Task 5.3 of the messaging plan, shared with this mechanism by agreement. `send` is
-    // verified-only at the route (requiresVerified runs before the handler on every edition), so a
-    // token is presented here for the same reason the `browser` test presents one: the edition answer
-    // is what a caller that got PAST identity hears. It must NOT be the bridge's retryable no-UI
-    // message: agent messaging has no core service, so no tab can ever deliver it.
-    const res = await control('send', 'n-msg', 'text/plain', nodeAuthToken(SECRET, 'n-msg'))
-    expect(res.status).toBe(400)
-    const text = await res.text()
-    expect(text).toContain(CONTROL_UNSUPPORTED_ERROR)
-    expect(text).toContain('do not retry')
-    expect(text).not.toContain(CONTROL_NO_UI_ERROR)
+  it('the messaging verbs are NO LONGER refused by edition — they reach the bridge like any verb', () => {
+    // They were in EDITION_UNSUPPORTED_VERBS because agent messaging lived in src/main. Nothing in
+    // that module needed Electron (every import was core/shared, its surface an injected deps
+    // object) — only its WIRING sat in main's boot, so both shells boot it from core now. What a
+    // tabless host answers is therefore the bridge's RETRYABLE no-UI message, not a permanent no.
+    for (const verb of ['send', 'reply', 'notify']) {
+      expect(EDITION_UNSUPPORTED_VERBS.has(verb), verb).toBe(false)
+    }
+    // `browser` is the only member left, and it is structural rather than a wiring accident.
+    expect([...EDITION_UNSUPPORTED_VERBS]).toEqual(['browser'])
   })
 
   it('an unverified `send` is refused on IDENTITY first, and that refusal does not invite a retry either', async () => {
@@ -148,9 +146,22 @@ describe('with no UI attached, the refusal is RETRYABLE and says so', () => {
     expect(text).toContain('renders in your own browser')
   })
 
+  it('scopes the claim to the VERB — it must not say canvas control is unavailable', () => {
+    // The regression, reported within an hour of canvas control going live: `send` answered
+    // "Canvas control is not available on the nodeterm Server Edition", so the calling agent
+    // concluded the whole feature was off and asked its user to check a Settings switch that could
+    // not have helped. True when every verb was refused; a lie once only a handful are.
+    for (const verb of ['send', 'browser', 'notify']) {
+      const msg = controlUnsupportedMessage(verb)
+      expect(msg, verb).toContain(`\`${verb}\` verb is not available`)
+      expect(msg, verb).toContain('other canvas-control verbs work here')
+      expect(msg, verb).not.toMatch(/^\S+: Canvas control is not available/)
+    }
+  })
+
   it('adds that clause to `browser` and to nothing else', () => {
     expect(controlUnsupportedMessage('browser')).toContain(BROWSER_UNSUPPORTED_CLAUSE)
-    for (const verb of ['list', 'open-terminal', 'browsers', 'BROWSER']) {
+    for (const verb of ['list', 'open-terminal', 'browsers', 'BROWSER', 'send']) {
       expect(controlUnsupportedMessage(verb), verb).not.toContain(BROWSER_UNSUPPORTED_CLAUSE)
       expect(controlUnsupportedMessage(verb), verb).toContain(CONTROL_UNSUPPORTED_ERROR)
     }

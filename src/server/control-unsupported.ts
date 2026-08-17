@@ -22,10 +22,25 @@ export const CONTROL_UNSUPPORTED_ERROR = 'control-unsupported-on-this-edition'
  * The prose, which must say the thing a retrying model needs to hear IN WORDS: the literal
  * "do not retry". A refusal that only a status code distinguishes from an outage is not a refusal
  * an agent can act on.
+ *
+ * IT NAMES THE VERB, and that stopped being cosmetic the day this edition gained real canvas
+ * control. This used to read "Canvas control is not available on the nodeterm Server Edition",
+ * which was true when EVERY verb was refused and became a lie the moment only a handful were: an
+ * agent that asked for `send` was told the whole feature was missing, so it went looking for a
+ * switch to turn on (Settings → Agents) and asked its user to check — for a setting that could not
+ * have helped. Reported from a live session, within the hour. A per-verb refusal must scope its
+ * claim to the verb, or it teaches the reader something false about everything else.
  */
+export function controlUnsupportedSentence(verb: string): string {
+  return (
+    `The \`${verb}\` verb is not available on the nodeterm Server Edition (other canvas-control ` +
+    'verbs work here). This is permanent on this host, not a temporary failure — do not retry.'
+  )
+}
+
+/** The invariant tail, kept as a constant because it is what a caller may match on. */
 export const CONTROL_UNSUPPORTED_SENTENCE =
-  'Canvas control is not available on the nodeterm Server Edition. This is permanent on this ' +
-  'host, not a temporary failure — do not retry.'
+  'This is permanent on this host, not a temporary failure — do not retry.'
 
 /**
  * `browser` gets one extra clause naming WHY it is structural, so nobody files it as unimplemented
@@ -43,8 +58,12 @@ export const BROWSER_UNSUPPORTED_CLAUSE =
  * the text/plain dialect (which carries no `error` field) still names the refusal.
  */
 export function controlUnsupportedMessage(verb: string): string {
-  const why = verb === 'browser' ? ` ${BROWSER_UNSUPPORTED_CLAUSE}` : ''
-  return `${CONTROL_UNSUPPORTED_ERROR}: ${CONTROL_UNSUPPORTED_SENTENCE}${why}`
+  return `${CONTROL_UNSUPPORTED_ERROR}: ${controlUnsupportedSentence(verb)}${unsupportedClause(verb)}`
+}
+
+/** The per-verb "why", empty for a verb that needs no elaboration. */
+function unsupportedClause(verb: string): string {
+  return verb === 'browser' ? ` ${BROWSER_UNSUPPORTED_CLAUSE}` : ''
 }
 
 /**
@@ -76,19 +95,18 @@ export async function serverEditionControlHandler({ verb }: { verb: string }): P
  *    host, so the server has no debugger for it and never can. (It is also not a verb this app has
  *    yet — `ControlVerb` lists 24 and the browser one is `open-browser`, which is deliberately NOT
  *    here: opening a surface is not driving one, and `open-browser` works fine in the browser.)
- *  - `send` / `reply` / `notify` — agent messaging lives in `src/main/agent-messaging.ts`. It has no
- *    core service and no server handler, so there is nothing on this edition to deliver through.
- *    The browser's `agentMessage` stub also refuses (terminally, with its own wording) — that stays
- *    as the backstop for a UI-attached dispatch, but this is what makes the answer honest with none.
+ * A verb LEAVES this set the day its dependency reaches core. That is the whole checklist, and it has
+ * already been collected once: `send`/`reply`/`notify` were here because agent messaging lived in
+ * `src/main/agent-messaging.ts` — and it turned out nothing in that module needed Electron (every
+ * import was core/shared; its whole surface is an injected deps object). Only its WIRING sat in
+ * main's boot. Both shells now boot it from `core/agents/agent-messaging-boot.ts`, so the three verbs
+ * work here, under the same gates as the desktop: the per-project capability GRANT (off by default),
+ * the runtime pane-ownership check, flow budgets, and hook-server's verified-only route.
  *
- * A verb LEAVES this set the day its dependency reaches core. That is the whole checklist.
+ * The lesson is the checklist's, not messaging's: before adding a verb here, check whether the
+ * dependency is really Electron-bound or merely LIVES in `src/main`. Twice now it has been the latter.
  */
-export const EDITION_UNSUPPORTED_VERBS: ReadonlySet<string> = new Set([
-  'browser',
-  'send',
-  'reply',
-  'notify'
-])
+export const EDITION_UNSUPPORTED_VERBS: ReadonlySet<string> = new Set(['browser'])
 
 /**
  * Wrap the real control bridge so the verbs above keep their permanent, named refusal and everything

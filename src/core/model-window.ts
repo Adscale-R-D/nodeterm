@@ -1,28 +1,83 @@
-// Resolves a Claude model id → its context window (max input tokens).
+// Resolves a Claude model → its context window (max input tokens).
 //
-// Empirically (verified via `/context` on this machine) Claude Code runs opus/sonnet/fable
-// sessions in a 1M window — the model id in the transcript stays bare ("claude-opus-4-8")
-// even when 1M is active, so the window can NOT be detected from the id alone. We therefore
-// map the model FAMILY to its window: opus/sonnet/fable/mythos → 1M, haiku → 200k, unknown
-// → 200k. (Accounts with 1M access see the right denominator; the Models API is not consulted
-// — it returns capability, and the call added latency for no gain.) Fully synchronous.
+// ── THE RULE IS THE CLI'S, NOT A FAMILY GUESS ───────────────────────────────────────────────────
+// This file used to map the model FAMILY to a window — opus/sonnet/fable → 1M, haiku → 200k — on
+// the strength of one `/context` reading. That is backwards, and it under-reported context
+// pressure by 5× for every 200k session: the meter read 20% on a session that was about to
+// auto-compact. Decompiled from the shipped CLI (2.1.226,
+// `@anthropic-ai/claude-code/bin/claude.exe`), the real resolver is:
+//
+//   function hT(e,t){ let r=Wmf(); if(r!==void 0) return r; if(vPs(e,t)) return Zye; return qmf(e,t) }
+//   function Wmf(){ if(env.DISABLE_COMPACT){ let e=env.CLAUDE_CODE_MAX_CONTEXT_TOKENS; if(e>0) return e } }
+//   function qmf(e,t){ if(wS(e)) return 1e6; if(t?.includes(betaHeader)&&fW(e)) return 1e6;
+//                      if(B$(e)) return 1e6; let r=Zti(e); if(r!==null) return r;
+//                      let n=env.CLAUDE_CODE_MAX_CONTEXT_TOKENS;
+//                      if(n>0 && !id.startsWith("claude-")) return n; return nbr }
+//   function wS(e){ if(qne()) return !1; return /\[1m\]/i.test(e) }
+//   nbr = 200000   Zye = 200000
+//
+// In one sentence: **200k unless the model SELECTION STRING literally carries `[1m]`.** Not the
+// family — the marker. And the marker is exactly what the transcript throws away (see
+// `claude-model-selection.ts` for that measurement), which is why `claudeWindowFor` layers the
+// user's recorded selection on top of the bare id.
+//
+// Unmodelled CLI branches, deliberately (all fall through to the 200k default, i.e. they can only
+// make the meter read HIGH — the safe direction):
+//   - `vPs`/`Uir()` = `longContext1mCreditsBlocked`, a runtime flag that caps an exhausted-credits
+//     1M session back to 200k. Nothing on disk reflects it.
+//   - the `context-1m` beta header and `native_1m` registry entries (`fW`/`B$`/`Zti`).
+//   - `CLAUDE_CODE_MAX_CONTEXT_TOKENS` without `DISABLE_COMPACT` — the CLI honours it only for
+//     ids that do NOT start with `claude-`, i.e. never for a first-party model.
+// Fully synchronous.
+import { claudeConfigDirFromTranscript, selectedClaudeModel } from './claude-model-selection'
 
 const DEFAULT_WINDOW = 200_000
 const LARGE_WINDOW = 1_000_000
 
-// Model family → window. First match wins; an explicit "1m" marker also forces the large
-// window. Plain ids like "claude-opus-4-8" resolve to 1M via the opus/sonnet/fable rule.
-const STATIC: Array<[RegExp, number]> = [
-  [/haiku/i, DEFAULT_WINDOW],
-  [/opus|sonnet|fable|mythos|(^|[^a-z0-9])1m([^a-z0-9]|$)/i, LARGE_WINDOW]
-]
+/** The CLI's `wS`: the ONLY thing that buys a 1M window is the literal `[1m]` marker. */
+const ONE_M_MARKER = /\[1m\]/i
 
-/** Context window for a model id: 1M for opus/sonnet/fable/[1m], 200k for haiku/unknown. */
+/** True when a model SELECTION string asks for the 1M window. Mirrors the CLI's `wS`. */
+export function isOneMillionSelection(model: string | null | undefined): boolean {
+  return !!model && ONE_M_MARKER.test(model)
+}
+
+/**
+ * The CLI's `Wmf`: `CLAUDE_CODE_MAX_CONTEXT_TOKENS` overrides everything, but ONLY together with
+ * `DISABLE_COMPACT`. Read from the host env — both shells run beside the sessions they measure.
+ */
+function envOverrideWindow(env: NodeJS.ProcessEnv = process.env): number | null {
+  if (!env.DISABLE_COMPACT) return null
+  const n = Number(env.CLAUDE_CODE_MAX_CONTEXT_TOKENS)
+  return Number.isFinite(n) && n > 0 ? n : null
+}
+
+/**
+ * Context window from a model string ALONE: 1M when it carries `[1m]`, else 200k. A bare
+ * `claude-opus-5` is 200k here, because that is what the CLI does with it — a transcript id is
+ * not evidence of a 1M session. Callers that can also see the user's selection should prefer
+ * {@link claudeWindowFor}, which is the one that gets a `opus[1m]` machine right.
+ */
 export function staticWindowFor(model: string | null): number {
-  if (model) {
-    for (const [re, win] of STATIC) if (re.test(model)) return win
-  }
-  return DEFAULT_WINDOW
+  return envOverrideWindow() ?? (isOneMillionSelection(model) ? LARGE_WINDOW : DEFAULT_WINDOW)
+}
+
+/**
+ * The window for a claude session, given the transcript's (bare) model id and, when known, the
+ * path of the transcript itself — from which the owning config dir, and therefore the user's
+ * `model` selection, is recovered. A managed account has its own config dir and so its own
+ * selection; deriving it from the path is what makes that work with no extra plumbing.
+ *
+ * Precedence mirrors the CLI: env override → `[1m]` on the id → `[1m]` on the selection → 200k.
+ * The selection is consulted only as a fallback, so an id that already states its variant is
+ * never second-guessed.
+ */
+export function claudeWindowFor(model: string | null, transcriptPath?: string): number {
+  const override = envOverrideWindow()
+  if (override !== null) return override
+  if (isOneMillionSelection(model)) return LARGE_WINDOW
+  const selection = selectedClaudeModel(claudeConfigDirFromTranscript(transcriptPath))
+  return isOneMillionSelection(selection) ? LARGE_WINDOW : DEFAULT_WINDOW
 }
 
 /** Synchronous best guess for the model's window (no cache/network needed). */

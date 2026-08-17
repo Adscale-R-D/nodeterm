@@ -106,6 +106,15 @@ feature, and the boundary tests can only tell you an import is wrong, never that
 The same applies to any hook-server signature change; this repo has shipped one to a single shell
 three times.
 
+**Mirror the CLI's own resolver — do not infer a context window from the model family.** Claude's
+window is **200k unless the model selection string literally carries `[1m]`**; the family says
+nothing. We shipped a family table (opus/sonnet → 1M) built from one `/context` reading, and it
+under-reported context pressure by 5× on every 200k session — the meter read 20% on a session about
+to auto-compact. The marker is also the one thing the transcript drops, so the selection has to be
+recovered from the config dir (`core/claude-model-selection.ts`). Same rule as gemini's window: copy
+the CLI's resolver, catch-all default included, rather than a per-model allowlist that goes stale
+silently. And if you cannot establish a trustworthy denominator, ship **no** meter.
+
 **Do not take scrolling away from tmux.** It owns the mouse, the scrollback and the alternate
 screen. A previous design moved that into the emulator and failed structurally; `CLAUDE.md` explains
 why in detail.

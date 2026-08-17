@@ -112,7 +112,15 @@ export function createRemoteContextTail(
       t.reading = false
     }
 
-    // Reconcile the window every pass, same resolution as the local tail.
+    // Reconcile the window every pass. NOT the same resolution as the local tail, and the
+    // difference is a real gap: the local tail recovers the user's `[1m]` model SELECTION from the
+    // transcript's config dir, and that dir is on the REMOTE HOST here — `selectedClaudeModel`
+    // would stat a local path that either does not exist or, worse, belongs to a different
+    // account. So a remote session gets `cachedWindowFor`, i.e. 1M only when the id itself carries
+    // `[1m]` and 200k otherwise. That is the CLI's own default and it errs by reading HIGH (an
+    // actual 1M remote session pegs the meter) rather than by under-reporting pressure.
+    // Follow-up: `RemoteHooks` already reads/writes the host's settings.json at connect — cache
+    // its `model` on the connection and pass it in here.
     if (t.model) void resolveModelWindow(t.model)
     const window = cachedWindowFor(t.model)
 

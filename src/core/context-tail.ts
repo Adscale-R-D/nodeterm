@@ -4,7 +4,7 @@
 // as ContextWindowUsage keyed by sessionId.
 import fs from 'fs'
 import type { ContextWindowUsage } from '../shared/types'
-import { cachedWindowFor, resolveModelWindow } from './model-window'
+import { claudeWindowFor, resolveModelWindow } from './model-window'
 import { splitCompleteLines } from './subagent-tail'
 
 const POLL_MS = 1000
@@ -285,16 +285,19 @@ export function createContextTail(
       // Whose number is the denominator: the transcript's own when the agent states one, else
       // claude's model-family inference.
       //
-      // `cachedWindowFor` is CLAUDE's inference and is consulted only on claude's path (no custom
-      // parser). It always answers a number — DEFAULT_WINDOW (200k) for anything it doesn't
-      // recognize — so handing it "gpt-5.6-sol" or "gemini-3.5-flash" would not fail, it would
-      // confidently return the wrong denominator. A custom parser that could not state a window
-      // therefore yields `null`, and null pushes NOTHING (the guard below): a meter is a
-      // percentage, and a used count over a guessed denominator is worse than no meter at all.
+      // `claudeWindowFor` is CLAUDE's rule and is consulted only on claude's path (no custom
+      // parser). It always answers a number — 200k for anything it doesn't recognize — so handing
+      // it "gpt-5.6-sol" or "gemini-3.5-flash" would not fail, it would confidently return the
+      // wrong denominator. A custom parser that could not state a window therefore yields `null`,
+      // and null pushes NOTHING (the guard below): a meter is a percentage, and a used count over
+      // a guessed denominator is worse than no meter at all.
       //
-      // Claude's path is unchanged by construction: no custom parser ⇒ `cachedWindowFor(t.model)`
-      // exactly as before, always > 0, so the added guard can never fire for it.
-      const win = customParse ? t.parsedWindow : cachedWindowFor(t.model)
+      // `t.path` is passed because the TRANSCRIPT ID CANNOT STATE THE WINDOW: the CLI grants 1M
+      // only for a `[1m]` model SELECTION and the transcript records the bare canonical id, so the
+      // path is what recovers the owning config dir (system or managed account) and with it the
+      // user's selection. See model-window.ts / claude-model-selection.ts for the measurement.
+      // Always > 0 on this path, so the null guard below can never fire for claude.
+      const win = customParse ? t.parsedWindow : claudeWindowFor(t.model, t.path)
 
       if (!sessions.has(sessionId)) return // untracked while this async read was in flight
       if (

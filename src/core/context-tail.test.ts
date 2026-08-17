@@ -153,9 +153,12 @@ describe('createContextTail — the `parse` dep (gemini/codex)', () => {
     })
   }, 8000)
 
-  it('claude keeps its model-family window when NO parser is injected', async () => {
+  it('claude falls back to the CLI default window when NO parser is injected', async () => {
     // The regression guard for the byte-identical claim: same file, no `parse`, and the denominator
-    // is still cachedWindowFor's 1M for an opus id.
+    // is still whatever claudeWindowFor answers for the id. That answer is 200k — the CLI's own
+    // default — because a bare `claude-opus-4-8` carries no `[1m]` marker, and this tmpdir is not
+    // `<configDir>/projects/<cwd>/…` so there is no selection to recover either. The old
+    // expectation here was 1M, from the family table this file's rule replaced.
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ctxtail-claude-'))
     const file = path.join(dir, 'sess.jsonl')
     fs.writeFileSync(
@@ -172,7 +175,7 @@ describe('createContextTail — the `parse` dep (gemini/codex)', () => {
     tail.untrack('s1')
     expect(send.mock.calls[0][0]).toMatchObject({
       usedTokens: 120,
-      windowTokens: 1_000_000,
+      windowTokens: 200_000,
       model: 'claude-opus-4-8'
     })
   })

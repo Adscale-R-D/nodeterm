@@ -31,7 +31,10 @@ describe('createRemoteContextTail', () => {
       sessionId: 'sess1',
       usedTokens: 120,
       model: 'claude-opus-4-8',
-      windowTokens: 1_000_000
+      // 200k, not 1M: a remote session gets the id-only rule (`cachedWindowFor`), and a bare opus
+      // id carries no `[1m]` marker. The config dir that would state the user's selection lives on
+      // the HOST — see the comment in remote-context-tail.ts.
+      windowTokens: 200_000
     })
     tail.untrack('sess1')
   })

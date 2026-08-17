@@ -794,6 +794,28 @@ else, and its context links must keep classifying across restarts).
     *excludes* cache reads, which is why claude sums them. **The formulas must not be unified.**
     The transcript jail is widened **per root** (`~/.gemini/tmp`, `<codexHome>/sessions`), never to
     `$HOME` — that predicate exists so a forged hook POST cannot aim a read at `~/.ssh/id_rsa`.
+  - **Claude's window is `200k` unless the model SELECTION carries `[1m]` — never the family**
+    (`core/model-window.ts`, 2026-08-17). This file used to map opus/sonnet/fable → 1M and haiku →
+    200k off a single `/context` reading, which **under-reported context pressure by 5× on every
+    200k session**: the meter read ~20% on a session about to auto-compact. Decompiled from the
+    shipped CLI (2.1.226): `wS(e){ return /\[1m\]/i.test(e) }` decides 1M, `nbr = 200000` is the
+    default, and `Wmf()` lets `CLAUDE_CODE_MAX_CONTEXT_TOKENS` override everything **only together
+    with `DISABLE_COMPACT`**. **And the marker is exactly what the transcript throws away** — measured
+    across every transcript, session registry and `~/.claude.json` on a real machine, `message.model`
+    is always the bare canonical id and no record type carries the variant. The one surviving signal
+    is the user's *selection*, `<configDir>/settings.json` → `"model": "opus[1m]"`, which
+    `claude-model-selection.ts` reads (mtime+TTL cached — this is consulted per tracked session per
+    second) via the config dir recovered from the transcript PATH
+    (`<configDir>/projects/<encoded-cwd>/<id>.jsonl`, so a managed account gets its own selection for
+    free). **Both halves ship together**: flipping the default to 200k alone would peg the meter for
+    every 1M user. Unmodelled on purpose, all falling through to 200k — i.e. they can only make the
+    meter read HIGH, the safe direction: `longContext1mCreditsBlocked`, the `context-1m` beta header,
+    `native_1m` registry entries, project-scoped `settings.json`, and `--model` on the launch line
+    (a real follow-up — nodeterm builds that line, so threading the flag through beats every
+    heuristic here). **Remote (SSH) sessions keep `cachedWindowFor`** and so keep the id-only rule:
+    the config dir is on the host, and `selectedClaudeModel` would stat the wrong machine
+    (`main/remote-context-tail.ts` states the follow-up — `RemoteHooks` already reads the host's
+    settings.json at connect).
   - **`hasUsage` gated THREE features, not one.** Joining `USAGE_CAPABLE` also switched on
     `context.ensure` and the find bar's transcript index, both of which go through claude's
     `resolveTranscript` — whose **cwd fallback** then handed a codex node *the newest claude transcript

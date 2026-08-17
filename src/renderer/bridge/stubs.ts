@@ -399,11 +399,19 @@ export function buildStubApi(): Omit<
       ok: false as const,
       error: 'Raising the terminal limit must be done on the machine running the server.'
     }),
+    // The INERT pair, kept for the surfaces that must not answer a control verb: the relay tab
+    // (`relay-api.ts` overrides both back to these — a host agent's verb would land on the guest's
+    // canvas) and any consumer of the raw stubs. The BROWSER's real pair is in `buildAgentApi`
+    // (ws-bridge.ts), which overrides these — `satisfies` cannot warn you when one of the two goes
+    // missing, so check both files.
     onAgentControl: noopUnsub,
     sendAgentControlResult: noop,
-    // Messaging never runs in the browser: `onAgentControl` above is inert here, so no dispatch
-    // can ever reach this. It answers the honest terminal refusal all the same, so a stray call
-    // can never look like it delivered.
+    // Messaging never runs in the browser. It used to be UNREACHABLE here (`onAgentControl` was inert
+    // on every browser surface); the Server Edition now dispatches control for real, so a
+    // `send`/`reply`/`notify` verb does arrive and this is what answers it — at the layer that knows
+    // the reason. Agent messaging lives in `src/main/agent-messaging.ts`: no core service, no server
+    // handler, nothing on this edition to deliver through. Keep it TERMINAL ("Do not retry") — the
+    // bridge's own no-UI refusal is the retryable one, and an agent must be able to tell them apart.
     agentMessage: {
       deliver: async () => ({
         ok: false as const,

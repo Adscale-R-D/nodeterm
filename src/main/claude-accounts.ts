@@ -11,7 +11,7 @@ import { IPC } from '../shared/ipc'
 import { isSupportedClaudeVersion, parseLoginCapture } from '../core/claude-accounts-core'
 import { claudeConfigDirFor } from '../core/claude-config-dir'
 import { installClaudeHooksInto, ensureClaudeFullscreenTuiInto } from '../core/agents/hooks/claude'
-import { installCanvasSkillInto } from './canvas-control'
+import { installCanvasSkillInto } from '../core/agents/canvas-control-install'
 import { findInLoginPath } from '../core/pty-manager'
 import type { SshProjectManager } from './remote-ssh/ssh-project'
 

@@ -6,21 +6,30 @@
 // The SSH counterpart of this file is RemoteHooks.installCanvasControl, which writes the very
 // same shim + skill onto the remote host — the shim carries no machine-specific paths, so one
 // script serves both sides.
+//
+// IT LIVES IN CORE (it was `src/main/canvas-control.ts`) because DISCOVERY was the other half of
+// canvas control being dead on the Server Edition. Wiring the verbs is not enough: with no
+// `skills/manage-nodeterm-canvas/SKILL.md` and no instruction block, an agent on a headless host is
+// never told the CLI exists, and it will not go looking for a shell script it has never heard of.
+// Measured on the host that prompted this: `NODETERM_CANVAS_CONTROL=1` was set in the session env,
+// `~/.claude/skills` did not exist at all, and the only shim on disk was a months-old stray.
+// Everything Electron-specific here was one call — `app.getPath('userData')`, now
+// `platform().userDataDir`.
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
-import { app } from 'electron'
 import {
   CONTROL_SHIM_SCRIPT,
   buildCanvasControlInstructions,
   buildCanvasSkillBody,
   mergeCanvasControlBlock
 } from './canvas-control-core'
-import { opencodeConfigDir } from '../core/agents/hooks/opencode'
-import { copilotHomeDir } from '../core/agents/hooks/copilot'
+import { opencodeConfigDir } from './hooks/opencode'
+import { copilotHomeDir } from './hooks/copilot'
+import { platform } from '../platform'
 
 function dir(): string {
-  return path.join(app.getPath('userData'), 'canvas-control')
+  return path.join(platform().userDataDir, 'canvas-control')
 }
 function shimPath(): string {
   return path.join(dir(), 'nodeterm.sh')

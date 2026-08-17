@@ -68,7 +68,15 @@ import {
   isValidPendingId,
   syntheticAnsweredEvent
 } from '../core/agents/pending-approvals'
-import { setMainWindow, getMainWindow, sendToMain, closeAction, createCrashReloadPolicy } from './main-window'
+import {
+  setMainWindow,
+  getMainWindow,
+  mainWindowClientIds,
+  sendToMain,
+  closeAction,
+  createCrashReloadPolicy
+} from './main-window'
+import { initCanvasControlBridge } from '../core/agents/canvas-control-bridge'
 import { installKeydownIntercepts } from './keydown-intercept'
 import {
   initNotchHud,
@@ -152,7 +160,7 @@ import { posixQuote, type SshConnection } from '../shared/ssh'
 import { buildHandoff, type HandoffRemote } from './handoff'
 import { initContextLink, setNodeTranscript } from '../core/context-link'
 import { transcriptPathOf } from '../core/context-link-core'
-import { initCanvasControl, installCanvasSkillInto } from './canvas-control'
+import { initCanvasControl, installCanvasSkillInto } from '../core/agents/canvas-control-install'
 import { initTranscriptIndex, searchTranscripts } from '../core/transcript-index'
 import { initTelemetry } from './telemetry'
 import { initClaudeUsage } from './claude-usage'
@@ -2287,42 +2295,17 @@ app.whenReady().then(async () => {
   // host's tails too, instead of leaking them.
   corePlatform.on(IPC.ptyDestroy, (nodeId: string) => releaseNodeTails(nodeId))
   corePlatform.on(IPC.ptyRecycle, (nodeId: string) => releaseNodeTails(nodeId))
-  // Agent canvas control: the spawned agent's `nodeterm` CLI POSTs a verb to the hook server,
-  // which we forward to the renderer and await a reply. A pending-request map (keyed by a random
-  // requestId) bridges the two async hops; both the reply and the 120s timeout clear the entry.
-  const pendingControl = new Map<
-    string,
-    {
-      resolve: (r: { ok: boolean; message?: string; result?: unknown; error?: string }) => void
-      timer: NodeJS.Timeout
-    }
-  >()
-  ipcMain.on(
-    IPC.agentControlResult,
-    (
-      _e,
-      payload: { requestId: string; ok: boolean; message?: string; result?: unknown; error?: string }
-    ) => {
-      const pending = pendingControl.get(payload.requestId)
-      if (!pending) return
-      clearTimeout(pending.timer)
-      pendingControl.delete(payload.requestId)
-      pending.resolve(payload)
-    }
+  // Agent canvas control: the spawned agent's `nodeterm` CLI POSTs a verb to the hook server, which
+  // we forward to the renderer and await a reply. The two async hops, the pending-request map and
+  // the timeout now live ONCE in core (`agents/canvas-control-bridge.ts`) so the Server Edition —
+  // which had no control handler at all and refused every verb by name — runs the same code path.
+  //
+  // `candidates` is the MAIN WINDOW ONLY, deliberately: `corePlatform.clientIds()` also carries
+  // relay peers, and a relay peer is a phone attached to sessions with no canvas to act on. See the
+  // module header.
+  hookServer.setControlHandler(
+    initCanvasControlBridge({ platform: corePlatform, candidates: mainWindowClientIds })
   )
-  hookServer.setControlHandler(async ({ verb, nodeId, args }) => {
-    const target = getMainWindow()
-    if (!target) return { ok: false, error: 'window unavailable' }
-    const requestId = randomUUID()
-    return await new Promise((resolve) => {
-      const timer = setTimeout(() => {
-        pendingControl.delete(requestId)
-        resolve({ ok: false, error: 'timed out (no response / not confirmed)' })
-      }, 120_000)
-      pendingControl.set(requestId, { resolve, timer })
-      target.webContents.send(IPC.agentControl, { requestId, sourceNodeId: nodeId, verb, args })
-    })
-  })
   initMediaProtocol()
 
   // Context Link reads happen HERE, on the desktop, which is what lets a remote (SSH-project)

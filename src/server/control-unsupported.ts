@@ -48,8 +48,11 @@ export function controlUnsupportedMessage(verb: string): string {
 }
 
 /**
- * What `src/server/index.ts` hands to `hookServer.setControlHandler`. Never resolves `ok: true`:
- * there is nothing on this host for a control verb to act on.
+ * The permanent refusal, for a verb this edition genuinely cannot perform. Never resolves `ok: true`.
+ *
+ * It is no longer the answer to EVERY verb — the edition wires canvas control for real now
+ * (`core/agents/canvas-control-bridge.ts`) — so this is what `withEditionRefusals` puts in front of
+ * the bridge for the verbs below.
  */
 export async function serverEditionControlHandler({ verb }: { verb: string }): Promise<{
   ok: false
@@ -57,4 +60,46 @@ export async function serverEditionControlHandler({ verb }: { verb: string }): P
   message: string
 }> {
   return { ok: false, error: CONTROL_UNSUPPORTED_ERROR, message: controlUnsupportedMessage(verb) }
+}
+
+/**
+ * The verbs that stay permanently refused on this edition, even with a browser tab attached.
+ *
+ * WHY A SET IN FRONT OF THE BRIDGE, rather than letting these fall through to the browser and be
+ * refused there: the bridge needs an attached UI to reach any refusal at all, and with zero tabs —
+ * the normal state of a headless host — it answers its own no-UI message, which says *retryable*.
+ * For a verb that can never work here that is a lie with a cost: the agent waits for a browser tab
+ * that would not have helped. A permanent fact must not be reported behind a transient one.
+ *
+ *  - `browser` — structural, and the clause above says why: a browser node on this edition renders
+ *    in the VIEWER's own Chrome tab. There is no `<webview>`, no `webContents` and no CDP on this
+ *    host, so the server has no debugger for it and never can. (It is also not a verb this app has
+ *    yet — `ControlVerb` lists 24 and the browser one is `open-browser`, which is deliberately NOT
+ *    here: opening a surface is not driving one, and `open-browser` works fine in the browser.)
+ *  - `send` / `reply` / `notify` — agent messaging lives in `src/main/agent-messaging.ts`. It has no
+ *    core service and no server handler, so there is nothing on this edition to deliver through.
+ *    The browser's `agentMessage` stub also refuses (terminally, with its own wording) — that stays
+ *    as the backstop for a UI-attached dispatch, but this is what makes the answer honest with none.
+ *
+ * A verb LEAVES this set the day its dependency reaches core. That is the whole checklist.
+ */
+export const EDITION_UNSUPPORTED_VERBS: ReadonlySet<string> = new Set([
+  'browser',
+  'send',
+  'reply',
+  'notify'
+])
+
+/**
+ * Wrap the real control bridge so the verbs above keep their permanent, named refusal and everything
+ * else reaches the canvas. `handler` is `initCanvasControlBridge(...)`; the signature is structural
+ * so this file stays free of the bridge (and of core) — it is vocabulary, not transport.
+ */
+export function withEditionRefusals<
+  H extends (req: { verb: string; nodeId: string; args: Record<string, string> }) => Promise<unknown>
+>(handler: H): H {
+  return (async (req) =>
+    EDITION_UNSUPPORTED_VERBS.has(req.verb)
+      ? await serverEditionControlHandler(req)
+      : await handler(req)) as H
 }

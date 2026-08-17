@@ -145,8 +145,12 @@ export function buildRelayApi(connectionId: string, transport?: FrameTransport):
     // `...local` (a v1 degrade: they read/write on this machine, not the host). boardLog is now
     // bridged to the host (see above) — it no longer rides `...local`.
     chat: stub.chat,
-    // Agent canvas-control (`agent:control`) is not wired over the relay (matches the Server
-    // Edition); inert no-ops rather than a local subscription that never carries the host's events.
+    // Agent canvas-control (`agent:control`) is not wired over the relay; inert no-ops rather than a
+    // local subscription that never carries the host's events. This no longer "matches the Server
+    // Edition" — that edition wires control for real now (`core/agents/canvas-control-bridge.ts`),
+    // because a browser tab there IS the canvas the host's agents belong to. A relay tab is not: it
+    // is THIS machine viewing another host's sessions, so a host agent's `open-claude` would land on
+    // the guest's own canvas, in the guest's own projects, on a filesystem the host cannot see.
     onAgentControl: stub.onAgentControl,
     sendAgentControlResult: stub.sendAgentControlResult,
     // Messaging rides the same decision: the browser client is never a sender (constraint 5 of

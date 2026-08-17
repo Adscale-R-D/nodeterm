@@ -34,8 +34,12 @@
  * This is scoped to tmux-pane messaging ownership but is intentionally feature-neutral: S8 PR 4's
  * BrowserControlLedger and messaging PR 7's deliver-on-idle queue want the same "who really spawned
  * this node" answer and can consume `paneOwnerProject` directly. It lives in `src/core` (no
- * electron, no main import) so it ships on both shells; the Server Edition never records or reads it
- * because messaging does not exist there (`setControlHandler` is never called).
+ * electron, no main import) so it ships on both shells; the Server Edition never READS it, because
+ * agent messaging still does not exist there — but note the reason has changed: that edition now
+ * calls `setControlHandler` for real (`canvas-control-bridge.ts`), and what keeps messaging out is
+ * that `src/main/agent-messaging.ts` has no core service, so `send`/`reply`/`notify` are refused by
+ * name (`EDITION_UNSUPPORTED_VERBS`). If that delivery path ever moves into core, this ledger is
+ * already here and already correct.
  */
 
 /** nodeId → owning projectId (machine-local entry id), for panes freshly spawned THIS run. */

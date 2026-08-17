@@ -36,7 +36,9 @@ import { installLogSink } from '../core/log-sink'
 import { registerLogHandlers } from '../core/log-handlers'
 import os from 'os'
 import { hookServer } from '../core/agents/hook-server'
-import { serverEditionControlHandler } from './control-unsupported'
+import { initCanvasControlBridge } from '../core/agents/canvas-control-bridge'
+import { initCanvasControl } from '../core/agents/canvas-control-install'
+import { withEditionRefusals } from './control-unsupported'
 import { loadOrCreateNodeAuthSecret } from '../core/agents/node-auth-secret'
 import { initNodeTokens, refreshNodeTokens } from '../core/agents/node-token-service'
 import {
@@ -457,15 +459,36 @@ export async function startServer(
     try {
       // Fail-open: installManagedAgentHooks is itself best-effort, but a throw must never block boot.
       installManagedAgentHooks()
+      // Canvas control's DISCOVERY half, under the same gate and for the same reason (it writes the
+      // shim into dataDir). Wiring the verbs without this leaves an agent that is never told the CLI
+      // exists: measured on a headless host, `NODETERM_CANVAS_CONTROL=1` was in the session env and
+      // `~/.claude/skills` did not exist at all. Best-effort inside itself, like the hook install.
+      initCanvasControl()
     } catch (e) {
       console.warn('[nodeterm-server] managed hook install failed', e)
     }
   }
   await hookServer.start()
-  // Canvas control does not exist on this edition, and saying so BY NAME is the whole point: the
-  // null handler answered `control unavailable`, which reads to an agent like a transient outage,
-  // and an agent retries an outage. See `control-unsupported.ts`.
-  hookServer.setControlHandler(serverEditionControlHandler)
+  // Canvas control. It used to be refused BY NAME here (`control-unsupported.ts`) because there was
+  // no handler at all — so no agent on a headless host could open a node, which is most of what the
+  // canvas is for. It is the SAME code path as the desktop now: every verb is implemented in
+  // `Canvas.tsx`, which is platform-agnostic React and runs in the browser unchanged, so all this
+  // shell owes is the forwarding — `core/agents/canvas-control-bridge.ts`.
+  //
+  // `candidates` is every attached browser tab (all of them own a canvas here, unlike the desktop's
+  // relay peers — see the bridge's header). Zero attached is the NORMAL state of a headless host:
+  // the agent's tmux session outlives every browser, so the bridge answers a *retryable* refusal
+  // naming what to do (open the web UI), not the permanent one.
+  //
+  // `withEditionRefusals` keeps the PERMANENT refusal for the handful of verbs this host genuinely
+  // cannot perform (`browser`, and the messaging trio) — in FRONT of the bridge, because the bridge
+  // must reach a UI to answer at all and would otherwise report a permanent fact as a retryable one.
+  // See EDITION_UNSUPPORTED_VERBS for the per-verb reasoning and the exit condition.
+  hookServer.setControlHandler(
+    withEditionRefusals(
+      initCanvasControlBridge({ platform, candidates: () => platform.clientIds() })
+    )
+  )
 
   // ---- Node identity (src/core/agents/node-auth-secret.ts) ------------------------------------
   // First time the Server Edition arms node identity. Headless Linux has no OS keychain, so the

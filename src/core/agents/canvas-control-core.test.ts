@@ -7,8 +7,8 @@ import {
   buildCanvasSkillBody,
   CONTROL_SHIM_SCRIPT
 } from './canvas-control-core'
-import { RETRYABLE } from '../core/agents/agent-message-decide'
-import { STRICT_CONTROL_VERBS } from '../core/agents/node-identity-policy'
+import { RETRYABLE } from './agent-message-decide'
+import { STRICT_CONTROL_VERBS } from './node-identity-policy'
 
 describe('parseControlRequest', () => {
   it('accepts known verbs', () => {

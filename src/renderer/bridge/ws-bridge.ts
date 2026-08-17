@@ -548,10 +548,27 @@ export function buildAgentApi(
   client: RpcClient
 ): Pick<
   NodeTerminalApi,
-  'onAgentStatus' | 'onSubagentActivity' | 'onUnreadClear' | 'answerPermission' | 'ackDone'
+  | 'onAgentStatus'
+  | 'onSubagentActivity'
+  | 'onUnreadClear'
+  | 'answerPermission'
+  | 'ackDone'
+  | 'onAgentControl'
+  | 'sendAgentControlResult'
 > {
   return {
     onAgentStatus: (listener) => client.subscribe(IPC.agentStatus, listener as Listener),
+    // Canvas control, REAL here (it was `noopUnsub` in stubs.ts, which is why no agent on a headless
+    // host could open a node). The verbs themselves are all in `Canvas.tsx`, which is the same React
+    // in this tab as in the desktop renderer — so the browser owes exactly the preload's two
+    // members, and the server owes the forwarding (`core/agents/canvas-control-bridge.ts`).
+    //
+    // The request is UNICAST to one tab, never broadcast, and the reply is matched by `requestId` on
+    // the tab that was asked: three tabs each performing `open-claude` would be three nodes and a
+    // rev fight, so `canvas-sync` reflecting one tab's mutation to its peers is what keeps them
+    // converged — the same path a human's edit takes.
+    onAgentControl: (listener) => client.subscribe(IPC.agentControl, listener as Listener),
+    sendAgentControlResult: (payload) => client.cast(IPC.agentControlResult, payload),
     // Host swept a phone read-ack → drop this browser canvas's unread flag (external clear, no re-ack).
     onUnreadClear: (listener) => client.subscribe(IPC.agentUnreadClear, listener as Listener),
     onSubagentActivity: (listener) =>

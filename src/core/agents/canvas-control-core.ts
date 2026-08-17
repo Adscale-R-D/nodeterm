@@ -1,10 +1,10 @@
 // Pure core for agent canvas control: the verb model, request validation, and the standalone
 // CLI source. No electron imports, so this module + CONTROL_CLI_SCRIPT are unit-testable.
 // Electron/ipc/server wiring lives in canvas-control.ts + index.ts + hook-server.ts.
-import { HOOK_CURL_HEADERS_SH } from '../core/agents/hook-curl-config-sh'
+import { HOOK_CURL_HEADERS_SH } from './hook-curl-config-sh'
 import { AGENT_CONFIG, AGENT_HOOK_TARGETS, BUILTIN_AGENT_IDS } from '@shared/agents/config'
-import { RETRYABLE } from '../core/agents/agent-message-decide'
-import { FANOUT_PER_TURN, PAIR_MIN_INTERVAL_MS } from '../core/agents/agent-message-flow'
+import { RETRYABLE } from './agent-message-decide'
+import { FANOUT_PER_TURN, PAIR_MIN_INTERVAL_MS } from './agent-message-flow'
 
 /**
  * The messaging verbs' retry guidance, RENDERED from `RETRYABLE` — the table is the source, and
@@ -108,7 +108,7 @@ const VERBS: ControlVerb[] = [
  * the shared home buys is a drift alarm — `control-destructive.test.ts` fails when the set and the
  * dispatch stop agreeing.
  */
-export { isDestructiveVerb, DESTRUCTIVE_VERBS } from '../shared/control-verbs'
+export { isDestructiveVerb, DESTRUCTIVE_VERBS } from '../../shared/control-verbs'
 
 /** Validate a raw (verb, args) pair into a ControlCommand, or return an { error }. */
 export function parseControlRequest(

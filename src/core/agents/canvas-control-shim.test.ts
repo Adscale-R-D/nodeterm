@@ -10,10 +10,10 @@ import os from 'node:os'
 import path from 'node:path'
 import { promisify } from 'node:util'
 import { CONTROL_SHIM_SCRIPT } from './canvas-control-core'
-import { hookServer, parseControlBody } from '../core/agents/hook-server'
-import { nodeAuthToken } from '../core/agents/node-auth-token'
-import { initPlatform, resetPlatformForTests } from '../core/platform'
-import { fakePlatform } from '../core/platform-fake'
+import { hookServer, parseControlBody } from './hook-server'
+import { nodeAuthToken } from './node-auth-token'
+import { initPlatform, resetPlatformForTests } from '../platform'
+import { fakePlatform } from '../platform-fake'
 
 const run = promisify(execFile)
 

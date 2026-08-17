@@ -44,6 +44,16 @@ The repo is split by Electron process boundary and the split is enforced, not ad
 seam the Server Edition boots from; logic left in `src/main` silently does not exist there, and the
 boundary tests cannot tell you a feature is *missing*.
 
+Worked example of exactly that cost: **canvas control** (the `nodeterm` CLI an agent uses to open and
+arrange nodes) was desktop-only for three Server-Edition phases. Not because the feature was hard
+there — all 25 verbs live in `Canvas.tsx`, platform-agnostic React that runs in a browser tab
+unchanged — but because the two forwarding hops sat *inline in `src/main/index.ts`*, twenty lines
+using nothing Electron-specific. `src/server` could not import them, so it registered a refusing
+handler instead and no agent on a headless host could open a node. Moving them to
+`core/agents/canvas-control-bridge.ts` was a wiring change; the three phases of absence were not.
+The same PR had to move the *installer* too, because a wired verb an agent is never told about is
+still not a feature — the shim and skill are the discovery half, and they were `app.getPath`-bound.
+
 ## Three surfaces
 
 A feature is not done until you have decided how it behaves on each — even if the decision is "not

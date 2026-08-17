@@ -519,9 +519,32 @@ desktop parity on agent-tail cleanup and first-connect behavior:
   boots the app into a broken/blank state — the bridge shows the standard reconnect overlay
   and the app reloads on reopen, so first-load failure now behaves like a mid-session drop.
 
-**Still deferred** (unchanged from Phase 3b): the SDK **chat node**, **canvas-control**
-(`agent:control` / the `nodeterm` CLI verbs — now a *named, non-retryable* refusal rather
-than a generic failure, see above), full **two-master flow-control coordination**
+**Canvas control now works here.** `agent:control` / the `nodeterm` CLI verbs are wired: an agent in
+a session on this host can open terminal/agent nodes, group and arrange them, read the kanban board
+and move cards, and everything else in `ControlVerb`. It is deliberately the *same* code path as the
+desktop — every verb is implemented in `Canvas.tsx`, which is platform-agnostic React and runs in the
+browser unchanged, so the shell owes only the forwarding (`core/agents/canvas-control-bridge.ts`) and
+the browser owes the two preload members (`buildAgentApi` in `ws-bridge.ts`). Three things to know:
+
+- **A browser tab must be attached.** The canvas *is* React Flow in a renderer (`canvas-sync.ts`
+  holds no canvas state), so with no tab open there is nothing to act on. That is the normal state of
+  a headless host, and the refusal says so by name (`control-no-ui-attached`) and calls itself
+  **retryable** — as distinct from the permanent refusal below, which tells the agent not to retry.
+- **The request is unicast to ONE tab** (the last attached), never broadcast: three tabs each
+  performing `open-claude` would be three nodes and a rev fight. `canvas-sync` reflects the acting
+  tab's mutation to its peers, exactly as it does for a human's edit.
+- **Still permanently refused here** (`EDITION_UNSUPPORTED_VERBS`): `browser` (no `<webview>`, no
+  `webContents`, no CDP on this host — a browser node renders in the *viewer's* own tab) and
+  `send`/`reply`/`notify`, because agent messaging lives in `src/main/agent-messaging.ts` with no core
+  service behind it. Both are refused **in front of** the bridge, so a tabless host still hears the
+  honest "do not retry" instead of a retryable no-UI message.
+
+The **discovery** half ships too: `initCanvasControl()` runs at boot, so the shim lands in the data
+dir and the skill / instruction blocks land in the agents' config dirs. Wiring the verbs without this
+leaves an agent that is never told the CLI exists.
+
+**Still deferred** (unchanged from Phase 3b): the SDK **chat node**, full **two-master
+flow-control coordination**
 (the server still re-asserts its WS backpressure pause on each send rather than co-managing
 a single actuator with the renderer), and the web folder picker's **hardcoded start
 directory**.

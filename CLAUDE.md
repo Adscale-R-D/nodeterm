@@ -79,9 +79,10 @@ The codebase is split by Electron process boundary — keep code on the correct 
   bridge, so agent-status badges, subagent cards, and the context meter now work in the
   browser (transcript-path jailed against forged POSTs). It also serves the two transcript READ
   channels (`registerTranscriptIpc` — the ⌘M chat view + the find-bar's transcript index; see the
-  ⌘M bullet under Agent support). Still deferred:
-  **canvas-control** (`agent:control`) is not wired. (The SDK **chat node** — once listed here
-  as deferred — was removed entirely, 2026-07; see the chat-node note in the node-kinds list.)
+  ⌘M bullet under Agent support). **Canvas control** (`agent:control`) — deferred for three phases,
+  wired 2026-08-17 — now runs the SAME path as the desktop; see **Canvas control on both shells**
+  under Agent support. (The SDK **chat node** — once listed here as deferred — was removed entirely,
+  2026-07; see the chat-node note in the node-kinds list.)
 - **`src/preload/`** — the only bridge. `index.ts` uses `contextBridge` to expose a
   narrow API on `window.nodeTerminal` (typed in `index.d.ts`). `contextIsolation` is on,
   `nodeIntegration` off.
@@ -1074,7 +1075,7 @@ else, and its context links must keep classifying across restarts).
 - **Canvas control (manage-nodeterm-canvas)** — agents in `CANVAS_CONTROL_CAPABLE`
   (claude/codex/gemini/copilot/opencode/grok) can create/organize/control canvas nodes from inside their
   session: a POSIX **sh+curl** shim (`nodeterm.sh`, `CONTROL_SHIM_SCRIPT` in
-  `main/canvas-control-core.ts` — the Electron-as-Node CLI is retired) POSTs
+  `core/agents/canvas-control-core.ts` — the Electron-as-Node CLI is retired) POSTs
   **form-urlencoded** (`nodeId` + `arg.<flag>` fields; `curl --data-urlencode` is the only
   escaping sh can be trusted with — `parseControlBody` reads both this and the JSON dialect) to
   the hook server's `/control/<verb>` routes; `Accept: text/plain` makes the server render the
@@ -1094,6 +1095,46 @@ else, and its context links must keep classifying across restarts).
   control the desktop's canvas. The shim is generated source no compiler checks:
   `canvas-control-shim.test.ts` runs it for real (/bin/sh against a real hook server, port AND
   unix-socket transports) — keep it that way.
+  **Canvas control on both shells (2026-08-17).** It was desktop-only for three Server-Edition
+  phases, and the gap was not in the verbs: **all 25 live in `Canvas.tsx`**, which is
+  platform-agnostic React and runs in a browser tab unchanged. What was missing was the two async
+  hops, which sat inline in `src/main/index.ts` — so `src/server` had no control handler and refused
+  every verb by name. They now live ONCE in `core/agents/canvas-control-bridge.ts` over
+  `CorePlatform` (`sendTo` / `clientIds` / `onWithSender`, all of which already existed), and BOTH
+  shells register it. The installer moved with it (`main/canvas-control.ts` →
+  `core/agents/canvas-control-install.ts`, `app.getPath('userData')` → `platform().userDataDir`),
+  because wiring verbs an agent is never TOLD about is not a feature: measured on the headless host
+  that prompted this, `NODETERM_CANVAS_CONTROL=1` was set in the session env while `~/.claude/skills`
+  did not exist at all. Five things a refactor must not undo:
+  1. **The request is UNICAST, never broadcast.** Every other push in this app fans out
+     (`agent:status`, `context:update`), but a control verb MUTATES the canvas: `open-claude`
+     broadcast to three attached browser tabs is three nodes, three `workspace.save`s and a rev
+     fight. One client performs it and `canvas-sync` reflects the mutation to the peers — the same
+     path a human's edit takes. The reply is accepted only from the client that was ASKED.
+  2. **The candidate list is the SHELL's to name, and the parameter is required.**
+     `platform.clientIds()` is the wrong default on the desktop: there it is the main window PLUS
+     every relay peer, and a relay peer is a **phone attached to sessions with no canvas at all**, so
+     "last attached" over that list hands `open-claude` to a device that can neither perform it nor
+     refuse it — the agent just waits out the 120 s timeout while the canvas sits right there. Main
+     passes `mainWindowClientIds`, the server passes every tab.
+  3. **No-UI is a RETRYABLE refusal, and permanent ones must stay in FRONT of the bridge.** The
+     canvas is React Flow in a renderer (`canvas-sync.ts` holds no canvas state), so zero tabs means
+     nothing to act on — which is the NORMAL state of a headless host, since the agent's tmux session
+     outlives every browser. `control-no-ui-attached` therefore says *retryable* and names the fix,
+     while `control-unsupported-on-this-edition` keeps saying *do not retry*. Both directions of
+     confusing them cost something: a model told "unavailable" retries forever (the bug
+     `server/control-unsupported.ts` was written for), and a model told "permanent" abandons a canvas
+     that one browser tab would have fixed. This is why `browser` and `send`/`reply`/`notify` are
+     refused by `withEditionRefusals` BEFORE the bridge — routing them through it would report a
+     permanent fact behind a transient one, since the bridge needs a tab to answer at all.
+  4. **Relay tabs stay inert on purpose** (`relay-api.ts` overrides both members back to the stubs).
+     This no longer "matches the Server Edition": a browser tab there IS the canvas the host's agents
+     belong to, whereas a relay tab is THIS machine viewing another host's sessions — a host agent's
+     `open-claude` would land in the guest's projects, on a filesystem the host cannot see.
+  5. **The browser's real pair is in `buildAgentApi` (ws-bridge) while the inert pair stays in
+     `stubs.ts`**, so `satisfies NodeTerminalApi` cannot warn you when one of the two goes missing.
+     Check both files. Same trap the three-surfaces rule warns about: a `noop` stub compiles fine
+     while doing nothing.
   **Keep the agent-facing text in sync with behaviour, in the SAME PR.** The verb help agents
   actually read is generated by `buildCanvasSkillBody` (the SKILL.md, rewritten into every config
   dir by `installCanvasSkillInto` on launch) and `buildCanvasControlInstructions` (the

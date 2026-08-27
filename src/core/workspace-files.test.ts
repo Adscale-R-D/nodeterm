@@ -64,6 +64,41 @@ describe('projectToFile / fileToProject round-trip', () => {
   })
 })
 
+describe('browser partition is re-validated on the hostile load path', () => {
+  // project.json is git-shared, hand-editable and auto-adopted (constraint 10); `data.partition` is
+  // copied verbatim to <webview partition>. A stored partition survives fileToProject ONLY when it
+  // is exactly the jar THIS project (base.id) would mint — anything else drops to un-owned.
+  const browser = (partition?: string): CanvasNodeState =>
+    node({ id: 'browser-1', kind: 'browser', url: 'https://x.test/', ...(partition ? { partition } : {}) })
+
+  it("drops a FOREIGN project's jar — a cloned project.json cannot name persist:...-<victim>", () => {
+    const f = projectToFile(project({ nodes: [browser('persist:nt-agent-browser-victim')] }), 1, 'ts', 'file-id')
+    const back = fileToProject(f, { id: 'p-mine' })
+    // The webview would have received the victim's jar; it now gets none (default session).
+    expect(back.nodes[0].partition).toBeUndefined()
+  })
+
+  it('drops an UNSAFE storage-key string (not persist:...-<isSafeNodeId>)', () => {
+    for (const bad of ['persist:nt-agent-browser-../../x', 'evil', 'persist:nt-agent-browser-a b', '']) {
+      const f = projectToFile(project({ nodes: [browser(bad)] }), 1, 'ts', 'file-id')
+      expect(fileToProject(f, { id: 'p-mine' }).nodes[0].partition).toBeUndefined()
+    }
+  })
+
+  it('KEEPS the jar that THIS project would mint for itself (same-machine reload)', () => {
+    const own = 'persist:nt-agent-browser-p-mine'
+    const f = projectToFile(project({ nodes: [browser(own)] }), 1, 'ts', 'file-id')
+    expect(fileToProject(f, { id: 'p-mine' }).nodes[0].partition).toBe(own)
+  })
+
+  it('leaves a user-opened (partition-less) browser node and non-browser nodes untouched', () => {
+    const f = projectToFile(project({ nodes: [browser(), node({ id: 't1', partition: 'x' } as never)] }), 1, 'ts', 'file-id')
+    const back = fileToProject(f, { id: 'p-mine' })
+    expect(back.nodes[0].partition).toBeUndefined() // user-opened browser: stays absent
+    expect((back.nodes[1] as { partition?: string }).partition).toBe('x') // non-browser: not our concern
+  })
+})
+
 describe('per-project capability fields in the shared file', () => {
   it('a capability round-trips through projectToFile/fileToProject, and a non-literal-true does not', () => {
     const p = project({ agentBrowserControl: true })
@@ -102,6 +137,38 @@ describe('per-project capability fields in the shared file', () => {
       { id: 'p1', cwd: '/a/foo' }
     )
     expect(forged.capabilityAck).toBeUndefined()
+  })
+})
+
+describe('breadcrumbs are MACHINE-LOCAL, like viewport/capabilityAck', () => {
+  it('round-trips through the index entry and never reaches the shared file', () => {
+    const stop = { nodeId: 'term-abc', at: 1000, note: 'terminal · t' }
+    const p = project({ cwd: '/a/foo', breadcrumbs: [stop] })
+    const { index, files } = splitWorkspace(
+      { version: 2, activeProjectId: 'p1', projects: [p] },
+      () => 1,
+      '2026-08-15T00:00:00.000Z'
+    )
+    expect(index.entries[0].breadcrumbs).toEqual([stop])
+    expect(serializeProjectFile(files.get('/a/foo')!)).not.toContain('breadcrumbs')
+
+    const restored = fileToProject(files.get('/a/foo')!, {
+      id: 'p1', cwd: '/a/foo', breadcrumbs: [stop]
+    })
+    expect(restored.breadcrumbs).toEqual([stop])
+
+    // A file-borne `breadcrumbs` (forgery — a repo carrying navigation history) is never read.
+    const forged = fileToProject(
+      { ...files.get('/a/foo')!, breadcrumbs: [stop] } as never,
+      { id: 'p1', cwd: '/a/foo' }
+    )
+    expect(forged.breadcrumbs).toBeUndefined()
+  })
+
+  it('an entry with no breadcrumbs adds no bytes to the committed file', () => {
+    const f = projectToFile(project(), 1, 'ts')
+    expect('breadcrumbs' in f).toBe(false)
+    expect(serializeProjectFile(f)).not.toContain('breadcrumbs')
   })
 })
 
@@ -513,5 +580,37 @@ describe('framingViewport', () => {
   it('a canvas far past the argument limit still frames (a loop, not a spread)', () => {
     const many = Array.from({ length: 250_000 }, (_, i) => node({ id: `t${i}`, position: { x: i + 5, y: i + 9 } }))
     expect(framingViewport(many)).toEqual({ x: 75, y: 71, zoom: 1 })
+  })
+})
+
+describe('project icon: emitted only when valid, sanitized on the hostile load path', () => {
+  it('a valid icon round-trips projectToFile -> fileToProject', () => {
+    const p = project({ icon: { type: 'lucide', name: 'rocket' } })
+    const f = projectToFile(p, 1, 'now')
+    expect(f.icon).toEqual({ type: 'lucide', name: 'rocket' })
+    const back = fileToProject(f, { id: p.id })
+    expect(back.icon).toEqual({ type: 'lucide', name: 'rocket' })
+  })
+
+  it('an invalid in-memory icon is never written to the file (no bytes)', () => {
+    const p = project({ icon: { type: 'lucide', name: 'not-a-real-icon' } as any })
+    const f = projectToFile(p, 1, 'now')
+    expect(f.icon).toBeUndefined()
+  })
+
+  it('an absent icon adds no bytes to the file', () => {
+    const f = projectToFile(project(), 1, 'now')
+    expect(f.icon).toBeUndefined()
+  })
+
+  it('an oversized icon on disk is dropped on load (fileToProject degrades to no icon)', () => {
+    const hugeSrc = `data:image/png;base64,${'A'.repeat(400_000)}`
+    const f = { ...projectToFile(project(), 1, 'now'), icon: { type: 'image', src: hugeSrc, source: 'upload' } } as any
+    expect(fileToProject(f, { id: 'p1' }).icon).toBeUndefined()
+  })
+
+  it('a hand-edited hostile icon shape on disk is dropped on load', () => {
+    const f = { ...projectToFile(project(), 1, 'now'), icon: { type: 'lucide', name: 'not-real' } } as any
+    expect(fileToProject(f, { id: 'p1' }).icon).toBeUndefined()
   })
 })

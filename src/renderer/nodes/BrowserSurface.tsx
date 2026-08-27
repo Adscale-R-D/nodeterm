@@ -24,10 +24,26 @@ interface BrowserSurfaceProps {
   nodeId: string
   /** Initial URL (seeded once at mount). */
   url: string
+  /**
+   * The Electron session partition. Set for an AGENT-opened node
+   * (`persist:nt-agent-browser-<projectId>`), absent for a USER-opened node (default session).
+   * Applied straight to `<webview partition>`, which is honoured only at attach — the discard/restore
+   * remount re-applies the SAME value, so the guest rejoins its jar ([MEASURED, Electron 42.8.1],
+   * Probe B). Threaded identically here and in the card modal so the two mounts share one jar
+   * (`browser-partition-parity.test.tsx`); a mismatch reads to a user as "my login vanished".
+   */
+  partition?: string
   /** Persist the top-level URL after a navigation. */
   onUrlChange: (url: string) => void
   /** Persist the page title. */
   onTitleChange: (title: string) => void
+  /**
+   * The memory saver released this surface's guest process. Optional; today's one caller is a
+   * background keep-alive GHOST (see lib/webviewKeepAlive.ts), which answers by dropping its pool
+   * entry — a hidden husk with no guest has nothing left to keep alive. An ACTIVE node passes
+   * nothing and keeps the plate-and-restore behavior unchanged.
+   */
+  onGuestDiscarded?: () => void
 }
 
 /**
@@ -37,7 +53,14 @@ interface BrowserSurfaceProps {
  * webview never emits dom-ready, so imperative loadURL before then is a no-op); `did-navigate` only
  * updates the address, so in-page navigation can't loop.
  */
-export function BrowserSurface({ nodeId, url, onUrlChange, onTitleChange }: BrowserSurfaceProps) {
+export function BrowserSurface({
+  nodeId,
+  url,
+  partition,
+  onUrlChange,
+  onTitleChange,
+  onGuestDiscarded
+}: BrowserSurfaceProps) {
   const ref = useRef<WebviewEl | null>(null)
   const rootRef = useRef<HTMLDivElement | null>(null)
   const lastUrlRef = useRef('')
@@ -176,6 +199,7 @@ export function BrowserSurface({ nodeId, url, onUrlChange, onTitleChange }: Brow
       // A failure banner belongs to the page we just released; the restore re-navigates and will
       // raise its own if the load fails again.
       setFailed('')
+      onGuestDiscarded?.()
     },
     onRestore: () => {
       setDiscarded(false)
@@ -256,6 +280,7 @@ export function BrowserSurface({ nodeId, url, onUrlChange, onTitleChange }: Brow
           <webview
             ref={ref as unknown as React.Ref<HTMLElement>}
             src={src || undefined}
+            partition={partition || undefined}
             allowpopups={true}
             style={{ width: '100%', height: '100%' }}
           />

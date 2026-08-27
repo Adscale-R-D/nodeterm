@@ -1,6 +1,7 @@
 import { promises as fs } from 'fs'
 import { randomUUID } from 'node:crypto'
 import path from 'path'
+import { renameAtomic, writeFileAtomic } from './fs-atomic'
 import { IPC } from '../shared/ipc'
 import { platform } from './platform'
 import {
@@ -12,11 +13,18 @@ import {
   serializeProjectFile, splitWorkspace, validKanban,
   type IndexEntryV3, type ProjectFileV1, type WorkspaceIndexV3
 } from './workspace-files'
+import { readProjectSettingsFile, writeProjectSettingsFile } from './project-settings-files'
+import {
+  parseProjectSettingsFile, sameProjectSettingsContent, sanitizeProjectLocalSettings,
+  sanitizeProjectSettingsDoc, serializeProjectSettingsFile,
+  type ProjectLocalSettings, type ProjectSettingsDoc, type ProjectSettingsFileV1,
+  type ProjectSettingsSnapshot
+} from '../shared/project-settings'
 import { readProjectCapabilities, type ProjectCapability } from '../shared/project-capabilities'
 import type { CapabilityAckMap } from './project-capability-consent'
 import { hoistLegacyNodeExec, type LocalNodeExecMap } from '../shared/node-exec'
 import { collisionSeed, derivedProjectId, freshProjectId } from '../shared/project-id'
-import { appendProjectNode, type RemoteNodeInput } from './project-node-append'
+import { appendProjectNode, removeProjectNode, type RemoteNodeInput } from './project-node-append'
 
 /** Checked remote read: `absent` (no file — safe to push our cache) is NOT `error` (connection
  *  down / ssh failure — a failed read is never evidence of absence, so nothing may be pushed). */
@@ -26,9 +34,19 @@ export type RemoteReadResult = { status: 'ok'; content: string } | { status: 'ab
 export interface RemoteWorkspaceIO {
   read(projectId: string, ssh: NonNullable<Project['ssh']>): Promise<RemoteReadResult>
   write(projectId: string, ssh: NonNullable<Project['ssh']>, content: string): Promise<boolean>
+  /** `.nodeterm/settings.json` on the same host. Optional: an IO that predates the settings leg (or
+   *  a test fake that only cares about project.json) simply leaves the project on its offline cache,
+   *  which is exactly the disconnected behaviour. */
+  readSettings?(projectId: string, ssh: NonNullable<Project['ssh']>): Promise<RemoteReadResult>
+  writeSettings?(projectId: string, ssh: NonNullable<Project['ssh']>, content: string): Promise<boolean>
 }
 
 const projectFilePath = (cwd: string): string => path.join(cwd, PROJECT_DIR, PROJECT_FILE)
+
+/** Alias of the shared `ProjectSettingsSnapshot` (moved to `shared/project-settings.ts` so the
+ *  renderer's `ProjectSettingsApi` can name the shape without importing core) — the store's
+ *  methods keep this name in their signatures. */
+export type ProjectSettingsState = ProjectSettingsSnapshot
 
 /** A parsed project file together with the exact bytes it was parsed from. `lastWritten` must
  *  record `raw` — see the field it caches. */
@@ -46,35 +64,27 @@ interface LoadedEntry {
   file?: ProjectFileV1
 }
 
-let tmpSeq = 0
-async function writeAtomic(filePath: string, content: string): Promise<void> {
-  // Unique per write: writers that bypass each other's queue (a second app instance, the SSH
+export async function writeAtomic(filePath: string, content: string): Promise<void> {
+  // Unique temp per write: writers that bypass each other's queue (a second app instance, the SSH
   // poll's index write) must never share a tmp file — interleaved writes into one shared tmp
-  // published spliced JSON under the atomic rename.
-  const tmp = `${filePath}.${process.pid}.${++tmpSeq}.tmp`
-  try {
-    await fs.writeFile(tmp, content, 'utf-8')
-    await fs.rename(tmp, filePath)
-  } catch (e) {
-    // A unique name never self-heals the way the old fixed one did (the next save just reused
-    // it), so a failed write removes its own temp — project.json temps live in the USER'S repo,
-    // where litter is visible. The error still propagates; per-file callers swallow it by design.
-    await fs.rm(tmp, { force: true }).catch(() => {})
-    throw e
-  }
+  // published spliced JSON under the atomic rename. writeFileAtomic also removes its own temp on
+  // failure (project.json temps live in the USER'S repo, where litter is visible) and retries the
+  // rename over Windows sharing violations. The error still propagates; per-file callers swallow
+  // it by design.
+  await writeFileAtomic(filePath, content)
 }
 
 /** Remove tmp litter next to `target` left by writers that died mid-write: the legacy fixed
- *  `<file>.tmp` name and any `<file>.<pid>.<seq>.tmp` from another (dead) pid. Our own pid's
- *  temps are in-flight writes and stay. Same family rule as provider-cookie's sweep. */
+ *  `<file>.tmp` name and any `<file>.<pid>.<seq>[.<uuid>].tmp` from another (dead) pid. Our own
+ *  pid's temps are in-flight writes and stay. Same family rule as provider-cookie's sweep. */
 async function sweepStaleTmp(target: string): Promise<void> {
   try {
     const dir = path.dirname(target)
     const base = path.basename(target)
     for (const entry of await fs.readdir(dir)) {
       if (!entry.startsWith(base) || !entry.endsWith('.tmp')) continue
-      const middle = entry.slice(base.length, -'.tmp'.length) // '' or '.<pid>.<seq>'
-      const owner = /^\.(\d+)\.\d+$/.exec(middle)?.[1]
+      const middle = entry.slice(base.length, -'.tmp'.length) // '' or '.<pid>.<seq>[.<uuid>]'
+      const owner = /^\.(\d+)\.\d+(?:\.[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})?$/.exec(middle)?.[1]
       if (middle === '' || (owner && owner !== String(process.pid))) {
         await fs.rm(path.join(dir, entry), { force: true }).catch(() => undefined)
       }
@@ -127,6 +137,25 @@ export class WorkspaceStore {
    *  node we never had, and the tie is broken toward rescuing (a resurrected node is visible and
    *  deletable again; a deleted session node is gone with no trace of where it went). */
   private clearedNodes = new Map<string, Set<string>>()
+  /** project id -> this machine's settings overlay, already sanitized. The map — not the index
+   *  entry — is the live copy: `splitWorkspace` rebuilds entries from the renderer's Workspace,
+   *  which has never carried machine-local state, so every save would otherwise drop the overlay
+   *  (the same reason `localExec`/`cache` are re-attached below). Absent = no overlay. */
+  private localSettingsByProject = new Map<string, ProjectLocalSettings>()
+  /** ssh project id -> last shared settings.json seen on that host (offline copy). Only entries that
+   *  round-tripped through `parseProjectSettingsFile` are in here. */
+  private settingsCacheByProject = new Map<string, ProjectSettingsFileV1>()
+  /** ssh project ids whose settings.json was git-conflict-marked on the last read: `writeSshSettings`
+   *  refuses while an id is in here instead of picking a side of the merge (the local leg refuses
+   *  the same way, straight off the file it re-reads). Cleared as soon as a read finds the file
+   *  parsing again — or gone. Runtime-only, and deliberately NOT relied on to be populated: a write
+   *  that finds both settings maps cold does its own read first, because "a read established this
+   *  flag before any write" is an assumption about panel order, not something this store enforces. */
+  private settingsConflictByProject = new Set<string>()
+  /** project id -> the shared settings file as last read/written, i.e. the rev source for the NEXT
+   *  write. Runtime-only: a write that has not read first starts at rev 1, which is the same thing
+   *  a fresh file means. */
+  private lastSharedSettings = new Map<string, ProjectSettingsFileV1>()
   /** Last index written/loaded — lets readLocalRef/refresh resolve entries without a full load. */
   private index: WorkspaceIndexV3 | null = null
   /** Optional hook fired after every load()/save() — the watcher re-syncs its watch set (Task 5). */
@@ -142,6 +171,15 @@ export class WorkspaceStore {
     platform().handle(IPC.workspaceLoad, () => this.load())
     platform().handle(IPC.workspaceSave, (workspace: Workspace) => this.save(workspace))
     platform().handle(IPC.workspaceProbeFolder, (folder: string) => this.probeFolder(folder))
+    platform().handle(IPC.workspaceProjectFileState, (cwd: unknown) =>
+      typeof cwd === 'string' && cwd ? this.projectFileState(cwd) : 'unreadable')
+    platform().handle(IPC.projectSettingsRead, (projectId: unknown) =>
+      typeof projectId === 'string' ? this.readProjectSettings(projectId) : null)
+    platform().handle(IPC.projectSettingsWriteShared, (projectId: unknown, doc: ProjectSettingsDoc) =>
+      typeof projectId === 'string' ? this.writeProjectSettings(projectId, doc) : false)
+    platform().handle(IPC.projectSettingsUpdateLocal,
+      (projectId: unknown, local: ProjectLocalSettings | undefined) =>
+        typeof projectId === 'string' ? this.updateLocalProjectSettings(projectId, local) : false)
   }
 
   /**
@@ -180,7 +218,7 @@ export class WorkspaceStore {
       if (sideline) {
         const backup = `${path.basename(this.indexPath)}.corrupt-${Date.now()}`
         try {
-          await fs.rename(this.indexPath, path.join(platform().userDataDir, backup))
+          await renameAtomic(this.indexPath, path.join(platform().userDataDir, backup))
           // Only AFTER the rename succeeded: the note promises a backup exists.
           this.noteCorruptIndex(backup)
         } catch { /* best effort — never destroy data */ }
@@ -246,6 +284,7 @@ export class WorkspaceStore {
               closed: e.closed,
               viewport: e.viewport,
               defaultAccountId: e.defaultAccountId,
+              breadcrumbs: e.breadcrumbs,
               capabilityAck: e.capabilityAck,
               localExec: this.execOverlay(e, p)
             })
@@ -265,6 +304,7 @@ export class WorkspaceStore {
               closed: e.closed,
               viewport: e.viewport,
               defaultAccountId: e.defaultAccountId,
+              breadcrumbs: e.breadcrumbs,
               capabilityAck: e.capabilityAck,
               localExec: this.execOverlay(e, e.cache)
             })
@@ -276,6 +316,8 @@ export class WorkspaceStore {
       }
     }
     await this.repairDuplicateIds(built, sideline)
+    // AFTER the repair: it re-keys entries in place, and the maps are keyed by project id.
+    this.adoptSettingsFromIndex(index)
     const projects = built.map((b) => b.project)
     const active = projects.some((p) => p.id === index.activeProjectId && !p.unavailable)
       ? index.activeProjectId
@@ -380,6 +422,306 @@ export class WorkspaceStore {
   }
 
   /**
+   * Loads the settings halves out of a just-read index into the two runtime maps.
+   *
+   * workspace.json is hand-editable (and, on Server Edition, sits next to other users' reach), so
+   * neither field is trusted on the way in: the overlay goes through the same sanitizer a settings
+   * file gets, and a cached SHARED file is accepted only if it still parses as one — the parser is
+   * reused as the validator so there is exactly one definition of "a valid settings file",
+   * wherever the bytes came from.
+   */
+  private adoptSettingsFromIndex(index: WorkspaceIndexV3): void {
+    this.localSettingsByProject.clear()
+    this.settingsCacheByProject.clear()
+    for (const e of index.entries) {
+      const local = sanitizeProjectLocalSettings(e.localSettings)
+      if (local && Object.keys(local).length) this.localSettingsByProject.set(e.id, local)
+      if (!e.ssh || !e.settingsCache) continue
+      const parsed = parseProjectSettingsFile(JSON.stringify(e.settingsCache))
+      if (parsed.status === 'ok') this.settingsCacheByProject.set(e.id, parsed.file)
+    }
+  }
+
+  /** Writes the maps back onto an index about to be persisted — the machine-local half that
+   *  `splitWorkspace` cannot know about. Runs on every index write, so an entry the maps no longer
+   *  cover loses the field rather than keeping a stale copy of it. */
+  private applySettingsToIndex(index: WorkspaceIndexV3): void {
+    for (const e of index.entries) {
+      const local = this.localSettingsByProject.get(e.id)
+      if (local) e.localSettings = local
+      else delete e.localSettings
+      // Only an ssh entry has anywhere to cache: a local ref's shared file is one disk read away,
+      // and an inline canvas has no shared file at all.
+      const cached = e.ssh ? this.settingsCacheByProject.get(e.id) : undefined
+      if (cached) e.settingsCache = cached
+      else delete e.settingsCache
+    }
+  }
+
+  /**
+   * The shared + local settings of one project. `null` means the id names no entry (never "no
+   * settings" — an entry with neither file nor overlay answers `{shared: null, local: undefined}`).
+   *
+   * The shared doc is read from disk on every call rather than cached: `.nodeterm/settings.json` is
+   * a git-tracked file a checkout/merge/teammate rewrites behind our back, and a settings read is
+   * rare enough (a panel opening, a launch) that a stale answer would cost more than the read does.
+   */
+  async readProjectSettings(projectId: string): Promise<ProjectSettingsState | null> {
+    const e = this.index?.entries.find((x) => x.id === projectId)
+    if (!e) return null
+    const local = this.localSettingsByProject.get(projectId)
+    if (e.ssh) return this.readSshSettings(projectId, e.ssh, local)
+    // An inline canvas has no folder, so there is no shared document to have.
+    if (!e.cwd) return { shared: null, local }
+    const read = await readProjectSettingsFile(e.cwd)
+    if (read.status === 'ok') {
+      // The rev source for the next write — a write that skipped the read would restart at rev 1
+      // and lose the counter a remote/offline comparison depends on.
+      this.lastSharedSettings.set(projectId, read.file)
+      return { shared: read.file, local }
+    }
+    // conflict: the file exists but is mid-merge; it is left untouched for the user to resolve and
+    // reported as such, so a caller shows "resolve this" instead of "this project has no settings".
+    if (read.status === 'conflict') return { shared: null, local, conflict: true }
+    return { shared: null, local } // absent / invalid (sidelined) / unreadable
+  }
+
+  /**
+   * The ssh half of `readProjectSettings`: reconcile the host's settings.json against the offline
+   * cache, then answer with whichever is authoritative. Same rules the project.json mirror lives by:
+   *
+   *  - no settings IO / read `error` → serve the cache. A failed read is never evidence of absence,
+   *    so nothing is pushed and nothing is dropped; the project stays usable offline.
+   *  - `absent` → the host has no file; heal it from the cache (the mirror direction) and serve the
+   *    cache. Without a cache there is simply no shared document yet.
+   *  - `ok` → the bytes are HOSTILE INPUT (a git-shared file on a machine we do not control) and go
+   *    through `parseProjectSettingsFile` alone. The higher rev wins, ties to the host, so a
+   *    teammate's push is adopted rather than fought over, while a STRICTLY newer cache (this
+   *    machine edited while disconnected) is pushed back instead of being silently overwritten.
+   *  - `conflict`/`invalid` → the remote copy cannot be trusted and must not be clobbered; the cache
+   *    is served as the last known good, with `conflict` flagged so a caller can say "resolve this"
+   *    (and, for a conflict, remembered so a WRITE refuses too — see `settingsConflictByProject`).
+   *
+   * The cache is read AFTER the round trip, never before: a cache-first write can land while this
+   * read is in flight, and comparing the host's answer against a snapshot taken before the await
+   * would adopt an older remote doc over an edit the user has already been told was saved.
+   */
+  private async readSshSettings(
+    projectId: string,
+    ssh: NonNullable<Project['ssh']>,
+    local: ProjectLocalSettings | undefined
+  ): Promise<ProjectSettingsState> {
+    const res = await this.remoteIO?.readSettings?.(projectId, ssh)
+    const cached = this.settingsCacheByProject.get(projectId) ?? null
+    if (!res || res.status === 'error') return { shared: cached, local }
+    if (res.status === 'absent') {
+      // The host has no file to be mid-merge: whatever conflict a previous read saw is gone.
+      this.settingsConflictByProject.delete(projectId)
+      if (cached) await this.pushSshSettings(projectId, ssh, cached)
+      return { shared: cached, local }
+    }
+    const parsed = parseProjectSettingsFile(res.content)
+    if (parsed.status === 'conflict') {
+      this.settingsConflictByProject.add(projectId)
+      return { shared: cached, local, conflict: true }
+    }
+    // `invalid` deliberately leaves the flag alone: unparsable is not "resolved", and refusing to
+    // write is the conservative side of a file we still cannot read.
+    if (parsed.status === 'invalid') return { shared: cached, local }
+    this.settingsConflictByProject.delete(projectId) // the host's file parses again — resolved
+    const file = parsed.file
+    if (cached && file.rev < cached.rev) {
+      // Offline edits outrank the host's older copy — push them rather than letting the next read
+      // adopt a document the user already replaced here.
+      await this.pushSshSettings(projectId, ssh, cached)
+      return { shared: cached, local }
+    }
+    this.lastSharedSettings.set(projectId, file)
+    // Only persist when the cache actually moved: a read is the common case, and rewriting
+    // workspace.json on every panel open would be a disk write per glance.
+    if (!cached || cached.rev !== file.rev || !sameProjectSettingsContent(cached, file)) {
+      this.settingsCacheByProject.set(projectId, file)
+      await this.persistIndexNow().catch(() => {})
+    }
+    return { shared: file, local }
+  }
+
+  /** Best-effort mirror of one settings document to the host. A failure is not an error anywhere:
+   *  the cache is the durable copy and the next read reconciles (heal / push again). */
+  private async pushSshSettings(
+    projectId: string,
+    ssh: NonNullable<Project['ssh']>,
+    file: ProjectSettingsFileV1
+  ): Promise<boolean> {
+    const io = this.remoteIO
+    if (!io?.writeSettings) return false
+    try {
+      return await io.writeSettings(projectId, ssh, serializeProjectSettingsFile(file))
+    } catch {
+      return false
+    }
+  }
+
+  /**
+   * The ssh half of `writeProjectSettings`, CACHE-FIRST: the rev-bumped document lands in the
+   * offline cache and workspace.json BEFORE it is offered to the host, so a connection that dies
+   * mid-save loses a round trip, never the user's edit. The remote write is then best-effort —
+   * `true` here means "this edit is safely recorded", and an unreachable host is reconciled by the
+   * next read (which heals an absent file and pushes a cache that outranks the remote).
+   *
+   * The doc is sanitized on the way in because this cache is served straight from memory and
+   * persisted into workspace.json; running it through the same sanitizer a read applies keeps one
+   * definition of "a valid settings file" whichever side the bytes came from.
+   *
+   * REFUSES a git-conflict-marked host file, exactly like the local leg refuses a conflicted
+   * settings.json: a conflicted file is the user's to resolve, and pushing over it would silently
+   * pick a side of a merge nobody has looked at. Two mechanisms enforce that, because the ssh leg
+   * cannot afford the local leg's read-before-every-write (a round trip per save):
+   *  - WARM (this run has a cache or a last-read doc): the runtime flag a read left behind, which
+   *    clears itself the moment a read finds the file parsing again — or gone.
+   *  - COLD (neither map knows this project, so no read has ever compared): one read here, or the
+   *    refusal would be a promise nothing checks — the first save of a session would blind-write
+   *    the mirror over a merge. `absent` writes rev 1 as before; a read `error` proceeds
+   *    cache-first, since being unable to reach the host is exactly what the cache exists for.
+   */
+  private async writeSshSettings(
+    projectId: string,
+    ssh: NonNullable<Project['ssh']>,
+    doc: ProjectSettingsDoc
+  ): Promise<boolean> {
+    if (this.settingsConflictByProject.has(projectId)) return false
+    let prev = this.settingsCacheByProject.get(projectId) ?? this.lastSharedSettings.get(projectId) ?? null
+    if (!prev && this.remoteIO?.readSettings) {
+      // A throwing IO is an unreachable host, not a verdict on the file — same fail-open shape as
+      // `pushSshSettings`, and the cache-first write below is what makes that survivable.
+      let cold: RemoteReadResult = { status: 'error' }
+      try {
+        cold = await this.remoteIO.readSettings(projectId, ssh)
+      } catch { /* offline: fall through to the cache-first write */ }
+      if (cold.status === 'ok') {
+        const parsed = parseProjectSettingsFile(cold.content)
+        if (parsed.status === 'conflict') {
+          this.settingsConflictByProject.add(projectId)
+          return false
+        }
+        // `invalid` is left as prev=null: the host's bytes are unusable as a rev source, and the
+        // cache-first write is what gives the user a readable file again.
+        if (parsed.status === 'ok') {
+          prev = parsed.file
+          this.lastSharedSettings.set(projectId, parsed.file)
+          this.settingsConflictByProject.delete(projectId)
+        }
+      }
+    }
+    // Canonical shape (bookkeeping first, then the sanitized doc) — the same order
+    // `parseProjectSettingsFile` produces, so a cache built here compares equal to the identical
+    // document read back from the host instead of looking like a change. Sanitizing on the way in
+    // keeps one definition of "a valid settings file" whichever side the bytes came from, and drops
+    // the stale version/rev/savedAt of a document a caller hands straight back.
+    const next: ProjectSettingsFileV1 = {
+      version: 1,
+      rev: (prev?.rev ?? 0) + 1,
+      savedAt: new Date().toISOString(),
+      ...sanitizeProjectSettingsDoc(doc)
+    }
+    this.settingsCacheByProject.set(projectId, next)
+    this.lastSharedSettings.set(projectId, next)
+    try {
+      await this.persistIndexNow()
+    } catch {
+      return false // the edit is live in this session, but it did not durably land
+    }
+    await this.pushSshSettings(projectId, ssh, next)
+    return true
+  }
+
+  /**
+   * Whole-document write of the GIT-SHARED settings file. Whole-document on purpose: a per-field
+   * patch grammar would have to merge against a file that another writer (a teammate's commit, the
+   * user's editor) may have changed since the caller read it, and silently merging into a file the
+   * caller never saw is how the shared half stops meaning what the repo says.
+   *
+   * ALWAYS READS FIRST — not just when this run has never read the file. A remembered rev is not
+   * evidence of the file's current STATE: `.nodeterm/settings.json` is git-tracked, so between the
+   * panel's read and the user's save a pull/merge can leave conflict markers, and a write off the
+   * warm rev would overwrite them (the same file `readProjectSettings` deliberately refuses to
+   * parse). Without any read a fresh process is worse still — rev restarts at 1 over a file that was
+   * at rev N. Settings are cold (a panel save, not a keystroke), so one read per write is the ruled
+   * cost of never writing a file this store has not just looked at.
+   *
+   * An ssh project takes the cache-first remote leg instead (`writeSshSettings`).
+   *
+   * False = there is nowhere to write it, or writing would destroy something. On BOTH legs: an
+   * unknown id, an inline canvas (no folder), and a git-conflicted shared file — the user's to
+   * resolve, left untouched (the local leg sees it in the read-before-write; the ssh leg sees it
+   * WARM from a cache or last-read doc this run already has, or — COLD, when neither map knows this
+   * project yet — from the one read `writeSshSettings` does itself before its first write, per its
+   * own docstring above). Local leg only: an unreadable file (a failed read is never evidence of
+   * absence, so it may not be clobbered either) or a failed write. SSH leg only: an index write that
+   * did not persist — a failed REMOTE write is not false there, because the cache already holds
+   * the edit.
+   */
+  async writeProjectSettings(projectId: string, doc: ProjectSettingsDoc): Promise<boolean> {
+    const e = this.index?.entries.find((x) => x.id === projectId)
+    if (!e) return false
+    if (e.ssh) return this.writeSshSettings(projectId, e.ssh, doc)
+    if (!e.cwd) return false
+    const read = await readProjectSettingsFile(e.cwd)
+    // absent → nothing to lose, start at rev 1. invalid → the read already sidelined the only
+    // copy to `.corrupt-<ts>`, so this write destroys nothing either.
+    if (read.status === 'conflict' || read.status === 'error') return false
+    let prev: ProjectSettingsFileV1 | null = null
+    if (read.status === 'ok') {
+      prev = read.file
+      this.lastSharedSettings.set(projectId, read.file)
+    }
+    try {
+      const written = await writeProjectSettingsFile(
+        e.cwd, doc, prev, new Date().toISOString()
+      )
+      this.lastSharedSettings.set(projectId, written)
+      return true
+    } catch {
+      // Folder gone / read-only checkout: the caller is told the doc did not land, exactly like a
+      // failed project.json write leaves the entry stale rather than pretending it saved.
+      return false
+    }
+  }
+
+  /**
+   * Replaces this machine's overlay for one project (undefined = clear it) and persists the index
+   * NOW, without waiting for a canvas save: a settings edit is often the only thing the user did in
+   * that session, and an overlay that lives only in memory until the next node is dragged is an
+   * overlay that quietly disappears when the app quits.
+   */
+  async updateLocalProjectSettings(
+    projectId: string,
+    local: ProjectLocalSettings | undefined
+  ): Promise<boolean> {
+    const e = this.index?.entries.find((x) => x.id === projectId)
+    if (!e) return false
+    const clean = local === undefined ? undefined : sanitizeProjectLocalSettings(local)
+    if (clean && Object.keys(clean).length) this.localSettingsByProject.set(projectId, clean)
+    else this.localSettingsByProject.delete(projectId)
+    await this.persistIndexNow()
+    return true
+  }
+
+  /** Rewrites the CURRENT index with the settings maps applied. On `saveChain` like every other
+   *  index write, so it can neither interleave with a save's own rewrite nor invent entries: it
+   *  persists exactly what `this.index` already holds (and does nothing before the first load). */
+  private persistIndexNow(): Promise<void> {
+    const run = this.saveChain.then(async () => {
+      const index = this.index
+      if (!index) return
+      this.applySettingsToIndex(index)
+      await writeAtomic(this.indexPath, JSON.stringify(index))
+    })
+    this.saveChain = run.catch(() => {})
+    return run
+  }
+
+  /**
    * Reads + parses one project file. Only the authoritative loadV3 path passes `sideline: true`,
    * which renames an unparsable/wrong-shape file to `.corrupt-<ts>` so a later save can't overwrite
    * the only copy. Read-only callers (probeFolder — an RPC reachable with arbitrary paths on Server
@@ -405,7 +747,7 @@ export class WorkspaceStore {
     } catch { /* not JSON — sideline below */ }
     if (sideline) {
       try {
-        await fs.rename(file, `${file}.corrupt-${Date.now()}`)
+        await renameAtomic(file, `${file}.corrupt-${Date.now()}`)
       } catch { /* best effort — never destroy data */ }
     }
     return null
@@ -460,6 +802,11 @@ export class WorkspaceStore {
       entry.localApprovalId = previous?.localApprovalId || randomUUID()
     }
 
+    // The settings overlay / ssh settings cache ride every index write, like `localExec` and
+    // `cache`: `splitWorkspace` builds entries from the renderer's Workspace, which carries no
+    // machine-local state, so without this each autosave would erase them from disk.
+    this.applySettingsToIndex(index)
+
     // An unavailable placeholder carries no real data. splitWorkspace already dropped its file
     // and cache; here we restore the machine-local payload (ssh offline cache) from the previous
     // index so the index rewrite doesn't drop a good cache we still can't reach.
@@ -486,6 +833,7 @@ export class WorkspaceStore {
         // moment a folder is briefly unmounted.
         if (old?.viewport) e.viewport = old.viewport
         if (old?.defaultAccountId) e.defaultAccountId = old.defaultAccountId
+        if (old?.breadcrumbs) e.breadcrumbs = old.breadcrumbs
         // The clone-notice acknowledgment must also survive an unavailable window: forgetting it
         // would re-raise a notice the user already answered the moment the folder remounts.
         if (old?.capabilityAck) e.capabilityAck = old.capabilityAck
@@ -598,6 +946,25 @@ export class WorkspaceStore {
     return read ? fileToProject(read.file, { id: freshProjectId(), cwd: folder }) : null
   }
 
+  /**
+   * Is this folder's `.nodeterm/project.json` genuinely gone, merely unreadable, or fine?
+   *
+   * `readProjectFile` collapses all three into `null`, which is right for its callers (they only
+   * need "can I use it") but wrong for recovery: clearing a project's `unavailable` placeholder
+   * lets the next save WRITE its empty canvas, so doing that on a file that is present but
+   * momentarily unreadable (permissions, a stalled mount) would overwrite the only copy. A failed
+   * read is never evidence of absence — so the errno is the answer, and anything that is not a
+   * definite ENOENT reports `unreadable`, the side that changes nothing. See issue #385.
+   */
+  async projectFileState(cwd: string): Promise<'present' | 'absent' | 'unreadable'> {
+    try {
+      await fs.stat(projectFilePath(cwd))
+      return 'present'
+    } catch (err) {
+      return (err as NodeJS.ErrnoException)?.code === 'ENOENT' ? 'absent' : 'unreadable'
+    }
+  }
+
   localRefPaths(): string[] {
     return (this.index?.entries ?? []).filter((e) => e.cwd).map((e) => projectFilePath(e.cwd!))
   }
@@ -622,6 +989,7 @@ export class WorkspaceStore {
       closed: e.closed,
       viewport: e.viewport,
       defaultAccountId: e.defaultAccountId,
+      breadcrumbs: e.breadcrumbs,
       capabilityAck: e.capabilityAck,
       localExec: e.localExec
     })
@@ -663,6 +1031,16 @@ export class WorkspaceStore {
    *  projects. Sync (reads the in-memory index): the board-log router's local-vs-unsupported call. */
   localCwdForProject(projectId: string): string | undefined {
     return this.index?.entries.find((e) => e.id === projectId && e.cwd)?.cwd
+  }
+
+  /** Minimal per-project target info for the setup/archive runner (project-setup-runner-local.ts's
+   *  `resolveProjectSetupTarget`) — cwd/ssh/name straight off the loaded index. Sync, like
+   *  `localCwdForProject`: this is what closes the Task 1 review finding that a run's rootPath/
+   *  ssh/projectName must come from THIS machine's own index, never from whatever the renderer
+   *  happened to send. */
+  projectTargetInfo(projectId: string): { cwd?: string; ssh?: Project['ssh']; name: string } | null {
+    const e = this.index?.entries.find((x) => x.id === projectId)
+    return e ? { cwd: e.cwd, ssh: e.ssh, name: e.name } : null
   }
 
   /** Resolve the shared project together with its machine-local trust identity. The approval id
@@ -782,6 +1160,26 @@ export class WorkspaceStore {
       }
     }
     return out
+  }
+
+  /**
+   * Does this project exist on THIS machine, and is it SSH? The `--project` targeting gate
+   * (issue #338, src/main/project-grants.ts) asks main's own store — never the request — before
+   * any targeted open is forwarded. Same three-entry-kind scan and same id semantics as
+   * `persistedCanvases` (inline keyed by `e.project.id`, ssh/local refs by `e.id`), because the
+   * projectId a grant names there must resolve to the same project here. `undefined` = unknown
+   * to this store (deleted, invented, another machine's) — the gate fails closed on it.
+   */
+  projectMetaFor(projectId: string): { ssh: boolean } | undefined {
+    if (!projectId) return undefined
+    for (const e of this.index?.entries ?? []) {
+      if (e.project) {
+        if (e.project.id === projectId) return { ssh: !!e.project.ssh }
+        continue
+      }
+      if (e.id === projectId) return { ssh: !!e.ssh }
+    }
+    return undefined
   }
 
   /**
@@ -909,12 +1307,71 @@ export class WorkspaceStore {
           closed: e.closed,
           viewport: e.viewport,
           defaultAccountId: e.defaultAccountId,
+          breadcrumbs: e.breadcrumbs,
           capabilityAck: e.capabilityAck,
           localExec: e.localExec
         })
       )
     } catch { /* the file is written and cached; the next load/poll surfaces the node */ }
     return true
+  }
+
+  /**
+   * Takes a DESTROYED session's node off its project's canvas — the host side of the relay
+   * `pty.destroy` verb ("End session" on the phone), run AFTER the tmux kill so the file only ever
+   * loses a node whose session is already gone. Node ids are globally unique (they are tmux
+   * session names), so the node is looked up by SCAN across the local ref projects — the phone
+   * addresses sessions by streamId→nodeId and knows no projectId. Same v1 scope and the same
+   * announce-and-record discipline as `appendRemoteNode` above, and queued on `saveChain` for the
+   * same read-modify-write reason. A node found in NO file is an answer (an unregistered phone
+   * session, an inline project), not an error: the caller treats false as "nothing to remove".
+   */
+  removeRemoteNode(nodeId: string, now = new Date()): Promise<boolean> {
+    const run = this.saveChain.then(() => this.removeRemoteNodeNow(nodeId, now))
+    this.saveChain = run.catch(() => {})
+    return run
+  }
+
+  private async removeRemoteNodeNow(nodeId: string, now: Date): Promise<boolean> {
+    for (const e of this.index?.entries ?? []) {
+      // Local ref projects only, like appendRemoteNode: an ssh ref's file lives on another
+      // machine (and a relay `pty.attach` only ever reaches THIS machine's tmux anyway).
+      if (!e.cwd || e.ssh) continue
+      const file = projectFilePath(e.cwd)
+      let raw: string
+      try {
+        raw = await fs.readFile(file, 'utf-8')
+      } catch {
+        continue
+      }
+      const updated = removeProjectNode(raw, nodeId, now)
+      if (updated === null) continue // not in this project (or unreadable file) — keep looking
+      try {
+        await writeAtomic(file, updated)
+      } catch {
+        return false
+      }
+      this.lastWritten.set(file, updated)
+      try {
+        const parsed = JSON.parse(updated) as ProjectFileV1
+        this.revs.set(e.id, parsed.rev)
+        platform().broadcast(
+          IPC.workspaceExternalChange,
+          fileToProject(parsed, {
+            id: e.id,
+            cwd: e.cwd,
+            closed: e.closed,
+            viewport: e.viewport,
+            defaultAccountId: e.defaultAccountId,
+            breadcrumbs: e.breadcrumbs,
+            capabilityAck: e.capabilityAck,
+            localExec: e.localExec
+          })
+        )
+      } catch { /* the file is written and cached; the next load/poll drops the node */ }
+      return true
+    }
+    return false
   }
 
   /**
@@ -971,7 +1428,7 @@ export class WorkspaceStore {
     this.revs.set(e.id, e.cache.rev)
     return fileToProject(e.cache, {
       id: e.id, ssh: e.ssh, closed: e.closed,
-      viewport: e.viewport, defaultAccountId: e.defaultAccountId,
+      viewport: e.viewport, defaultAccountId: e.defaultAccountId, breadcrumbs: e.breadcrumbs,
       capabilityAck: e.capabilityAck, localExec: e.localExec
     })
   }
@@ -1078,7 +1535,7 @@ export class WorkspaceStore {
       else this.unmirrored.delete(e.id) // pure adopt: the server copy IS the truth now — nothing owed
       return fileToProject(adopted, {
         id: e.id, ssh: e.ssh, closed: e.closed,
-        viewport: e.viewport, defaultAccountId: e.defaultAccountId,
+        viewport: e.viewport, defaultAccountId: e.defaultAccountId, breadcrumbs: e.breadcrumbs,
         capabilityAck: e.capabilityAck, localExec: e.localExec
       })
     }
@@ -1093,7 +1550,7 @@ export class WorkspaceStore {
         this.unmirrored.add(e.id) // the merged set must land on the server
         merged = fileToProject(e.cache, {
           id: e.id, ssh: e.ssh, closed: e.closed,
-          viewport: e.viewport, defaultAccountId: e.defaultAccountId,
+          viewport: e.viewport, defaultAccountId: e.defaultAccountId, breadcrumbs: e.breadcrumbs,
           capabilityAck: e.capabilityAck, localExec: e.localExec
         })
       }

@@ -23,10 +23,12 @@ describe('isHidden', () => {
 describe('hideable inventories', () => {
   it('list the agreed ids and nothing destructive', () => {
     expect(HIDEABLE_MENU_ITEMS.map((r) => r.id)).toEqual([
-      'group', 'remove-from-group', 'colors', 'duplicate', 'collapse',
+      'group', 'remove-from-group', 'colors', 'duplicate', 'snap-zone', 'collapse',
       'markdown-view', 'refresh-terminal'
     ])
-    expect(HIDEABLE_HEADER_BUTTONS.map((r) => r.id)).toEqual(['refresh', 'mic', 'ai-name', 'comments'])
+    expect(HIDEABLE_HEADER_BUTTONS.map((r) => r.id)).toEqual([
+      'maximize', 'refresh', 'mic', 'ai-name', 'comments', 'hide-fanout', 'tidy-fanout'
+    ])
   })
   it('gives every entry a user-facing label', () => {
     for (const { label } of [...HIDEABLE_MENU_ITEMS, ...HIDEABLE_HEADER_BUTTONS])

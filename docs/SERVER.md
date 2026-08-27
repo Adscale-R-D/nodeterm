@@ -490,7 +490,10 @@ Consequences worth knowing:
   `control unavailable` read to an agent like a transient outage, and an agent retries an
   outage. `browser` additionally names why it is **structural** rather than unimplemented —
   a browser node on this edition renders in the **viewer's own** browser tab, which this
-  server has no debugger for, and never can. See `src/server/control-unsupported.ts`.
+  server has no debugger for, and never can. The whole `browser` drive set shipped over
+  S8 (nav/read/click/type/press/scroll/wait/screenshot/cookies) is therefore **desktop-only**:
+  it needs Electron's `<webview>` + CDP, which this edition has none of, so there is no
+  browser driving here at all. See `src/server/control-unsupported.ts`.
   The agent-messaging verbs (`send`/`reply`/`notify`) are **verified-only at the route** on
   every edition, so an unverified caller gets the flat 403 messaging refusal here as well;
   a verified one now reaches the real delivery path (see the agent-messaging note below),
@@ -562,6 +565,65 @@ flow-control coordination**
 (the server still re-asserts its WS backpressure pause on each send rather than co-managing
 a single actuator with the renderer), and the web folder picker's **hardcoded start
 directory**.
+
+### Managed Claude accounts
+
+Managed Claude accounts (several logged-in Claude identities side by side, each with its own
+`CLAUDE_CONFIG_DIR`) **work in the browser**. Selecting one always did — env injection, the
+transcript readers, the usage rows and the account pickers are all `src/core` — but the
+*lifecycle* was welded to `ipcMain`, so a browser-only deployment could pick an account it had no
+way to create (issue #313).
+
+- **The lifecycle is core.** `src/core/claude-accounts-service.ts` owns the four
+  `claude-accounts:*` channels (add / wait-login / cancel-wait / remove) and registers them
+  through the platform seam, so **both shells serve them**: `src/main/claude-accounts.ts` is now a
+  thin desktop wrapper, and `registerCoreHandlers` calls the same `registerClaudeAccountsIpc()`.
+  The browser reaches them through a real `buildClaudeAccountsApi` in the ws-bridge instead of the
+  old `E_UNSUPPORTED` stub. `waitLogin` is a straight passthrough of a poll that runs up to five
+  minutes — safe because the WS RpcClient has no request timeout, so a pending request rejects
+  only when the socket drops.
+- **Per-account hooks are installed at boot and at add.** A managed account carries its own
+  `settings.json` (Claude Code resolves it relative to `CLAUDE_CONFIG_DIR`), so the managed status
+  hook has to be written there too or that account reports no agent status at all. `startServer`
+  runs the same per-account loop the desktop does right after `installManagedAgentHooks()`, and
+  `add` installs into the fresh dir up front.
+- **The canvas skill is desktop-only.** Canvas control is not wired on this edition at all (the
+  hook server answers `control unavailable` by name), so the service takes the skill installer as
+  an optional dep and the server passes none — a per-account `SKILL.md` here would point at
+  nothing.
+- **No remote (SSH) accounts.** The Server Edition has no SSH-project manager, so an account
+  context carrying a `projectId` takes the **local** path — the same degrade the desktop takes
+  before its manager exists.
+
+### Managed Codex accounts (S6)
+
+The Server Edition **arms the Codex record-signing secret** but does **not** host the
+account-management IPC — that surface is desktop-driven over SSH.
+
+- **Arms the record secret (Decision 1).** At boot `armServerNodeIdentity`
+  (`src/server/node-identity-arm.ts`) loads the raw node-auth secret and calls
+  `setCodexThreadIdentityAuthSecret(...)` with it, so a managed Codex account's thread→node→account
+  ownership records can **sign and verify on a headless host**. Headless Linux has no OS keychain, so
+  the secret is 32 **raw bytes** at `node-auth-key.bin`, mode `0600` — the same both-shells channel the
+  desktop seals via `safeStorage`. This only makes the record layer *able to sign*; it is orthogonal to
+  the shared-app-server degrade (Codex nodes still launch bare here, exactly as before).
+- **Does NOT host the account-management verbs.** `initCodexAccounts` registers its IPC over Electron's
+  `ipcMain` with WebContents-owner authorization, which the headless bridge does not provide, so
+  `startServer` never calls it. This is **not** a silent gap: managed Codex logins **on an SSH host**
+  are driven by the **desktop** over SSH (the remote account-add / device-login / import legs + the
+  relay) — the host runs the relay + import, not its own copy of the account IPC.
+- **Fail-closed, both ways.** With no secret armed (unwritable key file), the record layer throws
+  rather than writing anything unsigned, and Codex nodes keep working bare. A machine with **no** managed
+  accounts is byte-for-byte the pre-S6 layout (a bare-root record per thread).
+- **A browser-only deployment therefore cannot manage Codex accounts** — the case issue #313 is
+  about. Managed **Claude** accounts moved into core (above); Codex did not follow, and the reason
+  is not effort: its switch verbs (`switchThread` / `commitSwitch` / `finishSwitch` /
+  `rollbackSwitch`) authorize the owning window by Electron **WebContents id**, which has no
+  meaning over a WS connection where every browser tab is an equally anonymous socket. Hosting
+  them headless needs a connection-identity redesign first, not a handler port. Until then the
+  `codexAccounts` namespace stays an `E_UNSUPPORTED` stub in the bridge and the Settings section
+  says so by name rather than failing silently — an unhandled rejection there previously stopped
+  the spinner and showed nothing.
 
 ## Manual browser smoke checklist
 

@@ -12,7 +12,9 @@ import { useSession } from '../session/session'
 import type { CanvasNode } from '../state/workspace'
 import { tooLargeSize, formatBytes } from '@shared/fsLimits'
 import { hintLabel } from '@shared/platform-utils'
+import { chipFor, commandTooltip } from '../lib/keybindingOverrides'
 import { pdfBlobUrl } from '../lib/pdfBlob'
+import { MaximizeButton } from './MaximizeButton'
 
 // Image extensions get a visual preview instead of the Monaco text editor.
 const IMAGE_MIME: Record<string, string> = {
@@ -239,6 +241,10 @@ export function EditorNode({ id, data, selected }: NodeProps<CanvasNode>) {
     if (hoveredRef.current) toggleRef.current()
   }), [])
 
+  // Whatever the markdown toggle is bound to; '' when the user unbound it, in which case the
+  // preview's hint names the action instead of promising a chord that never fires.
+  const mdChip = chipFor('node.toggleMarkdown')
+
   return (
     <div
       className={`term-node editor-node${selected ? ' selected' : ''}`}
@@ -268,7 +274,7 @@ export function EditorNode({ id, data, selected }: NodeProps<CanvasNode>) {
           <>
             <button
               className="editor-node__toggle"
-              title={hintLabel('Toggle markdown preview (⌘M)')}
+              title={commandTooltip('Toggle markdown preview', 'node.toggleMarkdown')}
               onClick={togglePreview}
             >
               {preview ? 'Edit' : 'Preview'}
@@ -283,6 +289,7 @@ export function EditorNode({ id, data, selected }: NodeProps<CanvasNode>) {
             </button>
           </>
         )}
+        <MaximizeButton id={id} maximized={!!data.premaxRect} />
         <button
           className="term-node__close"
           title="Close"
@@ -336,7 +343,7 @@ export function EditorNode({ id, data, selected }: NodeProps<CanvasNode>) {
               <div className="term-md nodrag nowheel">
                 <div className="term-md__bar">
                   <span>Preview</span>
-                  <span className="term-md__hint">{hintLabel('⌘M to edit')}</span>
+                  <span className="term-md__hint">{mdChip ? `${mdChip} to edit` : 'Edit'}</span>
                 </div>
                 <div
                   className="term-md__content"

@@ -1,11 +1,21 @@
 import type { Node } from '@xyflow/react'
-import type { CanvasMutation, CanvasNodeState, ClaudeAccount, NodeKind, PendingLaunch, Project } from '@shared/types'
+import type {
+  CanvasMutation,
+  CanvasNodeState,
+  ClaudeAccount,
+  NodeKind,
+  PendingLaunch,
+  Project,
+  Settings
+} from '@shared/types'
 import type { AgentId, AgentPermissionMode, BuiltinAgentId } from '@shared/agents/config'
 import { agentConfig, supportsSessionIdFlag } from '@shared/agents/config'
 import { assembleLaunchCommand } from '@shared/agents/launch'
 import { agentEnvSnapshot } from '../lib/agentEnv'
 import { uuid } from '@renderer/lib/uuid'
 import { claudeCliCapsNow } from './permissionMode'
+import { projectLaunchInfoNow } from './projectLaunchInfo'
+import { isAgentEnabled, launchableDefaultAgent } from './agentAvailability'
 import { codexSharedIdentity } from './codexIdentity'
 import { sshHostKey } from '@shared/ssh'
 import { useSettings } from './settings'
@@ -57,8 +67,15 @@ export interface NodeData {
   group: string | null
   tags?: string[]
   collapsed?: boolean
+  /** Agent nodes only: when true, this node's subagent/loop fan-out cards are hidden. */
+  hideFanout?: boolean
   /** Expanded height to restore when un-collapsing (kept out of the persisted size). */
   expandedHeight?: number
+  /**
+   * Set while the node is maximized to the viewport (issue #399): the ROOT-space rect the
+   * restore toggle gives back. Persisted — see CanvasNodeState.premaxRect.
+   */
+  premaxRect?: { x: number; y: number; width: number; height: number }
   /** One-shot command run once when the terminal first opens (not persisted). */
   initialCommand?: string
   /**
@@ -92,6 +109,22 @@ export interface NodeData {
   fileMissing?: boolean
   /** web-only: live URL to load in the web (webview) node. */
   url?: string
+  /**
+   * browser-only: the Electron session partition for this <webview>. Set ONCE at creation for an
+   * AGENT-opened node (`agentBrowserPartition`, `persist:nt-agent-browser-<projectId>`) and never
+   * mutated — [MEASURED, Electron 42.8.1] `partition` is honoured only at attach. Absent (undefined)
+   * for a USER-opened node, which keeps the default session (no migration, no lost logins). Carried
+   * through persistence untouched on Server Edition / mobile, where a browser node has no <webview>.
+   */
+  partition?: string
+  /**
+   * browser/web-only, NEVER persisted: this node object is a background KEEP-ALIVE GHOST — a
+   * `display:none` stand-in merged into the `<ReactFlow>` prop so the `<webview>` of a project the
+   * user switched away from stays mounted (its guest process dies on DOM detach). Ghosts live only
+   * in `state/webviewKeepAlive.ts` pool entries; Canvas state, persistence, undo and the wire never
+   * hold one. The surfaces read it to route their callbacks at the pool instead of React Flow.
+   */
+  ghost?: boolean
   diffStaged?: boolean
   commitOid?: string
   /** dino-only: best score reached in the T-Rex Runner game. */
@@ -285,21 +318,119 @@ export function createSshTerminalNode(
   }
 }
 
-/**
- * The user's launch-command override for a builtin agent (Settings → Agents → Launch commands),
- * or undefined when unset/blank. This is the ONE place the setting is read; every launch site
- * (new node, cold restore, in-place restart, hibernation wake, transcript resume) either calls
- * this or receives its result — shared/agents/config.ts cannot read settings (layering), so the
- * renderer resolves the override and passes it down (`resumeCommand`'s `base` param).
- *
- * Trusted verbatim, like a custom agent's `launchCmd`: it comes from the local user's own
- * settings.json and is typed into their own pane. Custom agents index past the builtin-keyed map
- * to undefined — they already own their launchCmd.
- */
-export function agentLaunchOverride(agentId: AgentId): string | undefined {
+/** The user's OWN global launch-command override, with no project layered over it. */
+function globalLaunchOverride(agentId: AgentId): string | undefined {
   const raw = useSettings.getState().settings.agentLaunchCommands?.[agentId as BuiltinAgentId]
   const cmd = typeof raw === 'string' ? raw.trim() : ''
   return cmd || undefined
+}
+
+/**
+ * Projects whose SHARED `agents` family we have already asked the human to trust this session.
+ * The ask is fire-and-forget from a synchronous launch path (a launch is never blocked on it), so
+ * without this every single launch in an untrusted project would re-raise the dialog. Once per
+ * project is enough: an approval makes main fire `projectSettings.onTrustChanged`, Canvas
+ * invalidates that project's launch-info cache, and the NEXT launch reads the fresh verdict and
+ * picks the shared launchCmd up on its own.
+ */
+const agentsTrustAsked = new Set<string>()
+
+/** Test seam: forget which projects have already been asked (see `agentsTrustAsked`). */
+export function resetLaunchTrustAsksForTests(): void {
+  agentsTrustAsked.clear()
+}
+
+/** Raise the `agents` trust prompt for a project, at most once per project per session. Never
+ *  awaited and never allowed to throw: this runs inside a synchronous launch resolution, and the
+ *  answer (if any) arrives via the trust-changed invalidation, not via this call. */
+function askAgentsTrustOnce(projectId: string): void {
+  if (agentsTrustAsked.has(projectId)) return
+  agentsTrustAsked.add(projectId)
+  try {
+    // The preload leg REJECTS when the main handler throws (the ws-bridge leg maps that to false),
+    // so the `.catch` is load-bearing — an unhandled rejection here would surface as a renderer
+    // error on a path whose whole contract is "the launch does not care about the answer".
+    void window.nodeTerminal?.projectSetup?.requestTrust(projectId, 'agents').catch(() => {})
+  } catch {
+    // No bridge leg at all (older relay host, a stub) — the launch proceeds on the global value.
+  }
+}
+
+/**
+ * The launch-command override for an agent, or undefined when nothing overrides the bare CLI.
+ * This is the ONE place launch commands are read; every launch site (new node, cold restore,
+ * in-place restart, hibernation wake, transcript resume) either calls this or receives its result
+ * — shared/agents/config.ts cannot read settings (layering), so the renderer resolves the override
+ * and passes it down (`resumeCommand`'s `base` param).
+ *
+ * Three layers, most specific first, with `projectId` naming the project that OWNS the node:
+ *  1. the project's LOCAL `.nodeterm/settings.json` `agents.launchCmd` — this machine's own file,
+ *     the user's own typing, never gated;
+ *  2. the project's git-SHARED `agents.launchCmd`, but ONLY while that family is trusted at this
+ *     location. Falling PAST an untrusted one raises the trust prompt (once per project, see
+ *     `askAgentsTrustOnce`) and resolves on the layer below meanwhile — a launch is never blocked,
+ *     never delayed, and never runs a shared command the human has not seen;
+ *  3. the user's global Settings → Agents → Launch commands entry (builtin-keyed: custom agents
+ *     index past it to undefined — they already own their launchCmd).
+ *
+ * SCOPE: the project's launchCmd applies ONLY to the agent that project ITSELF names —
+ * `projectDefaultAgent`, its own valid `agents.defaultAgentId`, never the global default. The
+ * family holds one launchCmd, not one per agent id, and the panel's copy is "Overrides how the
+ * default agent is launched", so it needs an agent to be about; the pair is what makes it
+ * meaningful. Falling back to the GLOBAL default here would have been a cross-agent misfire that
+ * the builtin-KEYED global map made structurally impossible: a doc shipping only `launchCmd` would
+ * follow whatever this user's mutable global default happens to be, so `nix develop -c claude`
+ * could end up typed into a codex node, differently on each teammate's machine, and could change
+ * under a node on cold restore after an unrelated Settings change.
+ *
+ * So an UNPAIRED launchCmd (a project that sets no valid `defaultAgentId` of its own) is a dead
+ * setting: never consumed for any agent, and never prompts for trust. The Agents panel says so
+ * on the row itself (`ProjectSettingsFamilies.tsx`) rather than leaving it silently inert.
+ *
+ * Fails OPEN in the ordinary sense: no project id, or no warm snapshot for it
+ * (`projectLaunchInfoNow` is synchronous by design — see its module doc), resolves layer 3 alone,
+ * byte-identical to the behavior before per-project settings existed.
+ */
+export function agentLaunchOverride(agentId: AgentId, projectId?: string): string | undefined {
+  const global = globalLaunchOverride(agentId)
+  if (!projectId) return global
+  const info = projectLaunchInfoNow(projectId)
+  if (!info) return global
+  const entry = info.resolved.agents.launchCmd
+  if (!entry) return global
+  // Scope check BEFORE anything else: an agent this project does not name consumes nothing here,
+  // so it must not even raise a trust prompt about a value it would never use.
+  const target = projectDefaultAgent(projectId, useSettings.getState().settings)
+  if (!target || target !== agentId) return global
+  // `.nodeterm/settings.json` is hand-editable, git-shared, hostile input (see @shared/project-settings):
+  // a non-string that slipped through is simply not a launch command.
+  const cmd = typeof entry.value === 'string' ? entry.value.trim() : ''
+  if (!cmd) return global
+  // LITERAL ONLY — the same rule the project's ENV already obeys (`ProjectSpawnOverrides.env`:
+  // "`${env:VAR}` is NOT expanded here"), and for the same reason. The assembler expands
+  // `${env:…}` in whatever `launchCmdOverride` it is handed (`shared/agents/launch.ts`
+  // `expandedProgram`) — a CUSTOM-AGENT feature, where the value is the local user's own typing and
+  // Settings previews the expansion. Inheriting it for a project document would turn a hand-edited,
+  // git-shared settings.json into a read of THIS machine's environment, laundered past a consent
+  // dialog that rendered the token verbatim. Nor is honoring it literally an option: `${env:X}` is a
+  // bad substitution at bash/zsh, so the typed line would fail anyway. So a project launchCmd
+  // carrying a token is not a launch command — the same verdict, and the same fall-through, as the
+  // non-string case above. Checked BEFORE the trust branch so a value that can never be consumed
+  // never raises a question about itself, exactly like the out-of-scope agent check.
+  //
+  // BOTH halves, local as well as shared — the deliberate overreach `isReservedSpawnEnvKey` explains
+  // for the env list: one auditable rule beats a provenance check at every launch. The cost is that
+  // a local overlay cannot use expansion either; the global Settings → Agents override (which does
+  // expand, and is previewed) is where a wrapper that needs `${env:…}` belongs.
+  if (cmd.includes('${env:')) return global
+  if (entry.source === 'local') return cmd
+  // NOTE (carried from Task 2's review): the trust-changed invalidation this ask relies on is
+  // keyed by projectId while the grant itself is keyed by LOCATION — two projects pointing at the
+  // same folder each keep their own cached verdict, so the sibling stays cold until its own
+  // refresh. Known and deliberate; the cost is one extra prompt, never a wrong grant.
+  if (info.trusted.agents) return cmd
+  askAgentsTrustOnce(projectId)
+  return global
 }
 
 /**
@@ -308,9 +439,50 @@ export function agentLaunchOverride(agentId: AgentId): string | undefined {
  * `claude` is enough — which is also why an override wrapper (account switchers etc.) is safe
  * here: hooks identify the session whatever the launch line was, as long as the wrapper ends up
  * exec-ing the real CLI. Append `-r <id>` to resume a specific session (used by Branch).
+ * `projectId` layers that project's own launchCmd over the global one (`agentLaunchOverride`).
  */
-export function claudeLaunchCommand(): string {
-  return agentLaunchOverride('claude') ?? 'claude'
+export function claudeLaunchCommand(projectId?: string): string {
+  return agentLaunchOverride('claude', projectId) ?? 'claude'
+}
+
+/**
+ * The agent THIS PROJECT names as its own default (`agents.defaultAgentId`), or undefined when it
+ * names none — deliberately WITHOUT any global fallback, so a caller can tell "the project chose
+ * this agent" from "nobody chose, so the app's default applies". `agentLaunchOverride`'s scoping
+ * turns on exactly that difference; `resolveNewNodeAgent` adds the fallback on top.
+ *
+ * VALIDATED against what this machine can actually launch — a known builtin, or a custom agent the
+ * user still has — and against `disabledAgents`: `.nodeterm/settings.json` is git-shared and
+ * hand-editable, so it may name an agent that was removed, never existed, or that this user
+ * deliberately switched off, and none of those may become the id typed into a shell
+ * (`resolveAgent`'s unknown-id fallback launches the id itself — the same failure
+ * `launchableDefaultAgent` exists to prevent for the global setting).
+ *
+ * Deliberately NOT trust-gated: naming which of the user's own installed agents to open is not
+ * executable content (`projectTrustContent('agents', …)` hashes launchCmd + env, not this), and
+ * every id it can select resolves to a command the user already configured themselves.
+ */
+function projectDefaultAgent(
+  projectId: string | undefined,
+  settings: Settings
+): AgentId | undefined {
+  const raw = projectId ? projectLaunchInfoNow(projectId)?.resolved.agents.defaultAgentId : undefined
+  const id = typeof raw?.value === 'string' ? raw.value.trim() : ''
+  if (!id) return undefined
+  const known = !!agentConfig(id) || settings.customAgents.some((c) => c.id === id)
+  return known && isAgentEnabled(settings, id) ? id : undefined
+}
+
+/**
+ * The agent a NEW node launches: an explicit pick always wins, then the project's own validated
+ * `agents.defaultAgentId` (`projectDefaultAgent`), then the global default.
+ */
+export function resolveNewNodeAgent(
+  explicit: AgentId | undefined,
+  projectId: string | undefined,
+  settings: Settings
+): AgentId {
+  return explicit ?? projectDefaultAgent(projectId, settings) ?? launchableDefaultAgent(settings)
 }
 
 /** Fallback color for custom / unknown agents that have no config-provided color. */
@@ -360,15 +532,32 @@ export function sshAccountsHint(
     : null
 }
 
-/** Account for a NEW Claude node: explicit pick, else the project default, else system. */
+/**
+ * Account for a NEW Claude node: explicit pick, else the project default, else system.
+ *
+ * `explicit === null` is an EXPLICIT "System account" pick and short-circuits past the project
+ * default. Before it existed, the submenu row wearing the user's system email launched the
+ * PROJECT DEFAULT account — the clearest "picked X, ran as Y" in issue #419 — because "no
+ * account passed" and "system picked" were the same value.
+ *
+ * Validation runs against the accounts ELIGIBLE for this project (`accountsForProject`), not the
+ * raw list, mirroring what every picker offers. The raw list also holds `pending` rows (their dir
+ * exists but no login lives in it yet) and accounts pinned to ANOTHER machine's host (their dir
+ * exists only over there) — a `defaultAccountId` pointing at either used to be stamped onto the
+ * node, whose spawn then fell into the missing/empty-dir fallback and silently ran under a
+ * different identity (#419 again). Ineligible ⇒ undefined ⇒ the honest system default.
+ */
 export function resolveNewNodeAccount(
-  explicit: string | undefined,
-  project: { defaultAccountId?: string } | undefined,
+  explicit: string | null | undefined,
+  project:
+    | { defaultAccountId?: string; ssh?: { server: { host: string; user: string } } }
+    | undefined,
   accounts: ClaudeAccount[]
 ): string | undefined {
+  if (explicit === null) return undefined
   const id = explicit ?? project?.defaultAccountId
   // A stale default (account since removed) must not stamp dead ids onto new nodes.
-  return id && accounts.some((a) => a.id === id) ? id : undefined
+  return id && accountsForProject(accounts, project).some((a) => a.id === id) ? id : undefined
 }
 
 /**
@@ -385,14 +574,22 @@ export function createAgentNode(
   initialPrompt?: string,
   ssh?: Project['ssh'],
   accountId?: string,
-  permissionMode?: AgentPermissionMode
+  permissionMode?: AgentPermissionMode,
+  projectId?: string,
+  /** Per-node model override for a MODEL_SWITCH_CAPABLE agent (claude/codex/copilot, base-resolved).
+   *  Applied through the effective base harness via `withAgentModel` (a no-op for a non-capable
+   *  agent, so passing a model for one is harmless — it's simply not appended). Persisted as
+   *  `data.agentModel` so cold-restore and later restarts keep the model. Trails `projectId`: every
+   *  existing caller passes that ninth argument, so the model is the one that had to move. */
+  model?: string
 ): CanvasNode {
   const { label, color } = resolveAgent(agentId)
-  // A per-builtin launch-command override (Settings -> Agents -> Launch commands) replaces the bare
-  // CLI in the assembled command. Threaded into the shared assembler below as `launchCmdOverride`
-  // so fresh launch, cold-restore resume and in-place restart all pick it up identically. Custom
-  // agents already own their `launchCmd`, so the helper returns undefined for them.
-  const launchCmdOverride = agentLaunchOverride(agentId)
+  // The launch-command override (this project's `.nodeterm/settings.json` first, then Settings →
+  // Agents → Launch commands — see `agentLaunchOverride`) replaces the bare CLI in the assembled
+  // command. Threaded into the shared assembler below as `launchCmdOverride` so fresh launch,
+  // cold-restore resume and in-place restart all pick it up identically. Custom agents already own
+  // their `launchCmd`, so the global layer returns undefined for them.
+  const launchCmdOverride = agentLaunchOverride(agentId, projectId)
   // The session id is DECIDED here rather than learned from a hook later, so this node always has
   // something to resume with — see SESSION_ID_CAPABLE for the failure this closes. `uuid()` (not
   // crypto.randomUUID) because the Server Edition serves plain HTTP on a LAN, where randomUUID is
@@ -432,7 +629,11 @@ export function createAgentNode(
       // A SHARED_IDENTITY_CAPABLE agent (codex) launches through its managed launcher when this
       // machine actually has one — otherwise the bare CLI, byte-identical to before. `codexSharedIdentity`
       // folds in the SSH answer (a host has no launcher installed yet, so a remote node stays bare).
-      sharedIdentity: codexSharedIdentity(ssh)
+      sharedIdentity: codexSharedIdentity(ssh),
+      // A model picked at creation (e.g. Transfer-to-agent-with-model). `withAgentModel` appends
+      // `--model <value>` for a switch-capable agent and no-ops otherwise, so the line stays
+      // byte-identical when no model is chosen.
+      model
     },
     // The boot-time snapshot of the desktop env (empty on browser/relay by design, where the
     // missing-env warning below is the honest outcome — the same markers the preview shows).
@@ -461,12 +662,18 @@ export function createAgentNode(
       group: null,
       tags: [],
       agentId,
-      // Accounts are inherently Claude-only — never stamp one onto another agent's node. A custom
-      // agent inheriting claude is still its own agent; account binding stays claude-the-builtin.
-      ...(accountId && agentId === 'claude' ? { accountId } : {}),
+      // Managed accounts bind to the builtin Claude and Codex agents (S6) — never to another
+      // builtin, and never to a custom agent even when it inherits one of those bases. A custom
+      // agent inheriting claude/codex is still its own agent; account binding stays with the
+      // builtin the account picker offered it for. The Codex spawn side honours `data.accountId`
+      // (resolveCodexSessionScope), the same field Claude uses.
+      ...(accountId && (agentId === 'claude' || agentId === 'codex') ? { accountId } : {}),
       // Persisted alongside the node (unlike initialCommand, which is consumed on first open), so
       // a cold restore months later still knows which conversation this node owns.
       ...(mintedSessionId ? { agentSessionId: mintedSessionId } : {}),
+      // A model chosen at creation (Transfer-to-agent-with-model). Persisted so cold-restore and
+      // later restarts keep it; `withAgentModel` re-applies it on relaunch. Only stamped when set.
+      ...(model ? { agentModel: model } : {}),
       cwd: ssh ? ssh.remoteCwd : cwd,
       initialCommand,
       ...(ssh ? { ssh: ssh.server, sshRemoteTmux: true } : {})
@@ -525,6 +732,63 @@ export function createAccountLoginNode(
     ...node.data,
     title: 'Claude login',
     accountId,
+    initialCommand: 'claude /login'
+  }
+  return node
+}
+
+/**
+ * Terminal node used to log a new managed CODEX account in — the sibling of
+ * `createAccountLoginNode`. The session runs under that account's `CODEX_HOME` (S6 §2.1 env
+ * injection, gated by `needsCodexAccountScope` asking whether the id is a managed Codex one), so
+ * `codex login` writes `auth.json` into the managed home rather than the user's system `~/.codex`.
+ * That file is exactly what `codexAccounts.waitLogin` polls for, so without this node the add flow
+ * waits on a credential nothing is writing (issue #346).
+ *
+ * A plain terminal (not an agent node), like the Claude one: no session-name tracking, and the
+ * agent-less shape is what keeps the node out of the Codex AGENT paths while still being scoped.
+ * Local only — `codexAccounts.add()` mints on THIS machine, so there is no ssh binding to pass.
+ */
+export function createCodexAccountLoginNode(
+  accountId: string,
+  index: number,
+  center?: { x: number; y: number }
+): CanvasNode {
+  const node = createTerminalNode(index, undefined, center)
+  node.data = {
+    ...node.data,
+    title: 'Codex login',
+    accountId,
+    initialCommand: 'codex login'
+  }
+  return node
+}
+
+/**
+ * Terminal node that SWITCHES the system (~/.claude) Claude identity — the usage popover's
+ * "Switch account" action (issue #420). Runs `claude /login` with NO `accountId`, so the spawn
+ * env is bit-for-bit the plain-terminal one and the OAuth writes the system `~/.claude` —
+ * which is the point: every system-scope session follows the new org, exactly as a hand-typed
+ * `claude /login` would make them. Deliberately a SEPARATE factory from
+ * `createAccountLoginNode`: that one REQUIRES an accountId because config-dir scoping is its
+ * purpose, and its 'Claude login' title is the durable signature `isAccountLoginNode` keys on
+ * to destroy login nodes together with their removed account — a sweep this node must never be
+ * caught by (both destroy paths also gate on accountId equality, and this node has none).
+ *
+ * The docblock hazard on `isAccountLoginNode` — a respawned `claude /login` overwriting the
+ * system identity — is only a hazard when it happens UNASKED. Here the overwrite is the feature,
+ * and "once" is structural rather than promised: `initialCommand` is consumed on first mount and
+ * never serialized (`flowToNodeStates` drops it), so after an app restart or a machine reboot
+ * this node is an inert plain terminal, not a login prompt nobody requested.
+ *
+ * Local only, on purpose: on an SSH project a system login would rewrite THAT host's ~/.claude,
+ * so the popover does not offer the action there (see UsageIndicator).
+ */
+export function createSystemLoginNode(index: number, center?: { x: number; y: number }): CanvasNode {
+  const node = createTerminalNode(index, undefined, center)
+  node.data = {
+    ...node.data,
+    title: 'Switch Claude account',
     initialCommand: 'claude /login'
   }
   return node
@@ -633,11 +897,20 @@ export function createWebNode(
   }
 }
 
-/** Creates a navigable browser node (Electron <webview>) starting at `url` ('' = blank). */
+/**
+ * Creates a navigable browser node (Electron <webview>) starting at `url` ('' = blank).
+ *
+ * `partition` is set ONLY for an AGENT-opened node (`open-browser`), to its per-project session jar
+ * (`agentBrowserPartition`). A USER-opened node passes none and keeps the default session, unchanged
+ * — the zero-migration path, so nobody loses a login on upgrade. It is written once here and never
+ * mutated: [MEASURED, Electron 42.8.1] `<webview partition>` is honoured only at attach, so a later
+ * change would be a silent no-op anyway (docs/superpowers/probes/2026-08-browser-partition.md).
+ */
 export function createBrowserNode(
   index: number,
   url: string,
-  center?: { x: number; y: number }
+  center?: { x: number; y: number },
+  partition?: string
 ): CanvasNode {
   const title = url ? url.replace(/^https?:\/\//, '').slice(0, 40) : 'Browser'
   return {
@@ -651,7 +924,8 @@ export function createBrowserNode(
       title,
       color: '#0a84ff',
       group: null,
-      ...(url ? { url } : {})
+      ...(url ? { url } : {}),
+      ...(partition ? { partition } : {})
     }
   }
 }
@@ -1005,6 +1279,107 @@ function fitAncestorChain(nodes: CanvasNode[], groupId: string | undefined): Can
 }
 
 /**
+ * Maximize (issue #399): resize `nodeId` to occupy `rect` — the visible viewport in ROOT/flow
+ * coordinates, computed by the caller from the camera (`maximizeTargetRect`) — remembering the
+ * node's own rect in `data.premaxRect` so `restoreMaximizedNode` can put everything back. This is
+ * a real resize, not a camera move: the node goes through its normal resize path, so a terminal
+ * reflows and the pty gets its new cols/rows.
+ *
+ * Grouped nodes work too: the new position is written parent-relative and every ancestor frame is
+ * re-fitted (`fitAncestorChain`) in the SAME transform — `extent:'parent'` would otherwise clamp a
+ * child bigger than its frame into an inverted range (the snap `groupSelectedNodes` documents).
+ *
+ * Refused (returned unchanged): unknown id, a group frame (maximizing the container would drag its
+ * whole subtree), a collapsed node (header-only; expand first), and a node already maximized.
+ */
+export function maximizeNodeToRect(
+  nodes: CanvasNode[],
+  nodeId: string,
+  rect: { x: number; y: number; width: number; height: number }
+): CanvasNode[] {
+  const node = nodes.find((n) => n.id === nodeId)
+  if (!node || node.type === 'group' || node.data.collapsed || node.data.premaxRect) return nodes
+  // The remembered position is ROOT-space, not parent-relative: re-fitting the frame around the
+  // maximized child MOVES the frame's origin (it hugs), so a parent-relative restore would come
+  // back a few px off — and root-space also survives the frame being ungrouped meanwhile.
+  const root = rootPosition(node, nodes)
+  const premaxRect = {
+    x: root.x,
+    y: root.y,
+    width: nodeW(node) || (node.style?.width as number) || 0,
+    height: nodeH(node) || (node.style?.height as number) || 0
+  }
+  if (!(premaxRect.width > 0) || !(premaxRect.height > 0)) return nodes
+  return withNodeRect(nodes, node, rect, { premaxRect })
+}
+
+/**
+ * Zone snap (issue #394 v1): place `nodeId` at `rect` — a zone of the visible viewport in
+ * ROOT/flow coordinates (`zoneTargetRect`). Plain placement, no toggle state: unlike maximize it
+ * writes no `premaxRect` (a node sent to "left half" has simply been MOVED, exactly as if by
+ * hand) and an existing `premaxRect` is left alone, so a maximized node snapped into a zone still
+ * restores to its pre-maximize spot. Refusals match the maximize matrix minus already-maximized:
+ * unknown id, group frame, collapsed node.
+ */
+export function placeNodeInRect(
+  nodes: CanvasNode[],
+  nodeId: string,
+  rect: { x: number; y: number; width: number; height: number }
+): CanvasNode[] {
+  const node = nodes.find((n) => n.id === nodeId)
+  if (!node || node.type === 'group' || node.data.collapsed) return nodes
+  return withNodeRect(nodes, node, rect, {})
+}
+
+/**
+ * The shared placement core: put `node` at the ROOT-space `rect` (converted to parent-relative),
+ * patch its data, and re-fit the ancestor frames in the same transform — `extent:'parent'` would
+ * otherwise clamp a child bigger than its frame into an inverted range (the snap
+ * `groupSelectedNodes` documents).
+ */
+function withNodeRect(
+  nodes: CanvasNode[],
+  node: CanvasNode,
+  rect: { x: number; y: number; width: number; height: number },
+  dataPatch: Partial<NodeData>
+): CanvasNode[] {
+  // rect is root-space; a grouped node's position is relative to its frame, so subtract the
+  // ancestor origins (root position minus own offset = the parent chain's origin).
+  const root = rootPosition(node, nodes)
+  const originX = root.x - node.position.x
+  const originY = root.y - node.position.y
+  const next = nodes.map((n) =>
+    n.id === node.id
+      ? {
+          ...n,
+          position: { x: rect.x - originX, y: rect.y - originY },
+          width: rect.width,
+          height: rect.height,
+          style: { ...n.style, width: rect.width, height: rect.height },
+          // Drop the stale measurement in the same tick: flowToNodeStates prefers `measured` over
+          // `width`/`height`, and a commit racing the re-measure would persist the OLD size.
+          measured: undefined,
+          data: { ...n.data, expandedHeight: rect.height, ...dataPatch }
+        }
+      : n
+  )
+  return fitAncestorChain(next, node.parentId)
+}
+
+/**
+ * The toggle's second click: give the node back the rect `maximizeNodeToRect` remembered — the
+ * exact canvas spot it occupied, converted from root-space into wherever its parent chain sits
+ * now — and re-fit the ancestor frames back down around it. No-op when the node is missing or
+ * not maximized.
+ */
+export function restoreMaximizedNode(nodes: CanvasNode[], nodeId: string): CanvasNode[] {
+  const node = nodes.find((n) => n.id === nodeId)
+  const prev = node?.data.premaxRect
+  if (!node || !prev) return nodes
+  return withNodeRect(nodes, node, prev, { premaxRect: undefined })
+}
+
+/**
  * Wraps nodes that share ONE container in a new group frame. The members may themselves be
  * frames, so this is how a nested tree is built. The frame is created beside its members inside
  * their current parent and every root-space position stays fixed. Mixed containers and
@@ -1330,7 +1705,9 @@ export function nodeStatesToFlow(states: CanvasNodeState[]): CanvasNode[] {
         group: n.group,
         tags: n.tags,
         collapsed,
+        hideFanout: n.hideFanout,
         expandedHeight: n.size.height,
+        premaxRect: n.premaxRect,
         shell: n.shell,
         cwd: n.cwd,
         text: n.text,
@@ -1339,6 +1716,7 @@ export function nodeStatesToFlow(states: CanvasNodeState[]): CanvasNode[] {
         filePath: n.filePath,
         fileMissing: n.fileMissing,
         url: n.url,
+        partition: n.partition,
         diffStaged: n.diffStaged,
         commitOid: n.commitOid,
         highScore: n.highScore,
@@ -1398,6 +1776,7 @@ export function flowToNodeStates(nodes: CanvasNode[]): CanvasNodeState[] {
         group: n.data.group,
         tags: n.data.tags,
         collapsed: n.data.collapsed,
+        hideFanout: n.data.hideFanout,
         parentId: n.parentId,
         shell: n.data.shell,
         cwd: n.data.cwd,
@@ -1407,6 +1786,7 @@ export function flowToNodeStates(nodes: CanvasNode[]): CanvasNodeState[] {
         filePath: n.data.filePath,
         fileMissing: n.data.fileMissing,
         url: n.data.url,
+        partition: n.data.partition,
         diffStaged: n.data.diffStaged,
         commitOid: n.data.commitOid,
         highScore: n.data.highScore,
@@ -1418,7 +1798,8 @@ export function flowToNodeStates(nodes: CanvasNode[]): CanvasNodeState[] {
         ssh: n.data.ssh,
         sshRemoteTmux: n.data.sshRemoteTmux,
         sshFs: n.data.sshFs,
-        worktree: n.data.worktree
+        worktree: n.data.worktree,
+        premaxRect: n.data.premaxRect
       }
     })
 }

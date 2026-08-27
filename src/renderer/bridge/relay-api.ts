@@ -153,6 +153,9 @@ export function buildRelayApi(connectionId: string, transport?: FrameTransport):
     // the guest's own canvas, in the guest's own projects, on a filesystem the host cannot see.
     onAgentControl: stub.onAgentControl,
     sendAgentControlResult: stub.sendAgentControlResult,
+    // Browser control never rides the relay either (no CDP off the desktop) — inert no-ops.
+    onBrowserControlResolve: stub.onBrowserControlResolve,
+    sendBrowserControlResolveResult: stub.sendBrowserControlResolveResult,
     // Messaging rides the same decision: the browser client is never a sender (constraint 5 of
     // the messaging plan — the phone drives canvas control over relay→IPC, not /control/*).
     agentMessage: stub.agentMessage

@@ -59,6 +59,18 @@ function identityArgs(conn: SshConnection): string[] {
   return conn.identityFile ? ['-o', 'IdentitiesOnly=yes', '-i', conn.identityFile] : []
 }
 
+/**
+ * Honor a config-level `IdentityAgent SSH_AUTH_SOCK` (issue #427). When the `ssh -G` probe
+ * (agent-probe.ts) determined that this host's effective config routes it at the ENVIRONMENT's
+ * agent, pin the user's ambient login-agent socket on the command line: a command-line `-o` is
+ * first-obtained, so it beats both the config line (which would re-read our overridden env and
+ * land back on the app-private agent) and the env override itself. Empty for every connection the
+ * probe did not mark — byte-identical legacy argv.
+ */
+function agentArgs(conn: SshConnection): string[] {
+  return conn.identityAgentSock ? ['-o', `IdentityAgent=${conn.identityAgentSock}`] : []
+}
+
 /** Args for the backgrounded multiplexing master (the one auth happens here). */
 export function masterArgs(conn: SshConnection, controlPath: string): string[] {
   const args = [
@@ -126,8 +138,14 @@ export function masterArgs(conn: SshConnection, controlPath: string): string[] {
     // Harmless when no agent is reachable at all: ssh skips the add silently (measured: not one
     // stderr line, so nothing for lastSshErrorLine to mistake for a failure cause) and simply
     // prompts again next time.
-    '-o',
-    'AddKeysToAgent=yes',
+    //
+    // OMITTED for a pinned-agent connection (agentArgs): there the designated agent is the user's
+    // LOGIN agent, and forcing AddKeysToAgent=yes would load an askpass-unlocked key into it until
+    // logout — the exact leak the app-private agent exists to close. The user's own ~/.ssh/config
+    // decides for that host instead (and their key is normally already in that agent, which is why
+    // they wrote `IdentityAgent SSH_AUTH_SOCK` in the first place).
+    ...(conn.identityAgentSock ? [] : ['-o', 'AddKeysToAgent=yes']),
+    ...agentArgs(conn),
     ...portArgs(conn),
     ...identityArgs(conn)
   ]
@@ -176,6 +194,10 @@ export function childArgs(conn: SshConnection, controlPath: string, remote?: str
   // identityArgs also pins the offer (IdentitiesOnly) so that same fallback cannot burn the
   // server's MaxAuthTries on unrelated agent keys; the agent still signs the pinned key, which
   // is the only way a tty-less child can use an ENCRYPTED key at all (it has no askpass wiring).
+  // agentArgs matters in the same fallback case, for the same reason as masterArgs: the child's
+  // env points at the app-private agent, and only the pin routes it back at the login agent the
+  // user's config asked for.
+  args.push(...agentArgs(conn))
   args.push(...identityArgs(conn))
   args.push(target(conn))
   if (remote !== undefined) args.push(remote)
@@ -596,6 +618,7 @@ export function mkDirArgs(conn: SshConnection, controlPath: string, path: string
  *  basenamed by the caller, and the path is absolute). scp uses `-P` (uppercase) for the port. */
 export function scpArgs(conn: SshConnection, controlPath: string, localPath: string, remotePath: string): string[] {
   const args = ['-o', 'ControlMaster=no', '-o', `ControlPath=${controlPath}`, '-o', 'BatchMode=yes', '-P', String(conn.port ?? 22)]
+  args.push(...agentArgs(conn))
   args.push(...identityArgs(conn))
   args.push(localPath, `${conn.user}@${conn.host}:${remotePath}`)
   return args
@@ -629,6 +652,7 @@ export function scpDownArgs(
   recursive = false
 ): string[] {
   const args = ['-o', 'ControlMaster=no', '-o', `ControlPath=${controlPath}`, '-o', 'BatchMode=yes', '-P', String(conn.port ?? 22)]
+  args.push(...agentArgs(conn))
   args.push(...identityArgs(conn))
   if (recursive) args.push('-r')
   args.push(`${conn.user}@${conn.host}:${remoteScpPath(remotePath)}`, localPath)
@@ -684,13 +708,17 @@ export function remoteEndpointFileContents(
   version: string,
   tokenDir: string
 ): string {
+  // Every value is `posixQuote`d for the same reason as the local writer (issue #351): the managed
+  // script SOURCES this file under /bin/sh, so an unquoted space or shell metachar in the socket
+  // path, token, or token dir would break the source. Remote paths rarely carry spaces, but the
+  // token can hold any byte, and the guarantee should not depend on the host's home layout.
   return (
-    `NODETERM_HOOK_SOCK=${sock}\n` +
-    `NODETERM_HOOK_TOKEN=${token}\n` +
-    `NODETERM_HOOK_VERSION=${version}\n` +
+    `NODETERM_HOOK_SOCK=${posixQuote(sock)}\n` +
+    `NODETERM_HOOK_TOKEN=${posixQuote(token)}\n` +
+    `NODETERM_HOOK_VERSION=${posixQuote(version)}\n` +
     // The REMOTE token dir ($HOME/.nodeterm/node-tokens on the host), not ours. The host stores
     // per-node tokens only; it never holds a secret and can never mint.
-    `NODETERM_NODE_TOKEN_DIR=${tokenDir}\n`
+    `NODETERM_NODE_TOKEN_DIR=${posixQuote(tokenDir)}\n`
   )
 }
 

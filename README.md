@@ -110,7 +110,7 @@ LAN**. The same canvas also runs self-hosted in any browser (Server Edition).
 
 ### Talk to your terminal
 
-Hold `⌘⇧D` and say it. On-device **Whisper** transcribes locally — review the text,
+Hold `⌘⌥` and say it. On-device **Whisper** transcribes locally — review the text,
 then **Send** (nothing auto-submits). Your voice never leaves the machine.
 
 </td>
@@ -132,7 +132,7 @@ GitHub Copilot / opencode / Grok / custom) · 📝 **Sticky note** (link to an a
   agent sessions (`claude --resume`). The macOS app **ships its own tmux**, so this works
   with nothing installed; a tmux already on your system is always used in preference to it,
   and terminals opened before an upgrade stay as they were until you refresh the node.
-- **Talk to your terminal** — on-device Whisper dictation (⌘⇧D): speak, review, send.
+- **Talk to your terminal** — on-device Whisper dictation (hold ⌘⌥): speak, review, send.
 - **Agent superpowers** — **context links** so agent nodes read each other's transcripts
   on demand; Claude-only **branch a conversation** and **managed accounts** for several
   logged-in Claude identities side by side; agents can drive the canvas (open nodes,
@@ -149,6 +149,11 @@ GitHub Copilot / opencode / Grok / custom) · 📝 **Sticky note** (link to an a
 - **Your sessions, in your pocket** — **nodeterm mobile** (iOS) attaches to the same live
   tmux sessions: watch an agent work, answer a "needs you", or type into any terminal
   from your phone — plus push notifications and a mobile board view.
+- **Power & sleep** — while an agent is working, nodeterm keeps the machine from
+  idle-sleeping, and lets go the moment it finishes (on by default; toggle in the setup
+  tour or Settings → Behavior). No app can hold a machine awake through a closed lid —
+  for overnight runs keep the laptop open and plugged in, or run the agents on a box
+  that doesn't sleep via the [Server Edition](./docs/SERVER.md).
 - **Command palette** (⌘K), **file explorer** (⌘⇧E), **markdown view** (⌘M),
   **undo/redo**, and a native macOS dark UI.
 - **Auto-update & in-app announcements** — the app checks a self-hosted feed and
@@ -207,6 +212,20 @@ detects your platform. Everything is also listed at
 - **iOS** — **nodeterm mobile** on the
   [App Store](https://apps.apple.com/app/nodeterm/id6790581233).
 
+**Trying it out?** Removal is one script — it stops every process nodeterm started, reverts
+the status-hook/skill entries it merged into your agent CLIs' config (your own hooks and
+credentials are never touched), and deletes all of nodeterm's own state. Run it with
+`--dry-run` first to see the full list of what it found:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/eneskirca/nodeterm/main/scripts/uninstall.sh | bash -s -- --dry-run
+curl -fsSL https://raw.githubusercontent.com/eneskirca/nodeterm/main/scripts/uninstall.sh | bash -s -- --yes
+```
+
+The full inventory of what nodeterm writes where (and what the script keeps, like the
+`.nodeterm/` canvas folders inside your own repos) is documented in
+[docs/uninstall.md](docs/uninstall.md).
+
 ## 🛠 Build from source
 
 Requires Node.js 20+ on macOS or Linux (tmux recommended — it's what makes sessions
@@ -228,15 +247,18 @@ npm run server:dev # build + run the browser Server Edition (needs Node 22 + tmu
 
 ## ⌨️ Keyboard shortcuts
 
+These are the defaults — every one of them is remappable in **Settings → Keyboard Shortcuts**.
+
 | Shortcut | Action |
 | --- | --- |
 | `⌘K` | Command palette |
 | `⌘T` / `⌘⇧C` | New terminal / New Claude Code |
 | `⌘⇧B` | Toggle the kanban board |
 | `⌘W` | Close the selected node |
+| `⌘←` `⌘→` `⌘↑` `⌘↓` | Focus the node left / right / above / below (`Ctrl+Shift+arrow` off macOS) |
 | `⌘Z` / `⌘⇧Z` | Undo / Redo |
 | `⌘M` | Toggle markdown view (terminal / editor) |
-| `⌘⇧D` | Dictate into the focused terminal |
+| Hold `⌘⌥` (`Ctrl+Alt`) | Dictate into the focused terminal |
 | `⌘⇧E` | File explorer |
 | `⌘,` | Settings · `⌘/` Shortcuts |
 | `Right-click` | Actions menu (empty space or node) |

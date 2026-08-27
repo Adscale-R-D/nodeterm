@@ -6,7 +6,7 @@ import type {
   TerminalCursorInactiveStyle,
   TerminalCursorStyle
 } from '@shared/types'
-import { resolveTerminalTheme } from './themes'
+import { isKnownTerminalThemeId, resolveTerminalTheme } from './themes'
 
 /**
  * Pure decisions behind the xterm instance in `TerminalNode` — extracted so they can be tested
@@ -220,6 +220,7 @@ export type XtermVisualSettings = Pick<
   Settings,
   | 'fontFamily'
   | 'fontSize'
+  | 'terminalWordSeparator'
   | 'fontWeight'
   | 'fontWeightBold'
   | 'drawBoldTextInBrightColors'
@@ -238,6 +239,7 @@ export type XtermVisualSettings = Pick<
 export const XTERM_VISUAL_KEYS = [
   'fontFamily',
   'fontSize',
+  'terminalWordSeparator',
   'fontWeight',
   'fontWeightBold',
   'drawBoldTextInBrightColors',
@@ -251,10 +253,63 @@ export const XTERM_VISUAL_KEYS = [
   'tmuxScrollback'
 ] as const satisfies readonly (keyof XtermVisualSettings)[]
 
+/**
+ * The two appearance values a PROJECT may set for its own terminals (`terminal.theme` /
+ * `terminal.fontFamily` in `.nodeterm/settings.json`, local-over-shared already applied).
+ *
+ * Deliberately UNGATED by the project trust store, unlike the same family's `shell`: neither value
+ * can execute anything — the worst a hostile shared document achieves is an ugly terminal, which is
+ * visible and one edit away from being undone. Gating them would put a consent dialog in front of a
+ * colour.
+ */
+export interface ProjectVisualOverrides {
+  theme?: string
+  fontFamily?: string
+}
+
+/**
+ * Layer a project's appearance overrides on top of this machine's global appearance settings.
+ *
+ * Returns `base` BY IDENTITY when nothing is overridden — the result is a `useMemo`/effect
+ * dependency in `useXtermVisualSettings`, and a fresh object per render would re-run the live
+ * re-option pass on every terminal for nothing.
+ *
+ * Two rules, both about failing back to the GLOBAL value rather than to the app default:
+ *  - an unknown theme id is ignored (see `isKnownTerminalThemeId`),
+ *  - an empty/blank `fontFamily` is ignored — handing xterm `''` yields the browser default font,
+ *    which is not what "this project sets no font" means.
+ *
+ * CO-ATTACH CAVEAT (the reason this merge is worth a comment at all): `fontFamily` is CELL GEOMETRY,
+ * so a project-scoped font makes `applyLiveOptions` report `metricsChanged` and the caller re-fit —
+ * and under co-attach (one pty, N subscribers) the pty runs at the SMALLEST subscriber's grid. A
+ * project font therefore re-reports THIS viewer's grid to a pty that other viewers may share (a
+ * modal card over the same session, another device attached to it), exactly as a global font change
+ * already does. That is the existing machinery working as designed, not a new hazard — but it does
+ * mean a per-project font is not visually private to that project's window. Nothing extra is done
+ * here: the re-fit is precisely what keeps the pty from being clamped to a stale grid.
+ */
+export function mergeProjectVisuals(
+  base: XtermVisualSettings,
+  overrides: ProjectVisualOverrides | undefined
+): XtermVisualSettings {
+  const theme = isKnownTerminalThemeId(overrides?.theme) ? overrides!.theme! : undefined
+  const fontFamily =
+    typeof overrides?.fontFamily === 'string' && overrides.fontFamily.trim() !== ''
+      ? overrides.fontFamily
+      : undefined
+  if (theme === undefined && fontFamily === undefined) return base
+  return {
+    ...base,
+    ...(theme !== undefined ? { terminalTheme: theme } : {}),
+    ...(fontFamily !== undefined ? { fontFamily } : {})
+  }
+}
+
 /** The appearance-derived options, resolved and clamped. */
 export interface XtermVisualOptions {
   fontFamily: string
   fontSize: number
+  wordSeparator: string
   // xterm widens these to `FontWeight` ('normal' | 'bold' | '100'… | number). We only ever WRITE
   // numbers, but the type has to match what `term.options` exposes or the live target can't be
   // compared against a real terminal.
@@ -284,6 +339,7 @@ export function xtermOptionsFromSettings(
   return {
     fontFamily: s.fontFamily,
     fontSize: s.fontSize,
+    wordSeparator: s.terminalWordSeparator,
     fontWeight: terminalFontWeight(s.fontWeight, 400),
     fontWeightBold: terminalFontWeight(s.fontWeightBold, 700),
     drawBoldTextInBrightColors: s.drawBoldTextInBrightColors,
@@ -356,6 +412,7 @@ export function applyLiveOptions(
 
   if (o.fontFamily !== next.fontFamily) o.fontFamily = next.fontFamily
   if (o.fontSize !== next.fontSize) o.fontSize = next.fontSize
+  if (o.wordSeparator !== next.wordSeparator) o.wordSeparator = next.wordSeparator
   if (o.lineHeight !== next.lineHeight) o.lineHeight = next.lineHeight
   if (o.letterSpacing !== next.letterSpacing) o.letterSpacing = next.letterSpacing
   if (o.fontWeight !== next.fontWeight) o.fontWeight = next.fontWeight
@@ -714,7 +771,7 @@ export function copyKeyAction(e: CopyShortcutEvent, hasSelection: boolean): Copy
  */
 export const SHIFT_ENTER_SEQ = '\x1b\r'
 
-export type TerminalKeyAction = CopyKeyAction | 'shift-enter'
+export type TerminalKeyAction = CopyKeyAction | 'shift-enter' | 'bubble'
 
 /**
  * Superset of `copyKeyAction` used by the terminal's custom key handler.
@@ -733,7 +790,8 @@ export type TerminalKeyAction = CopyKeyAction | 'shift-enter'
 export function terminalKeyAction(
   e: CopyShortcutEvent,
   hasSelection: boolean,
-  ownsProjectJump = false
+  ownsProjectJump = false,
+  registryOwns = false
 ): TerminalKeyAction {
   if (
     e.type === 'keydown' &&
@@ -745,5 +803,15 @@ export function terminalKeyAction(
   )
     return 'shift-enter'
   if (ownsProjectJump) return 'swallow'
-  return copyKeyAction(e, hasSelection)
+  const base = copyKeyAction(e, hasSelection)
+  if (base !== 'pass') return base
+  // `registryOwns` — decided by the caller via `terminalChordBubbles`, the same live-registry
+  // matcher discipline as `ownsProjectJump` — means the window dispatcher will claim this chord
+  // (an allowInTerminal app/canvas command). 'bubble' tells the consumer to return false WITHOUT
+  // preventDefault: xterm skips its own keymap (which would turn e.g. Ctrl+Shift+Arrow into a
+  // `CSI 1;N x` write and CANCEL the event, so the dispatcher never sees it) and the untouched
+  // event bubbles to the window listener. Deliberately LAST: the copy chords and Shift+Enter
+  // keep their existing owners whatever the registry says.
+  if (e.type === 'keydown' && registryOwns) return 'bubble'
+  return 'pass'
 }

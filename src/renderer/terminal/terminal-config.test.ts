@@ -24,6 +24,7 @@ import {
   toXtermText,
   xtermScrollback,
   applyLiveOptions,
+  mergeProjectVisuals,
   terminalLetterSpacing,
   terminalLineHeight,
   xtermOptionsFromSettings,
@@ -527,6 +528,43 @@ describe('terminalKeyAction', () => {
     expect(terminalKeyAction(ev({ ctrlKey: true, shiftKey: true }), false)).toBe('swallow')
   })
 
+  // `registryOwns` (decided by the caller via `terminalChordBubbles`): the window dispatcher will
+  // claim this chord, so xterm must neither process nor cancel it — 'bubble' = return false with
+  // NO preventDefault. Deliberately the LAST branch: chords with a local owner keep it.
+  it('bubbles a registry-owned keydown that nothing local owns', () => {
+    const arrow = { key: 'ArrowLeft', code: 'ArrowLeft', ctrlKey: true, shiftKey: true }
+    expect(terminalKeyAction(ev(arrow), false, false, true)).toBe('bubble')
+    // default false = byte-identical pre-feature behavior
+    expect(terminalKeyAction(ev(arrow), false)).toBe('pass')
+    expect(terminalKeyAction(ev(arrow), false, false, false)).toBe('pass')
+  })
+
+  it('never bubbles a chord a local owner already claims, and never on keyup', () => {
+    // copy chord (selection) beats bubble
+    expect(terminalKeyAction(ev({ ctrlKey: true, shiftKey: true }), true, false, true)).toBe('copy')
+    // copy chord (no selection) still swallows — SIGINT must never reach the pty
+    expect(terminalKeyAction(ev({ ctrlKey: true, shiftKey: true }), false, false, true)).toBe(
+      'swallow'
+    )
+    // shift-enter keeps its remap
+    expect(
+      terminalKeyAction(ev({ key: 'Enter', code: 'Enter', shiftKey: true }), false, false, true)
+    ).toBe('shift-enter')
+    // project-jump swallow wins over bubble
+    expect(terminalKeyAction(ev({ key: '1', code: 'Digit1', metaKey: true }), false, true, true)).toBe(
+      'swallow'
+    )
+    // keyup never bubbles — the dispatcher only acts on keydown
+    expect(
+      terminalKeyAction(
+        ev({ key: 'ArrowLeft', code: 'ArrowLeft', ctrlKey: true, shiftKey: true, type: 'keyup' }),
+        false,
+        false,
+        true
+      )
+    ).toBe('pass')
+  })
+
   it('exports the ESC+CR sequence', () => {
     expect(SHIFT_ENTER_SEQ).toBe('\x1b\r')
   })
@@ -709,6 +747,7 @@ describe('repaintResync', () => {
 const visual = (p: Partial<XtermVisualSettings> = {}): XtermVisualSettings => ({
   fontFamily: 'Menlo',
   fontSize: 13,
+  terminalWordSeparator: " ()[]{}',\"",
   fontWeight: 400,
   fontWeightBold: 700,
   drawBoldTextInBrightColors: true,
@@ -752,6 +791,7 @@ describe('xtermOptionsFromSettings', () => {
       visual({
         fontFamily: 'JetBrains Mono',
         fontSize: 15,
+        terminalWordSeparator: ' ',
         cursorBlink: false,
         cursorStyle: 'bar',
         cursorInactiveStyle: 'none',
@@ -761,6 +801,7 @@ describe('xtermOptionsFromSettings', () => {
     )
     expect(o.fontFamily).toBe('JetBrains Mono')
     expect(o.fontSize).toBe(15)
+    expect(o.wordSeparator).toBe(' ')
     expect(o.cursorBlink).toBe(false)
     expect(o.cursorStyle).toBe('bar')
     expect(o.cursorInactiveStyle).toBe('none')
@@ -824,6 +865,14 @@ describe('applyLiveOptions', () => {
     expect(r.themeChanged).toBe(false)
     expect(term.options.fontSize).toBe(16)
     expect(term.writes).toEqual(['fontSize'])
+  })
+
+  it('applies a word-separator change without refitting the terminal', () => {
+    const term = fakeTerm(visual())
+    const r = applyLiveOptions(term, visual({ terminalWordSeparator: ' ' }))
+    expect(r).toEqual({ metricsChanged: false, themeChanged: false })
+    expect(term.options.wordSeparator).toBe(' ')
+    expect(term.writes).toEqual(['wordSeparator'])
   })
 
   it.each([
@@ -906,5 +955,65 @@ describe('applyLiveOptions', () => {
     expect(term.options.fontSize).toBe(18)
     expect(term.options.cursorStyle).toBe('underline')
     expect(term.options.theme).toBe(resolveTerminalTheme('nord').theme)
+  })
+})
+
+describe('mergeProjectVisuals (a project\'s own theme / font over the global settings)', () => {
+  it('returns the base BY IDENTITY when the project overrides nothing', () => {
+    const base = visual()
+    expect(mergeProjectVisuals(base, undefined)).toBe(base)
+    expect(mergeProjectVisuals(base, {})).toBe(base)
+  })
+
+  it('lets a project theme win over the global one', () => {
+    const merged = mergeProjectVisuals(visual({ terminalTheme: 'nord' }), { theme: 'dracula' })
+    expect(merged.terminalTheme).toBe('dracula')
+    expect(xtermOptionsFromSettings(merged).theme).toBe(resolveTerminalTheme('dracula').theme)
+  })
+
+  it('lets a project font family win over the global one', () => {
+    const merged = mergeProjectVisuals(visual({ fontFamily: 'Menlo' }), { fontFamily: 'Iosevka' })
+    expect(merged.fontFamily).toBe('Iosevka')
+    expect(xtermOptionsFromSettings(merged).fontFamily).toBe('Iosevka')
+  })
+
+  // The whole reason `isKnownTerminalThemeId` exists: `resolveTerminalTheme` is total, so passing an
+  // unknown override straight through would repaint the project's terminals with the APP DEFAULT
+  // rather than leaving the user's own global choice alone.
+  it('falls back to the GLOBAL theme for an unknown id, not to the app default', () => {
+    const merged = mergeProjectVisuals(visual({ terminalTheme: 'nord' }), { theme: 'bogus' })
+    expect(merged.terminalTheme).toBe('nord')
+    expect(xtermOptionsFromSettings(merged).theme).toBe(resolveTerminalTheme('nord').theme)
+    expect(xtermOptionsFromSettings(merged).theme).not.toBe(
+      resolveTerminalTheme('nodeterm-dark').theme
+    )
+  })
+
+  it('ignores a blank font family rather than handing xterm an empty string', () => {
+    const base = visual({ fontFamily: 'Menlo' })
+    expect(mergeProjectVisuals(base, { fontFamily: '' })).toBe(base)
+    expect(mergeProjectVisuals(base, { fontFamily: '   ' })).toBe(base)
+  })
+
+  it('overrides one value without disturbing the other twelve', () => {
+    const base = visual({ fontSize: 15, cursorStyle: 'bar' })
+    const merged = mergeProjectVisuals(base, { theme: 'nord' })
+    expect(merged).toEqual({ ...base, terminalTheme: 'nord' })
+  })
+
+  // Live application rides the EXISTING machinery: nothing new re-fits, and a project font is a
+  // cell-geometry change exactly like a global one (see the co-attach caveat on mergeProjectVisuals).
+  it('feeds applyLiveOptions the same way a global change does', () => {
+    const base = visual()
+    const backing = xtermOptionsFromSettings(base) as unknown as Record<string, unknown>
+    const term = { options: backing } as LiveOptionTarget
+    expect(applyLiveOptions(term, mergeProjectVisuals(base, { theme: 'nord' }))).toEqual({
+      metricsChanged: false,
+      themeChanged: true
+    })
+    expect(applyLiveOptions(term, mergeProjectVisuals(base, { fontFamily: 'Iosevka' }))).toEqual({
+      metricsChanged: true,
+      themeChanged: true // back off `nord` — the project no longer sets a theme in this call
+    })
   })
 })

@@ -1,8 +1,9 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'http'
 import { randomUUID, timingSafeEqual } from 'crypto'
-import { writeFileSync, mkdirSync } from 'fs'
+import { writeFileSync, mkdirSync, chmodSync, unlinkSync } from 'fs'
 import path from 'path'
 import { platform } from '../platform'
+import { hookSockPath } from './hook-sock-path'
 import { canControlCanvas, type AgentId } from '../../shared/agents/config'
 import { normalizeFor, type NormalizedAgentEvent } from '../../shared/agents/normalize'
 import type { CodexIdentityEvent } from '../../shared/types'
@@ -10,6 +11,7 @@ import type { NodeTokenVerdict } from './node-auth-token'
 import { nodeTokenDir } from './node-token-files'
 import { isForeignKidToken, isSafeNodeId, verifyNodeToken } from './node-auth-token'
 import { isSafeThreadId } from '../codex-identity-proxy'
+import { isSafeAccountId } from '../../shared/codex-account'
 import {
   controlPolicy,
   CONTEXT_LINK_POLICY_VERB,
@@ -21,6 +23,7 @@ import {
   STRICT_CONTROL_VERBS,
   type IdentityDecision
 } from './node-identity-policy'
+import { posixQuote } from '../../shared/ssh'
 
 // v2 advertises NODETERM_NODE_TOKEN_DIR so clients read their per-node capability from a file
 // rather than receiving it in argv. Nothing consumes the posted version server-side, so the bump
@@ -173,11 +176,22 @@ export interface HookEventMeta {
  * protect — the routes are new — which is the one place in the whole control surface where
  * fail-closed from day one costs nobody anything.
  *
+ * `open-project` (issue #338) is here for the same class of reason as `sticky`: the main-side
+ * grant ledger (src/main/project-grants.ts) mints per-caller targeting rights off a successful
+ * `open-project`, and a grant recorded for an unverifiable caller would authorize whoever can
+ * name that caller's node id. NEW verb, so fail-closed from day one strands nobody.
+ *
  * Consulted in the `/control/` route BEFORE `identityGate`'s decision is, so no future change to
  * the policy table can widen it; `messaging-verified-only.test.ts` drives the route on both sides
  * of every hatch and is the test that fails if either half of this comment stops being true.
  */
-export const requiresVerified: ReadonlySet<string> = new Set(['send', 'reply', 'notify', 'sticky'])
+export const requiresVerified: ReadonlySet<string> = new Set([
+  'send',
+  'reply',
+  'notify',
+  'sticky',
+  'open-project'
+])
 
 /**
  * The refusal for a messaging verb: one sentence, no diagnosis, no hint about tokens or restarts —
@@ -190,13 +204,34 @@ export const MESSAGING_CONTROL_REFUSAL = 'Agent messaging refused.'
  *  because "agent messaging refused" answering a note write is a diagnosis-delaying lie. */
 export const STICKY_CONTROL_REFUSAL = 'Sticky write refused.'
 
+/** Same posture again for `open-project` (issue #338): one sentence naming what was refused, no
+ *  diagnosis, no token or restart advice — a designed refusal, not a rollout accident. */
+export const OPEN_PROJECT_CONTROL_REFUSAL = 'Project open refused.'
+
 /** The verified-only refusal, worded for the verb that was refused. */
 export function verifiedRefusalFor(verb: string): string {
-  return verb === 'sticky' ? STICKY_CONTROL_REFUSAL : MESSAGING_CONTROL_REFUSAL
+  if (verb === 'sticky') return STICKY_CONTROL_REFUSAL
+  if (verb === 'open-project') return OPEN_PROJECT_CONTROL_REFUSAL
+  return MESSAGING_CONTROL_REFUSAL
 }
 
 class HookServer {
   private server: Server | null = null
+  /**
+   * The unix-domain twin of the loopback TCP listener (issue #367). Same HTTP handler, same
+   * bearer + per-node token auth — the whole identity machinery is transport-agnostic (nothing
+   * in the handler reads `remoteAddress`), so the socket is never an auth bypass. Two reasons it
+   * exists: it lets a sandboxed macOS Codex regain hook connectivity via codex's
+   * `network.allow_unix_sockets` allowlist (the TCP loopback can never be allowlisted), and it
+   * gives local traffic a filesystem-permissioned path (0700 dir, 0600 socket) that a
+   * defense-in-depth follow-up to #195 can eventually make the ONLY door. It does not close #195
+   * on its own: the TCP listener STAYS (existing tmux panes hold pre-socket env, and the Linux
+   * codex sandbox blocks unix sockets anyway), so any local user can still reach the (bearer-gated)
+   * TCP port until that port is retired. Best-effort: if the socket cannot bind,
+   * nothing advertises it and everything runs on TCP exactly as before.
+   */
+  private unixServer: Server | null = null
+  private sockPath = ''
   private port = 0
   private token = ''
   private listener: ((e: NormalizedAgentEvent) => void) | null = null
@@ -217,7 +252,17 @@ class HookServer {
   /** Node ids the materialiser refuses to mint for (see `markNodeIdentityUnmintable`). */
   private unmintableNodes = new Set<string>()
   private controlHandler:
-    | ((cmd: { verb: string; nodeId: string; args: Record<string, string> }) => Promise<{
+    | ((cmd: {
+        verb: string
+        nodeId: string
+        args: Record<string, string>
+        // The caller's IDENTITY verdict for THIS request, decided at the gate above and passed on
+        // rather than re-derived in main. `true` only when the caller presented a per-node token
+        // this instance minted for this node id. The browser ownership ledger (PR 4 Task 4.3)
+        // claims a node ONLY when this is true — a `legacy`/warned caller opens a browser but owns
+        // nothing, so it can drive nothing. `browser-ownership-source.test.ts` guards the source.
+        verified: boolean
+      }) => Promise<{
         ok: boolean
         message?: string
         result?: unknown
@@ -235,10 +280,20 @@ class HookServer {
    * `nodeTokenVerified`.
    */
   private codexThreadStartHandler:
-    | ((req: { nodeId: string; cwd: string; hookEndpoint: string }) => Promise<string>)
+    | ((req: {
+        nodeId: string
+        cwd: string
+        hookEndpoint: string
+        accountId?: string
+      }) => Promise<string>)
     | null = null
   private codexThreadBindHandler:
-    | ((req: { nodeId: string; threadId: string; hookEndpoint: string }) => Promise<void>)
+    | ((req: {
+        nodeId: string
+        threadId: string
+        hookEndpoint: string
+        accountId?: string
+      }) => Promise<void>)
     | null = null
   private codexIdentityListener: ((e: CodexIdentityEvent) => void) | null = null
   private endpointPath = ''
@@ -260,6 +315,10 @@ class HookServer {
 
   getPort(): number {
     return this.port
+  }
+  /** The unix listener's socket path, or '' when it is not live (bind failed, win32). */
+  getSockPath(): string {
+    return this.sockPath
   }
   getToken(): string {
     return this.token
@@ -317,7 +376,7 @@ class HookServer {
    * changes — today, the members of a case-folding collision group (`node-token-service.ts`).
    *
    * It exists only to pick the right refusal SENTENCE. `IDENTITY_REFUSED_NOTE` tells the user to
-   * restart the node to pick up an identity; for these nodes there is nothing to pick up, so that
+   * reopen the node to pick up an identity; for these nodes there is nothing to pick up, so that
    * advice sends them round a loop while the only other signal is a `console.warn` in a log they
    * are not reading. The other unmintable population — an id outside `isSafeNodeId`, which reaches
    * the canvas because `fileToProject` does not validate ids out of `project.json` — needs no
@@ -361,8 +420,9 @@ class HookServer {
    * An unmintable node is `allow-with-warning` for the whole window — `controlPolicy` cannot see
    * that it is unmintable, and would not change its verdict if it could, because running is the
    * right answer there. So the window was the ONE period in which these nodes were guaranteed to be
-   * told to "Restart this node… to pick one up", which is the loop `IDENTITY_UNMINTABLE_NOTE` was
-   * written to end. The note was unreachable exactly while it was needed.
+   * told to "Close and reopen this node to pick one up", which is the loop
+   * `IDENTITY_UNMINTABLE_NOTE` was written to end. The note was unreachable exactly while it was
+   * needed.
    */
   private identityWarningNote(nodeId: string): string {
     return this.identityUnmintable(nodeId) ? IDENTITY_UNMINTABLE_WARN_NOTE : IDENTITY_RESTART_NOTE
@@ -436,7 +496,9 @@ class HookServer {
   async start(): Promise<void> {
     if (this.server) return
     this.token = randomUUID()
-    this.server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
+    // ONE handler, shared verbatim by the TCP and the unix-socket listeners: every gate (bearer,
+    // per-node verdict, verified-only verbs) runs identically on both transports.
+    const handler = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
       // Hooks fail open: any error path still ends 204 so a broken hook never blocks the agent.
       try {
         if (req.method !== 'POST') {
@@ -536,7 +598,7 @@ class HookServer {
             return
           }
           const result = this.controlHandler
-            ? await this.controlHandler({ verb, nodeId, args })
+            ? await this.controlHandler({ verb, nodeId, args, verified: verdict === 'verified' })
             : { ok: false, error: 'control unavailable' }
           // Which note, not whether: an unmintable node warned with the restart line is sent round
           // the same loop the refusal path already knows better than to send it round.
@@ -666,7 +728,8 @@ class HookServer {
         res.writeHead(204)
         res.end()
       }
-    })
+    }
+    this.server = createServer(handler)
     await new Promise<void>((resolve, reject) => {
       const onErr = (e: Error): void => {
         this.server?.off('listening', onOk)
@@ -677,12 +740,65 @@ class HookServer {
         this.server?.on('error', (e) => console.error('[agent-hooks] server error', e))
         const addr = this.server!.address()
         if (addr && typeof addr === 'object') this.port = addr.port
-        this.writeEndpointFile()
         resolve()
       }
       this.server!.once('error', onErr)
       this.server!.listen(0, '127.0.0.1', onOk)
     })
+    // Second leg, then ONE endpoint write that advertises whatever actually came up. A failed
+    // socket bind must not cost the TCP endpoint file (or the boot).
+    await this.startUnixListener(handler)
+    this.writeEndpointFile()
+  }
+
+  /** Bind the unix-socket twin (see `unixServer`). Never throws — a socket that cannot bind is
+   *  simply not advertised, and everything keeps running on loopback TCP. */
+  private async startUnixListener(
+    handler: (req: IncomingMessage, res: ServerResponse) => Promise<void>
+  ): Promise<void> {
+    // Node's AF_UNIX support on Windows is not the discipline this path was built around, and no
+    // generated sh client runs there anyway.
+    if (process.platform === 'win32') return
+    const p = hookSockPath(platform().userDataDir)
+    try {
+      const dir = path.dirname(p)
+      mkdirSync(dir, { recursive: true, mode: 0o700 })
+      // mkdir's mode is ignored when the dir already exists — enforce it, because the DIRECTORY
+      // mode is what actually keeps other local users off the socket (the file chmod below only
+      // lands after listen, and the socket is world-connectable for that instant otherwise).
+      chmodSync(dir, 0o700)
+      // A stale socket file BLOCKS bind with EADDRINUSE even when nothing is listening — the
+      // StreamLocalBindUnlink lesson from the SSH reverse tunnels. Unlink-then-bind is safe here:
+      // the path is ours alone (0700 dir, digest-keyed fallback), so anything at it is our own
+      // leftover from a crash.
+      try {
+        unlinkSync(p)
+      } catch {
+        /* nothing stale to clear */
+      }
+      const srv = createServer(handler)
+      await new Promise<void>((resolve, reject) => {
+        const onErr = (e: Error): void => {
+          srv.off('listening', onOk)
+          reject(e)
+        }
+        const onOk = (): void => {
+          srv.off('error', onErr)
+          resolve()
+        }
+        srv.once('error', onErr)
+        srv.once('listening', onOk)
+        srv.listen(p)
+      })
+      chmodSync(p, 0o600)
+      srv.on('error', (e) => console.error('[agent-hooks] unix listener error', e))
+      this.unixServer = srv
+      this.sockPath = p
+    } catch (e) {
+      console.warn('[agent-hooks] unix hook socket unavailable, staying TCP-only', e)
+      this.unixServer = null
+      this.sockPath = ''
+    }
   }
 
   // Constant-time bearer-token check (avoids a timing side channel on the compare).
@@ -818,6 +934,17 @@ class HookServer {
       res.end()
       return
     }
+    // The account scope for this thread's ownership record (S6). Absent ⇒ system account. A
+    // non-empty id that is not a safe account id is refused BEFORE it reaches the record store,
+    // where it would become a directory component (Supply-chain guard, Constraint 7). Both routes
+    // share the same normalisation so a managed thread is never mis-filed under `system`.
+    const rawAccountId = form.accountId ?? ''
+    if (rawAccountId !== '' && !isSafeAccountId(rawAccountId)) {
+      res.writeHead(400)
+      res.end()
+      return
+    }
+    const accountId = rawAccountId || undefined
     if (verb === 'start') {
       const cwd = form.cwd ?? ''
       if (!path.isAbsolute(cwd)) {
@@ -830,7 +957,8 @@ class HookServer {
         const threadId = await this.codexThreadStartHandler({
           nodeId,
           cwd,
-          hookEndpoint: this.endpointFilePath()
+          hookEndpoint: this.endpointFilePath(),
+          accountId
         })
         // Same predicate the record store gates on, so a thread id the store would refuse can
         // never be handed back to a launcher that will then `resume` it.
@@ -858,7 +986,8 @@ class HookServer {
       await this.codexThreadBindHandler({
         nodeId,
         threadId,
-        hookEndpoint: this.endpointFilePath()
+        hookEndpoint: this.endpointFilePath(),
+        accountId
       })
       this.codexIdentityListener?.({ nodeId, mode: 'shared' })
       res.writeHead(204)
@@ -877,14 +1006,25 @@ class HookServer {
       mkdirSync(path.dirname(p), { recursive: true })
       writeFileSync(
         p,
-        `NODETERM_HOOK_PORT=${this.port}\n` +
-          `NODETERM_HOOK_TOKEN=${this.token}\n` +
-          `NODETERM_HOOK_VERSION=${NODETERM_HOOK_PROTOCOL_VERSION}\n` +
+        // Every value is `posixQuote`d: the managed script SOURCES this file (`. "$file"`) under
+        // /bin/sh, so an unquoted space or shell metachar in a path or token would break the source
+        // (issue #351: macOS userDataDir lives under "Application Support" — the space made sh try
+        // to run the tail of the path, exit 127, and the hook fell back to plain mode for EVERY
+        // macOS user). Quoting all four keeps the file a valid POSIX assignment list regardless.
+        `NODETERM_HOOK_PORT=${posixQuote(String(this.port))}\n` +
+          `NODETERM_HOOK_TOKEN=${posixQuote(this.token)}\n` +
+          `NODETERM_HOOK_VERSION=${posixQuote(NODETERM_HOOK_PROTOCOL_VERSION)}\n` +
           // Where clients read their PER-NODE capability from, keyed by $NODETERM_NODE_ID.
           // Advertised (not compiled in) so a failover that sources ANOTHER instance's endpoint
           // file also picks up THAT instance's token dir: it then finds a token that instance can
           // verify, or none — never a mismatched one.
-          `NODETERM_NODE_TOKEN_DIR=${nodeTokenDir()}\n`,
+          `NODETERM_NODE_TOKEN_DIR=${posixQuote(nodeTokenDir())}\n` +
+          // The unix-socket twin, only when it actually bound. Every generated client (managed
+          // hook script, both sh shims, opencode plugin, codex launcher) is already sock-first —
+          // `[ -n "$NODETERM_HOOK_SOCK" ]` — so advertising it moves local hook traffic off the
+          // TCP port; the PORT line stays above for sessions holding a pre-socket script. Quoted
+          // like every other value (#351/#358): macOS data dirs carry a space.
+          (this.sockPath ? `NODETERM_HOOK_SOCK=${posixQuote(this.sockPath)}\n` : ''),
         // 0o600: this file holds the bearer token — owner read/write only so another local user
         // can't read it and forge hook events.
         { encoding: 'utf8', mode: 0o600 }
@@ -912,6 +1052,13 @@ class HookServer {
       // means the data dir has vanished and the hook is meant to be inert anyway.
       NODETERM_HOOK_VERSION: NODETERM_HOOK_PROTOCOL_VERSION,
       NODETERM_HOOK_ENDPOINT: this.endpointFilePath(),
+      // The socket PATH is fine on the tmux -e argv where the token/port were not: it is an
+      // address, not a credential — connecting still takes the bearer from the 0600 endpoint
+      // file, and the socket itself sits in a 0700 dir. Advertised in env (not only the endpoint
+      // file) so the codex sandbox shim can name the exact path in its macOS
+      // `network.allow_unix_sockets` remedy line (issue #367) even when the endpoint file is
+      // what a sandboxed sh could not read.
+      ...(this.sockPath ? { NODETERM_HOOK_SOCK: this.sockPath } : {}),
       NODETERM_NODE_ID: nodeId,
       NODETERM_AGENT_ID: agentId,
       ...(permWaitSecs > 0 ? { NODETERM_PERM_WAIT_SECS: String(permWaitSecs) } : {}),
@@ -930,6 +1077,18 @@ class HookServer {
   stop(): void {
     this.server?.close()
     this.server = null
+    this.unixServer?.close()
+    this.unixServer = null
+    // Unlink so the NEXT bind is clean even if close() lost the race with process exit; the
+    // startup unlink above is still the backstop for a crash that skipped this entirely.
+    if (this.sockPath) {
+      try {
+        unlinkSync(this.sockPath)
+      } catch {
+        /* already gone */
+      }
+      this.sockPath = ''
+    }
     this.port = 0
     this.token = ''
   }

@@ -2,14 +2,23 @@ import { Handle, NodeResizer, Position, useReactFlow, type NodeProps } from '@xy
 import { NODE_MIN_SIZES } from '../lib/nodeSizing'
 import type { CanvasNode } from '../state/workspace'
 import { BrowserSurface } from './BrowserSurface'
+import { BrowserDrivingIndicator } from './BrowserDrivingChip'
+import { useWebviewKeepAlive } from '../state/webviewKeepAlive'
 
 /**
  * A navigable Chromium browser node: node chrome (frame/header/resize/close) wrapping the shared
  * {@link BrowserSurface} (webview + toolbar). The last top-level URL persists to `data.url` so the
  * node reopens where it was; the same surface backs the kanban card modal's browser popup.
+ *
+ * A background KEEP-ALIVE GHOST (`data.ghost` — see lib/webviewKeepAlive.ts) renders the same
+ * tree (the mounted `<webview>` is the point), hidden by the ghost node's `display:none` style.
+ * Only the wiring differs: navigation/title facts go to the pool entry (there is no live node in
+ * React Flow to update — `updateNodeData` on a ghost id is a dropped change), and a memory-saver
+ * discard ends the entry outright (a ghost without its guest is a husk holding a cap slot).
  */
 export default function BrowserNode({ id, data, selected }: NodeProps<CanvasNode>) {
   const { deleteElements, updateNodeData } = useReactFlow()
+  const ghost = data.ghost === true
 
   return (
     <div className={`term-node browser-node${selected ? ' selected' : ''}`} style={{ borderTopColor: data.color }}>
@@ -35,6 +44,10 @@ export default function BrowserNode({ id, data, selected }: NodeProps<CanvasNode
         <span className="term-node__title-text" title={(data.url as string) || ''}>
           {(data.title as string) || 'Browser'}
         </span>
+        {/* The driving chip — present the whole time an agent holds a control lease on this node,
+            with the one obvious Stop. Renders nothing otherwise (and, until PR 7 ships the verb that
+            drives a lease, in every case today). */}
+        <BrowserDrivingIndicator nodeId={id} />
         <span className="term-node__spacer" />
         <button className="term-node__close" title="Close" onClick={() => deleteElements({ nodes: [{ id }] })}>
           ×
@@ -45,8 +58,14 @@ export default function BrowserNode({ id, data, selected }: NodeProps<CanvasNode
         <BrowserSurface
           nodeId={id}
           url={(data.url as string) ?? ''}
-          onUrlChange={(u) => updateNodeData(id, { url: u })}
-          onTitleChange={(t) => updateNodeData(id, { title: t })}
+          partition={data.partition as string | undefined}
+          onUrlChange={(u) =>
+            ghost ? useWebviewKeepAlive.getState().updateGhostData(id, { url: u }) : updateNodeData(id, { url: u })
+          }
+          onTitleChange={(t) =>
+            ghost ? useWebviewKeepAlive.getState().updateGhostData(id, { title: t }) : updateNodeData(id, { title: t })
+          }
+          onGuestDiscarded={ghost ? () => useWebviewKeepAlive.getState().drop(id) : undefined}
         />
       </div>
     </div>

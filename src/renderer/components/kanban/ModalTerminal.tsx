@@ -7,6 +7,7 @@ import { reportsOwnCopy } from '@shared/agents/config'
 import type { AgentId } from '@shared/agents/config'
 import { readsClaudeTranscript } from '../../lib/transcriptGates'
 import { liveProjectJumpTarget } from '../../lib/projectJump'
+import { terminalChordBubbles, terminalShortcutPolicy } from '../../lib/keybindingOverrides'
 import { FindBar } from '../FindBar'
 import { useAgentStatus } from '../../state/agentStatus'
 import { useProjects } from '../../state/projects'
@@ -16,6 +17,11 @@ import { useTerminalSearch } from '../../terminal/useTerminalSearch'
 import { LocalTransport } from '../../terminal/local-transport'
 import { clipboardImages, droppedPaths, pasteHasText, pastedFiles } from '../../terminal/file-drop'
 import { guardMiddleClickPaste } from '../../terminal/middle-click'
+import {
+  createOsc8LinkHandler,
+  createUrlLinkProvider,
+  installLinkClickFallback
+} from '../../terminal/file-links'
 import { parseOsc52 } from '../../terminal/osc52'
 import { activateUnicode11 } from '../../terminal/unicode-width'
 import { useCopyFeedback } from '../../terminal/useCopyFeedback'
@@ -32,7 +38,12 @@ import {
   CO_ATTACH_MOUSE_SEQ
 } from '../../terminal/terminal-config'
 import { useXtermVisualSettings } from '../../terminal/useXtermVisualSettings'
-import { resolveSshRemote, reportSshDrop, sshConnectionScope } from '../../nodes/TerminalNode'
+import {
+  owningProjectId,
+  resolveSshRemote,
+  reportSshDrop,
+  sshConnectionScope
+} from '../../nodes/TerminalNode'
 import { buildSshArgs, type SshConnection } from '@shared/ssh'
 
 /** The subset of a node's `data` a SECOND client needs to attach to its session the same way the
@@ -90,7 +101,11 @@ export function ModalTerminal({ nodeId, spawn, searchOpen, onCloseSearch }: Moda
   const transportRef = useRef<LocalTransport | null>(null)
   const agentSessionId = useAgentStatus((s) => s.byId[nodeId]?.sessionId)
   // One shallow-compared subscription for the whole appearance slice — see useXtermVisualSettings.
-  const visual = useXtermVisualSettings()
+  // MIRROR TerminalNode: scoped to the OWNING project (`owningProjectId`, the active one — a modal
+  // only ever opens over it), deliberately NOT this card's connection scope. `sshConnectionScope`
+  // answers a project×host attachment id for a session on a foreign host, which names no project at
+  // all — the per-project appearance would silently vanish for exactly those cards.
+  const visual = useXtermVisualSettings(owningProjectId())
   const [dropping, setDropping] = useState(false)
   const [uploading, setUploading] = useState(false)
   // Same copy feedback as the canvas node — a copy here is the same act as a copy there, including
@@ -151,6 +166,11 @@ export function ModalTerminal({ nodeId, spawn, searchOpen, onCloseSearch }: Moda
     // view of one session, and a card that renders it in different colours reads as a different
     // terminal. (It used to hardcode its own background, which is exactly what happened.)
     const term = new Terminal(xtermOptionsFromSettings(s))
+    // Without a handler xterm answers an OSC 8 click with a window.confirm — the one surface
+    // where this session's links would prompt instead of opening like the canvas node's.
+    term.options.linkHandler = createOsc8LinkHandler((uri) =>
+      window.nodeTerminal.shell.openExternal(uri)
+    )
     // The modal is a second view of the SAME tmux session, so it has to measure characters the way
     // the canvas node does. Two views on two width tables would disagree about where the columns
     // are — and the pty runs at the SMALLEST subscriber's grid, so the disagreement would be live.
@@ -173,6 +193,28 @@ export function ModalTerminal({ nodeId, spawn, searchOpen, onCloseSearch }: Moda
     let dead = false
     const cleanups: Array<() => void> = []
 
+    // MIRROR TerminalNode's link wiring, minus file links. The provider handles Cmd/Ctrl+click on
+    // URL text when mouse-reporting is off (plain-shell sessions); the capture-phase fallback is
+    // what works under tmux/agent mouse-reporting — the norm, and the only path on which the OSC 8
+    // linkHandler above can ever fire in a tmux-backed session (xterm's own link activation is
+    // swallowed by the mouse report, see installLinkClickFallback). File links stay a canvas-node
+    // affordance: the modal has no project-fs/dialect routing, and resolving a path against the
+    // wrong machine is worse than not linking it — hence fileEnabled: false, not stub deps that
+    // pretend to resolve.
+    const openUrl = (uri: string): void => window.nodeTerminal.shell.openExternal(uri)
+    term.registerLinkProvider(createUrlLinkProvider(term, openUrl))
+    if (term.element) {
+      cleanups.push(
+        installLinkClickFallback(term, term.element, {
+          getCwd: () => undefined,
+          lookup: () => Promise.resolve({ exists: false, dir: false }),
+          activateFile: () => {},
+          openUrl,
+          fileEnabled: () => false
+        }).dispose
+      )
+    }
+
     // MIRROR TerminalNode "WRITE-ONLY — `parseOsc52` returns null" — the OSC 52 clipboard-write path.
     // tmux's mouse is ON, so a drag-select in copy-mode emits OSC 52 to this client; this handler
     // writes the system clipboard. `parseOsc52` returns null for a `?` read query so a remote program
@@ -192,10 +234,21 @@ export function ModalTerminal({ nodeId, spawn, searchOpen, onCloseSearch }: Moda
     // Ctrl+Shift+C would fall through to the pty as \x03/SIGINT); plain Ctrl+C is left alone.
     // MIRROR TerminalNode: Cmd/Ctrl+1-9 (jump to the Nth project) is swallowed here, before xterm
     // turns Ctrl+2..Ctrl+8 into control bytes — but only when the app owns the key (desktop shell,
-    // digit addressing an open project), which `liveProjectJumpTarget` decides for both surfaces.
+    // digit addressing an open project, AND app-first: under terminal-first the digit belongs to
+    // the PTY), which `liveProjectJumpTarget` + the policy decide for both surfaces.
     term.attachCustomKeyEventHandler((e) => {
-      const action = terminalKeyAction(e, term.hasSelection(), liveProjectJumpTarget(e) !== null)
+      const ownsProjectJump =
+        terminalShortcutPolicy() !== 'terminal-first' && liveProjectJumpTarget(e) !== null
+      // MIRROR TerminalNode's registryOwns — but with `kanbanOpen: true` ALWAYS: the modal only
+      // exists over the board, where the resolver refuses canvas-scope commands (directional
+      // focus etc. mean nothing here), so those chords keep reaching the pty; app-scope
+      // allowInTerminal commands still bubble, matching what the dispatcher would claim.
+      const registryOwns = terminalChordBubbles(e, true)
+      const action = terminalKeyAction(e, term.hasSelection(), ownsProjectJump, registryOwns)
       if (action === 'pass') return true
+      // 'bubble': hand the chord to the window dispatcher — no preventDefault (it bails on
+      // defaultPrevented), no xterm processing. See TerminalNode's twin comment.
+      if (action === 'bubble') return false
       e.preventDefault()
       if (action === 'copy') window.nodeTerminal.clipboard.writeText(term.getSelection())
       else if (action === 'shift-enter' && sessionId) transport.write(sessionId, SHIFT_ENTER_SEQ)

@@ -31,17 +31,28 @@ import {
 } from '../core/model-gateway-credentials'
 import { DownloadTickets } from '../core/download-tickets'
 import { appendBoardLogVia, registerBoardLogHandlers, type BoardLogRoute } from '../core/board-log-handlers'
+import { ProjectTrustStore } from '../core/project-trust-store'
+import { ProjectSetupService } from '../core/project-setup-service'
+import {
+  makeProjectTrustRequester,
+  registerProjectSetupHandlers,
+  type ProjectSetupHandlerDeps
+} from '../core/project-setup-handlers'
+import { registerProjectLaunchInfoHandlers } from '../core/project-launch-info-handlers'
+import { registerWorktreeSharedPathsHandlers } from '../core/worktree-shared-paths-handlers'
+import { makeProjectSpawnOverrides } from '../core/project-spawn-overrides'
+import { makeLocalSetupRunner } from '../core/project-setup-runner-local'
 import { LogBuffer } from '../core/log-buffer'
 import { installLogSink } from '../core/log-sink'
 import { registerLogHandlers } from '../core/log-handlers'
 import os from 'os'
 import { hookServer } from '../core/agents/hook-server'
 import { initCanvasControlBridge } from '../core/agents/canvas-control-bridge'
-import { initCanvasControl } from '../core/agents/canvas-control-install'
+import { initCanvasControl, installCanvasSkillInto } from '../core/agents/canvas-control-install'
 import { initAgentMessaging } from '../core/agents/agent-messaging-boot'
 import { withEditionRefusals } from './control-unsupported'
-import { loadOrCreateNodeAuthSecret } from '../core/agents/node-auth-secret'
-import { initNodeTokens, refreshNodeTokens } from '../core/agents/node-token-service'
+import { refreshNodeTokens } from '../core/agents/node-token-service'
+import { armServerNodeIdentity } from './node-identity-arm'
 import {
   writePendingAnswerLocal,
   startPendingSweep,
@@ -49,6 +60,7 @@ import {
   syntheticAnsweredEvent
 } from '../core/agents/pending-approvals'
 import { installManagedAgentHooks } from '../core/agents/hooks'
+import { installHooksIntoLocalAccounts } from '../core/claude-accounts-service'
 import {
   initAgentStatusMirror,
   flush as flushAgentStatusMirror,
@@ -269,6 +281,51 @@ export async function startServer(
     downloadTickets,
     localProjectCwd: (projectId: string) => workspaceStore.localCwdForProject(projectId)
   })
+  // Project setup/archive runner — same construction as src/main/index.ts, and the SAME
+  // `registerProjectSetupHandlers` trust boundary (project-setup-handlers.ts): it derives rootPath/
+  // ssh/projectName from THIS process's own workspace index by projectId, never the renderer, and
+  // re-validates `worktreePath` against the project's actual git worktrees. No ssh leg here at all
+  // (the Server Edition has no SSH projects, same reason board-log's router below never resolves
+  // one) — `projectTargetInfo` never populates `ssh` on this shell, so an ssh-shaped target simply
+  // never arises.
+  const projectTrustStore = new ProjectTrustStore()
+  const projectSetupService = new ProjectSetupService({
+    trust: projectTrustStore,
+    readSettings: (projectId) => workspaceStore.readProjectSettings(projectId),
+    runLocal: makeLocalSetupRunner()
+  })
+  const projectSetupDeps: ProjectSetupHandlerDeps = {
+    projectTargetInfo: (projectId) => workspaceStore.projectTargetInfo(projectId),
+    worktreeList: (repoPath) => gitService.worktreeList(repoPath)
+  }
+  registerProjectSetupHandlers(platform, projectSetupService, projectSetupDeps)
+  // `worktree:materialize-shared` — same sibling registrar and trust boundary as main/index.ts,
+  // over this process's own stores. The Server Edition has no SSH projects, so an ssh-shaped target
+  // never arises; the path validation and by-projectId list read are identical.
+  registerWorktreeSharedPathsHandlers(platform, {
+    readSettings: (projectId) => workspaceStore.readProjectSettings(projectId),
+    targetInfo: projectSetupDeps.projectTargetInfo,
+    worktreeList: projectSetupDeps.worktreeList
+  })
+  // `project-settings:launch-info` — same sibling registrar as main/index.ts, sharing this
+  // process's own trust store.
+  registerProjectLaunchInfoHandlers(platform, workspaceStore, projectTrustStore)
+  // Project env + shell at the spawn — the same core factory main/index.ts wires, over this
+  // shell's own stores. `requestTrust` is wired here too, and deliberately so: the Server Edition's
+  // consent prompt goes to `platform.broadcast` (the service's default `sendConsent`), which is the
+  // right delivery HERE — every attached client is an authenticated operator of this host — where
+  // on the desktop it would also reach relay peers. A headless server with nobody attached simply
+  // gets no answer, the prompt expires, and the shared value stays unused: fail closed on the
+  // grant, fail open on the spawn.
+  ptyManager.setProjectSpawnOverrides(
+    makeProjectSpawnOverrides({
+      readSettings: (projectId) => workspaceStore.readProjectSettings(projectId),
+      targetInfo: (projectId) => workspaceStore.projectTargetInfo(projectId),
+      trust: projectTrustStore,
+      requestTrust: makeProjectTrustRequester(projectSetupService, projectSetupDeps)
+    })
+  )
+
   const github = registerGitHubIntegration({
     platform,
     userDataDir: config.dataDir,
@@ -292,16 +349,17 @@ export async function startServer(
   }
   registerBoardLogHandlers(platform, boardLogRouter)
 
-  // Agent messaging (`send`/`reply`/`notify`), from the SAME core factory the desktop boots — the
-  // module was never Electron-dependent, only its wiring was, so this edition refused the three verbs
-  // by name and an author↔reviewer handoff had to route through the human.
+  // Agent messaging (`send`/`reply`/`notify`), from the SAME core factory the desktop boots. The
+  // module was never Electron-dependent — every import was core/shared and its whole surface is an
+  // injected deps object — only its WIRING sat in main's boot, which is why this edition used to
+  // refuse the three verbs by name and an author-reviewer handoff had to route through the human.
   //
-  // `isRemoteNode` is a constant `false`, and that is COMPLETE here rather than lazy: SSH projects are
-  // a desktop-only concept on this edition, so no node's pane is ever on another machine.
+  // `isRemoteNode` is a constant `false`, COMPLETE here rather than lazy: SSH projects are a
+  // desktop-only concept on this edition, so no node's pane is ever on another machine.
   //
-  // Every gate the desktop applies applies here, because they live inside the factory: the per-project
-  // capability GRANT (OFF by default), the runtime pane-ownership check, flow budgets, and the
-  // verified-only route gate in hook-server. Nothing is loosened to make this edition work.
+  // Every gate the desktop applies applies here, because they live inside the factory: the
+  // per-project capability GRANT (off by default), the runtime pane-ownership check, the flow
+  // budgets, and hook-server's verified-only route. Nothing is loosened for this edition.
   const messaging = initAgentMessaging({
     ptyManager,
     projects: () => workspaceStore.persistedCanvases(),
@@ -376,7 +434,7 @@ export async function startServer(
   setMirrorServerProvider(() => installMeta)
   // `onMessagingEvent` is the queue-flush leg: without it a delivery to a BUSY target is answered
   // `queued` and then waits forever, because the flush trigger is the target's own `done` event.
-  // Desktop feeds the same enriched event from its raw listener.
+  // The desktop feeds the same enriched event from its raw listener.
   const { contextTail, geminiContextTail } = wireAgentStatus(platform, {
     onMessagingEvent: messaging.onAgentEvent
   })
@@ -488,30 +546,42 @@ export async function startServer(
       // Fail-open: installManagedAgentHooks is itself best-effort, but a throw must never block boot.
       installManagedAgentHooks()
       // Canvas control's DISCOVERY half, under the same gate and for the same reason (it writes the
-      // shim into dataDir). Wiring the verbs without this leaves an agent that is never told the CLI
-      // exists: measured on a headless host, `NODETERM_CANVAS_CONTROL=1` was in the session env and
+      // shim into dataDir). Wiring the verbs without this leaves an agent that is never TOLD the CLI
+      // exists: measured on a headless host, `NODETERM_CANVAS_CONTROL=1` was in the session env while
       // `~/.claude/skills` did not exist at all. Best-effort inside itself, like the hook install.
       initCanvasControl()
     } catch (e) {
       console.warn('[nodeterm-server] managed hook install failed', e)
+    }
+    // Managed Claude accounts each carry their OWN settings.json (Claude Code resolves it relative
+    // to CLAUDE_CONFIG_DIR), so the hook has to be re-installed there as well or a managed account
+    // reports no agent status at all. Same loop the desktop runs. Per-account fail-open lives inside
+    // the helper.
+    installHooksIntoLocalAccounts(settingsStore.get().claudeAccounts ?? [])
+    // …and the canvas skill per account dir, exactly as the desktop does. This used to be skipped
+    // with "canvas control is not wired on this edition", which stopped being true: a session
+    // running under a managed account resolves skills from ITS config dir, so without this it is
+    // the one identity that never learns the verbs exist.
+    for (const acct of settingsStore.get().claudeAccounts ?? []) {
+      if (acct.host || acct.pending) continue
+      installCanvasSkillInto(claudeConfigDirFor(acct.id))
     }
   }
   await hookServer.start()
   // Canvas control. It used to be refused BY NAME here (`control-unsupported.ts`) because there was
   // no handler at all — so no agent on a headless host could open a node, which is most of what the
   // canvas is for. It is the SAME code path as the desktop now: every verb is implemented in
-  // `Canvas.tsx`, which is platform-agnostic React and runs in the browser unchanged, so all this
-  // shell owes is the forwarding — `core/agents/canvas-control-bridge.ts`.
+  // `Canvas.tsx`, platform-agnostic React that runs in a browser tab unchanged, so this shell owes
+  // only the forwarding (`core/agents/canvas-control-bridge.ts`).
   //
   // `candidates` is every attached browser tab (all of them own a canvas here, unlike the desktop's
-  // relay peers — see the bridge's header). Zero attached is the NORMAL state of a headless host:
-  // the agent's tmux session outlives every browser, so the bridge answers a *retryable* refusal
-  // naming what to do (open the web UI), not the permanent one.
+  // relay peers). Zero attached is the NORMAL state of a headless host — the agent's tmux session
+  // outlives every browser — so the bridge answers a *retryable* refusal naming the fix (open the
+  // web UI), never the permanent one.
   //
-  // `withEditionRefusals` keeps the PERMANENT refusal for the handful of verbs this host genuinely
-  // cannot perform (`browser`, and the messaging trio) — in FRONT of the bridge, because the bridge
-  // must reach a UI to answer at all and would otherwise report a permanent fact as a retryable one.
-  // See EDITION_UNSUPPORTED_VERBS for the per-verb reasoning and the exit condition.
+  // `withEditionRefusals` keeps the permanent refusal for what this host genuinely cannot do, in
+  // FRONT of the bridge: the bridge needs a tab to answer at all, so routing a permanent fact
+  // through it would report it as transient. See EDITION_UNSUPPORTED_VERBS.
   hookServer.setControlHandler(
     withEditionRefusals(
       initCanvasControlBridge({ platform, candidates: () => platform.clientIds() })
@@ -527,10 +597,12 @@ export async function startServer(
   // arming the secret, and a headless host in legacy mode is where it is most likely to be needed.
   hookServer.setIdentityStrictOverride(() => settingsStore.get().hookIdentityStrict)
   try {
-    hookServer.setNodeAuthSecret(await loadOrCreateNodeAuthSecret())
-    // Materialise a token file for every persisted node so an already-running session becomes
-    // verified at its next hook event with no restart. No-ops into legacy mode without a secret.
-    initNodeTokens({ canvases: () => workspaceStore.persistedCanvases() })
+    // The whole node-identity arming (node secret + the S6 Codex record secret + node tokens) lives
+    // in one REAL production function so the boot test can drive the shipped path rather than a
+    // re-implementation of it (constraint 8). It arms `setCodexThreadIdentityAuthSecret` with the
+    // same secret so a MANAGED Codex account on a headless host signs/verifies its ownership records
+    // instead of throwing "identity authentication is unavailable" (Decision 1, both-shells).
+    await armServerNodeIdentity(hookServer, () => workspaceStore.persistedCanvases())
   } catch (error) {
     console.warn('[node-identity] no secret — hook identity unavailable, running legacy', error)
   }
@@ -654,6 +726,9 @@ export async function startServer(
     return {
       port: 0, // nothing bound
       async close() {
+        // Kill any in-flight setup/archive run: it is a detached process group, so nothing else in
+        // this teardown reaches it. Same call, same reason, in the serving branch's close() below.
+        projectSetupService.disposeAll()
         // Detach PTY clients — tmux sessions keep running (Phase 1 contract).
         sessionReaper.stop()
         pressure.stop()
@@ -706,6 +781,9 @@ export async function startServer(
   return {
     port,
     async close() {
+      // Kill any in-flight setup/archive run first: it is a detached process group (setsid), so
+      // neither the WS teardown nor ptyManager.killAll() below would ever reach it.
+      projectSetupService.disposeAll()
       // Detach PTY clients — tmux sessions keep running (Phase 1 contract; never kill the server).
       sessionReaper.stop()
       pressure.stop()

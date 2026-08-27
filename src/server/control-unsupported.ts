@@ -63,8 +63,15 @@ export function controlUnsupportedMessage(verb: string): string {
 
 /** The per-verb "why", empty for a verb that needs no elaboration. */
 function unsupportedClause(verb: string): string {
-  return verb === 'browser' ? ` ${BROWSER_UNSUPPORTED_CLAUSE}` : ''
+  if (verb === 'browser') return ` ${BROWSER_UNSUPPORTED_CLAUSE}`
+  if (verb === 'open-project') return ` ${OPEN_PROJECT_UNSUPPORTED_CLAUSE}`
+  if (verb === PROJECT_TARGET_VERB) return ` ${PROJECT_TARGET_UNSUPPORTED_CLAUSE}`
+  return ''
 }
+
+/** The pseudo-verb name a `--project`-carrying refusal reports, so its clause is routed like any
+ *  other and the message still names what was refused. */
+const PROJECT_TARGET_VERB = '--project targeting'
 
 /**
  * The permanent refusal, for a verb this edition genuinely cannot perform. Never resolves `ok: true`.
@@ -106,7 +113,38 @@ export async function serverEditionControlHandler({ verb }: { verb: string }): P
  * The lesson is the checklist's, not messaging's: before adding a verb here, check whether the
  * dependency is really Electron-bound or merely LIVES in `src/main`. Twice now it has been the latter.
  */
-export const EDITION_UNSUPPORTED_VERBS: ReadonlySet<string> = new Set(['browser'])
+export const EDITION_UNSUPPORTED_VERBS: ReadonlySet<string> = new Set(['browser', 'open-project'])
+
+/**
+ * `open-project`'s clause, and the reason it is in the set above rather than forwarded.
+ *
+ * Everything that AUTHORIZES it lives in the desktop shell's control wrapper: the verified-caller
+ * check, the SSH-caller local-only rule, the grant cap, and the single `statSync` resolution that
+ * makes the renderer see a resolved path instead of the caller's raw argument (`gateOpenProject` /
+ * `recordOpenProjectGrant`, src/main). None of that exists here, so forwarding the verb would hand
+ * this edition's renderer an UNVALIDATED cwd with no grant accounting — a weaker gate than the
+ * desktop's, reached by the same call. Refusing is the only honest answer until the gate itself
+ * moves into core.
+ */
+export const OPEN_PROJECT_UNSUPPORTED_CLAUSE =
+  'Opening another project from an agent is desktop-only: the checks that authorize it (verified ' +
+  'caller, path resolution, grant cap) live in the desktop shell, so this edition refuses rather ' +
+  'than acting on an unchecked path.'
+
+/**
+ * `--project` TARGETING is refused here for the same reason, and it is matched on the ARGUMENT
+ * rather than the verb: the set of targetable verbs (`PROJECT_TARGETABLE_VERBS`) lives in
+ * `src/main/project-grants.ts`, which this shell may not import, and duplicating it here is exactly
+ * the drift CLAUDE.md warns about. Refusing ANY verb that carries `--project` is a superset of that
+ * set, needs no import, and cannot go stale when a verb joins it.
+ */
+export function refusesProjectTargeting(args: Record<string, string> | undefined): boolean {
+  return !!args && args.project !== undefined
+}
+
+export const PROJECT_TARGET_UNSUPPORTED_CLAUSE =
+  'Targeting another project with --project is desktop-only: the own-or-granted check that ' +
+  'authorizes it lives in the desktop shell. Run the verb from a session in that project instead.'
 
 /**
  * Wrap the real control bridge so the verbs above keep their permanent, named refusal and everything
@@ -116,8 +154,11 @@ export const EDITION_UNSUPPORTED_VERBS: ReadonlySet<string> = new Set(['browser'
 export function withEditionRefusals<
   H extends (req: { verb: string; nodeId: string; args: Record<string, string> }) => Promise<unknown>
 >(handler: H): H {
-  return (async (req) =>
-    EDITION_UNSUPPORTED_VERBS.has(req.verb)
-      ? await serverEditionControlHandler(req)
-      : await handler(req)) as H
+  return (async (req) => {
+    if (EDITION_UNSUPPORTED_VERBS.has(req.verb)) return await serverEditionControlHandler(req)
+    // Argument-matched, not verb-matched — see refusesProjectTargeting.
+    if (refusesProjectTargeting(req.args))
+      return await serverEditionControlHandler({ verb: PROJECT_TARGET_VERB })
+    return await handler(req)
+  }) as H
 }

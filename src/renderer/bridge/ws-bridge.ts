@@ -204,11 +204,22 @@ const AI_NAMING_UNAVAILABLE = {
   message: 'AI naming is not available in the server edition yet'
 }
 
-/** Build the real `pty` / `workspace` / `settings` namespaces (plus the top-level `userDataDir`)
- *  over an RpcClient, mirroring the preload's invoke(→request)/send(→cast) split exactly. */
+/** Build the real `pty` / `workspace` / `projectSettings` / `settings` namespaces (plus the
+ *  top-level `userDataDir`) over an RpcClient, mirroring the preload's
+ *  invoke(→request)/send(→cast) split exactly. */
 export function buildRealApi(
   client: RpcClient
-): Pick<NodeTerminalApi, 'pty' | 'workspace' | 'settings' | 'agent' | 'userDataDir'> {
+): Pick<
+  NodeTerminalApi,
+  | 'pty'
+  | 'workspace'
+  | 'projectSettings'
+  | 'projectSetup'
+  | 'worktree'
+  | 'settings'
+  | 'agent'
+  | 'userDataDir'
+> {
   const pty: PtyApi = {
     create: (options: PtyCreateOptions) =>
       client.request(IPC.ptyCreate, options) as ReturnType<PtyApi['create']>,
@@ -234,7 +245,7 @@ export function buildRealApi(
     tmuxStatus: () =>
       client
         .request(IPC.ptyTmuxStatus)
-        .catch(() => ({ available: true, installCommand: null, installLabel: null, platform: 'linux' })) as Promise<TmuxStatus>,
+        .catch(() => ({ available: true, installCommand: null, installLabel: null, platform: null })) as Promise<TmuxStatus>,
     // Unknown on failure (null), never a rejection: the restart poller reads null as "not a
     // shell yet" and gives up on its own deadline.
     paneCommand: (persistKey) =>
@@ -274,6 +285,12 @@ export function buildRealApi(
     // next writeDisk() overwrote the team's shared canvas. Data loss, not a degrade.
     probeFolder: (folder: string) =>
       client.request(IPC.workspaceProbeFolder, folder) as ReturnType<WorkspaceApi['probeFolder']>,
+    // REAL for the same reason: core registers IPC.workspaceProjectFileState, and a stub would
+    // have to answer 'unreadable' — which is the side that never recovers a deleted project file.
+    projectFileState: (folder: string) =>
+      client.request(IPC.workspaceProjectFileState, folder) as ReturnType<
+        WorkspaceApi['projectFileState']
+      >,
     // REAL: core broadcasts IPC.workspaceMigrated after a v2→v3 migration (workspace-store.ts).
     onMigrated: (cb) => client.subscribe(IPC.workspaceMigrated, cb as Listener),
     // REAL: core broadcasts IPC.workspaceCorruptRecovered from the load path (workspace-store.ts).
@@ -285,6 +302,67 @@ export function buildRealApi(
     // data loss (the store's own rev reconciliation still guards writes). Booting the watcher in
     // src/server is the follow-up.
     onExternalChange: () => () => {}
+  }
+
+  // REAL: WorkspaceStore (core) registers the project-settings:* channels too — same
+  // registerIpc() call as workspace above — so the server serves this on both shells.
+  const projectSettings: NodeTerminalApi['projectSettings'] = {
+    read: (projectId) =>
+      client.request(IPC.projectSettingsRead, projectId) as ReturnType<
+        NodeTerminalApi['projectSettings']['read']
+      >,
+    writeShared: (projectId, doc) =>
+      client.request(IPC.projectSettingsWriteShared, projectId, doc) as Promise<boolean>,
+    updateLocal: (projectId, local) =>
+      client.request(IPC.projectSettingsUpdateLocal, projectId, local) as Promise<boolean>,
+    launchInfo: (projectId) =>
+      client.request(IPC.projectSettingsLaunchInfo, projectId) as ReturnType<
+        NodeTerminalApi['projectSettings']['launchInfo']
+      >,
+    // REAL: `ProjectSetupService.ensureFamilyTrusted` broadcasts IPC.projectTrustChanged on every
+    // approval, for each project id that asked.
+    onTrustChanged: (cb) => client.subscribe(IPC.projectTrustChanged, cb as Listener)
+  }
+
+  // REAL: registerProjectSetupHandlers (core) is wired on the same construction-order point as
+  // src/main/index.ts. Wire carries exactly `(projectId, kind, worktreePath?)` — no rootPath/
+  // projectName/ssh; the server derives those itself from its own workspace index, same as main.
+  const projectSetup: NodeTerminalApi['projectSetup'] = {
+    run: (projectId, kind, worktreePath) =>
+      client.request(IPC.projectSetupRun, projectId, kind, worktreePath) as ReturnType<
+        NodeTerminalApi['projectSetup']['run']
+      >,
+    cancel: (runKey) => client.request(IPC.projectSetupCancel, runKey) as Promise<boolean>,
+    consent: async (requestId, answer) => {
+      client.cast(IPC.projectSetupConsentSubmit, requestId, answer)
+    },
+    // Fails CLOSED on a rejection rather than throwing at the caller: over the relay this method is
+    // host-only, so a guest's call comes back E_FORBIDDEN — and "not trusted" is exactly the right
+    // answer for a client that may not raise the host's dialog.
+    requestTrust: (projectId, family) =>
+      client.request(IPC.projectSetupRequestTrust, projectId, family).then(
+        (v) => v === true,
+        () => false
+      ),
+    onConsentRequest: (cb) => client.subscribe(IPC.projectSetupConsentRequest, cb as Listener),
+    onConsentDismiss: (cb) => client.subscribe(IPC.projectSetupConsentDismiss, cb as Listener),
+    onEvent: (projectId, cb) => {
+      const unsub = client.subscribe(IPC.projectSetupEvent(projectId), cb as Listener)
+      client.cast(IPC.projectSetupSubscribe, projectId)
+      return () => {
+        unsub()
+        client.cast(IPC.projectSetupUnsubscribe, projectId)
+      }
+    }
+  }
+
+  // REAL: registerWorktreeSharedPathsHandlers (core), same construction point as main/server. Wire
+  // carries exactly `(projectId, worktreePath)`; the server reads the sharedPaths list itself.
+  const worktree: NodeTerminalApi['worktree'] = {
+    materializeShared: (projectId, worktreePath) =>
+      client.request(IPC.worktreeMaterializeShared, projectId, worktreePath) as ReturnType<
+        NodeTerminalApi['worktree']['materializeShared']
+      >
   }
 
   const settings: SettingsApi = {
@@ -321,7 +399,7 @@ export function buildRealApi(
   // `/worktrees/…` at the filesystem root (the server usually runs as root, and git would create it).
   const userDataDir = (): Promise<string> => client.request(IPC.appUserDataDir) as Promise<string>
 
-  return { pty, workspace, settings, agent, userDataDir }
+  return { pty, workspace, projectSettings, projectSetup, worktree, settings, agent, userDataDir }
 }
 
 export function buildGitHubApi(
@@ -347,6 +425,10 @@ export function buildGitHubApi(
       >,
     clearCache: (projectId) =>
       client.request(IPC.githubIssuesClearCache, projectId) as Promise<void>,
+    projectAvatar: (projectId) =>
+      client.request(IPC.githubProjectAvatar, projectId) as ReturnType<
+        GitHubIssuesApi['projectAvatar']
+      >,
     onChanged: (projectId, listener) =>
       client.subscribe(IPC.githubIssuesChanged(projectId), listener as Listener)
   }
@@ -821,6 +903,39 @@ export function buildTranscriptApi(
   }
 }
 
+/**
+ * Managed CLAUDE accounts over the WS bridge (issue #313). REAL, not a stub: the lifecycle moved
+ * into `src/core/claude-accounts-service.ts`, so the server registers the same four channels the
+ * desktop does and the browser can create, log into and remove accounts. Deliberately NOT added to
+ * `relay-api.ts` — a relay tab drives someone else's machine, and minting an account there would
+ * create it on the HOST while this renderer's settings.json records it as one of its own.
+ *
+ * `waitLogin` is a straight passthrough of a poll that runs up to 5 minutes. That is safe because
+ * RpcClient has no request timeout: a pending request rejects only when the socket drops, which is
+ * exactly the outcome the caller wants (the login row stays pending and offers Retry).
+ *
+ * The `codexAccounts` namespace stays STUBBED (E_UNSUPPORTED). Its switch verbs authorize the
+ * owning window by Electron WebContents id, which has no meaning over a WS connection — porting it
+ * needs a connection-identity design, not a builder.
+ */
+export function buildClaudeAccountsApi(client: RpcClient): Pick<NodeTerminalApi, 'claudeAccounts'> {
+  return {
+    claudeAccounts: {
+      add: (ctx) =>
+        client.request(IPC.claudeAccountsAdd, ctx) as Promise<{
+          id: string
+          configDir: string
+          versionSupported: boolean
+        }>,
+      waitLogin: (id, ctx) =>
+        client.request(IPC.claudeAccountsWaitLogin, id, ctx) as Promise<{ email: string } | null>,
+      cancelWaitLogin: (id) =>
+        client.request(IPC.claudeAccountsCancelWait, id) as Promise<void>,
+      remove: (id, ctx) => client.request(IPC.claudeAccountsRemove, id, ctx) as Promise<void>
+    }
+  }
+}
+
 /** WS URL for the current page: same host, `/ws`, ws→http / wss→https. */
 function wsUrl(): string {
   const scheme = location.protocol === 'https:' ? 'wss' : 'ws'
@@ -940,6 +1055,7 @@ export async function installWsBridge(): Promise<boolean> {
     ...buildUsageApi(client),
     ...buildSessionMemoryApi(client),
     ...buildGitHubApi(client),
+    ...buildClaudeAccountsApi(client),
     codex: buildCodexApi(client),
     // `claude` is assembled from two builders: `cliCaps` from the relay-shared one, and the
     // transcript reader from the Server-Edition-only one (which also supplies `chat`).

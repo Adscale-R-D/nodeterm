@@ -176,6 +176,20 @@ export const IconBranch = () => (
   </svg>
 )
 
+export const IconEye = () => (
+  <svg {...S}>
+    <path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z" />
+    <circle cx="12" cy="12" r="3" />
+  </svg>
+)
+
+export const IconEyeOff = () => (
+  <svg {...S}>
+    <path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 7 11 7a13.16 13.16 0 0 1-1.67 2.68M6.61 6.61A13.53 13.53 0 0 0 1 11s4 7 11 7a9.26 9.26 0 0 0 5.39-1.61M14.12 14.12a3 3 0 1 1-4.24-4.24" />
+    <path d="M1 1l22 22" />
+  </svg>
+)
+
 export const IconEditor = () => (
   <svg {...S}>
     <path d="M9 8l-4 4 4 4M15 8l4 4-4 4" />
@@ -320,5 +334,26 @@ export const IconCanvasView = () => (
     <rect x="1.5" y="1.5" width="6" height="5" rx="1" />
     <rect x="9" y="4" width="5.5" height="4.5" rx="1" />
     <rect x="3.5" y="9.5" width="5.5" height="5" rx="1" />
+  </svg>
+)
+
+/** Fullscreen expand — outward diagonal arrows: the maximize toggle's "will fill the viewport"
+ *  state (issue #399). Pairs with IconRestoreSize; the two states must not share a glyph. */
+export const IconMaximize = () => (
+  <svg {...S}>
+    <path d="M14 4h6v6" />
+    <path d="M20 4l-6 6" />
+    <path d="M10 20H4v-6" />
+    <path d="M4 20l6-6" />
+  </svg>
+)
+
+/** Fullscreen restore — the same arrows pointing back inward: the maximize toggle's second click. */
+export const IconRestoreSize = () => (
+  <svg {...S}>
+    <path d="M20 10h-6V4" />
+    <path d="M20 4l-6 6" />
+    <path d="M4 14h6v6" />
+    <path d="M4 20l6-6" />
   </svg>
 )

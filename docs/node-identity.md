@@ -195,6 +195,7 @@ The bearer is required everywhere; this table is about the *node* token on top o
 | `/context-link/*` | Accepted unless the node is latched; a refusal is **prose with a 200** | 403 | Every verb is a read, so the whole route sits in the tolerant bucket. |
 | `/control/list` | Accepted unless the node is latched | 403 | Tolerant: leaks canvas shape, changes nothing. |
 | `/control/<mutation>` | Warned during the window, refused after the cutoff, refused immediately if latched | 403 | Refusal happens **before** the handler. `write`/`close` still ask the human. |
+| `/control/browser` | **Refused** immediately — no window, no cutoff to wait for | 403 | Strict from the day it existed via `STRICT_CONTROL_VERBS`, checked **before** both the `override` escape and the dated window, so `hookIdentityStrict: false` does not soften it. Identity is only the first gate: the per-project switch (off by default) and in-memory ledger ownership still apply after it. |
 | `/codex-thread/{start,bind}` | **Refused** (403) | 403 | Strict from the day they existed — no upgrade population to protect. |
 | `/codex-thread/fallback` | **Always accepted** | 403 | It reports a DEGRADE and grants nothing; refusing it would silence it in exactly the tokenless case it exists for. |
 
@@ -207,6 +208,16 @@ unjudgeable, not hostile), every session that predates the feature, and any futu
 there does not degrade a feature — it silently stops an agent's status, context meter and approvals,
 and the managed script's `curl -sS` has no `--fail`, so a 403 exits 0 and the node goes dark with no
 error anywhere. `forged` is the single exception because nothing legitimate can produce it.
+
+**Why the invented-`kid` escape does not reach `/control/browser`.** The "deliberate means inventing
+a `kid`" hole above is real for `/control/list` and every `/context-link/*` verb: a made-up kid is a
+*foreign* kid, therefore `legacy`, therefore it walks past the latch and the cutoff into those
+tolerant routes. It does **not** walk into `browser`. `browser` is in `STRICT_CONTROL_VERBS`, where
+`controlPolicy` demands `verified` and returns `refuse` for anything else — and `legacy` is anything
+else. A foreign or invented kid is `legacy`, `legacy` is a refusal on this route, so the escape that
+buys `/control/list` buys nothing here. This is the whole reason the strict bucket is checked before
+the `override === false` branch: that branch returns `allow-with-warning` for a non-tolerant verb,
+which would have handed browser control to any holder of the app-wide bearer forever.
 
 **A pre-upgrade codex session degrades to plain codex until it is relaunched.** Its launcher reads
 the per-node capability from an env var this build no longer sets, and the value the previous build
@@ -332,8 +343,53 @@ the latch shippable, not the window:
 
 - every token sweep releases the latch (collision refusal, delete/re-create, remote refusal);
 - the clock clamp;
+- the shared token resolver (below), so a client cannot fail to FIND a token that exists;
 - and the escape hatch, which must be reachable **in the UI**, because a stranded user's symptom
   never says "clock" or "collision".
+
+### ⚠ A client that cannot FIND the token is indistinguishable from one that has none — issue #384
+
+The token dir is advertised by ONE thing, the endpoint file, and a session is pinned for life to the
+endpoint **path** it was handed at tmux creation (`buildPtyEnv` / `remoteHookEnvArgs`). So a session
+whose endpoint file does not carry a `NODETERM_NODE_TOKEN_DIR` line presents nothing, forever, while
+its token file sits in the standard place. Three populations, all measured on a real host:
+
+- **A pre-v2 endpoint file that is still LIVE.** SSH hosts used to share one
+  `~/.nodeterm/hook-endpoint.env`; the current build writes per-project
+  `hook-endpoint-<projectId>.env` and never touches the old path again. The old file names
+  `~/.nodeterm/hook-<projectId>.sock` — a path **re-bound on every connect of that project** — so it
+  keeps reaching a current server while advertising no dir. Observed: a `VERSION=1` file a month old
+  pointing at a socket created minutes earlier.
+- **A session whose transport rides the env with no readable endpoint file** — what the phone hands
+  a session it spawns.
+- **A partial read** of an endpoint file being rewritten under the reader.
+
+What made it a *refusal* rather than an unverified call is that the CLIENTS DISAGREED. The managed
+hook script has an endpoint failover: on a failed POST it adopts a live sibling endpoint and re-reads
+the token from **that** endpoint's dir — so the node proves itself and latches. The two sh shims had
+no failover and no fallback, so every canvas-control and context-link call from that session was
+refused with `IDENTITY_REFUSED_NOTE` for the rest of its life. **Proven by one client, refused
+through another.**
+
+The fix is one resolver, `nt_read_node_token`, emitted by `core/agents/node-token-sh.ts` and used by
+all three clients (the codex launcher is deliberately excluded — it refuses outright on an unreadable
+endpoint and reports a named degrade, a different contract). It tries the advertised dir, then
+`<dir of the endpoint file>/node-tokens` — the layout **by construction** on all three surfaces — then
+the same well-known data dirs the hook script already walks for endpoint files.
+
+It is **monotone**, and that is the whole safety argument: the advertised dir is always first, so
+nothing that verifies today changes; the lookup is by node-id FILENAME in every candidate, so a
+session can still only present its own token; and a dir belonging to another instance mints under a
+different secret, so its token carries a foreign `kid` — `legacy`, bit-for-bit what presenting
+nothing already gave, and never `forged`. Each candidate can turn `legacy` into `verified` and
+nothing else.
+
+**The advice was wrong too.** Both notes said "Restart this node (right-click it, *Restart agent*)".
+That action re-launches the CLI **inside the same pane** and deliberately leaves the pty, the tmux
+session and therefore the whole environment untouched (`terminal/agent-restart.ts`) — so it could
+never change what a session presents. They now say *close and reopen the node* (a new tmux session is
+what picks up the current `-e` env), *reconnect the SSH project* (the only thing that rewrites the
+host's endpoint file, shim, hook script and token files), and name the escape hatch.
 
 Known and **not** fixed: two processes on one node id after a re-attach. A shell from an older app
 run, whose shim never learned to send the header, posts nothing while the re-attached session proves
@@ -355,15 +411,16 @@ because it is a tri-state:
 `false` is for a user whose upgrade strands a live session: it gets the canvas back without
 downgrading the app. Neither value ever admits a `forged` token.
 
-Neither releases a verb in **`STRICT_CONTROL_VERBS`** either — but **that set is pre-positioned and
-gates nothing today, and nobody's hatch has narrowed.** It contains one name, `browser`, which is
-**not a verb this app has**: `ControlVerb` lists 24 and the browser one is `open-browser`, which is
-deliberately *not* in the set. Measured over the real verb list, the set of verbs the hatch stops
-releasing is empty. What exists now is the ORDERING: the bucket is decided one line below the
-`forged` check, above every branch the hatch or the dated window can reach, and it admits `verified`
-only — so the verb it is for cannot arrive through the `override === false` branch, which returns
-`allow-with-warning` for every non-tolerant verb. The user-visible change begins in the PR that
-creates the verb, not here.
+Neither releases a verb in **`STRICT_CONTROL_VERBS`**, and as of S8 that is now a live restriction,
+not a pre-positioned one. The set contains one name, `browser`, and `browser` **is a real verb**
+(shipped over S8 PRs 7–9): it drives a real logged-in page — navigating, typing, clicking, reading
+text and cookies. So the hatch releasing it would mean handing that to any holder of the app-wide
+bearer, forever, which is exactly what must never happen. The ORDERING makes it impossible: the
+strict bucket is decided one line below the `forged` check, above every branch the hatch or the dated
+window can reach, and it admits `verified` only — so `browser` can never arrive through the
+`override === false` branch, which returns `allow-with-warning` for every non-tolerant verb. Setting
+*Require verified node identity for canvas control* to **Not required** keeps the warning window open
+and releases the latch for the ordinary verbs; it does **not** release browser control.
 
 `open-browser` stays out on purpose, and the distinction is worth stating because the sentence above
 says "browser": **opening a node is not driving one.** The threat is an agent acting inside a page
@@ -374,10 +431,11 @@ open a browser node with no way back, since the hatch by design cannot reach int
 residual is named rather than hidden: an unverified caller can open a node onto a logged-in page and
 the page's title then shows up in `list`. That is `list`'s tolerance, unchanged by this bucket.
 
-The cost, when the verb does land: cross-instance failover loses it, because another instance's
-token is a foreign kid and therefore `legacy`. Both shells wire it as a **live
-getter** (`setIdentityStrictOverride`), so a change takes effect on the next request, not the next
-launch — a stranded user must not have to restart the thing that is already broken.
+The cost, now that the verb has landed: cross-instance failover cannot drive a browser node, because
+another instance's token is a foreign kid and therefore `legacy`, and `legacy` is a refusal on this
+route. Both shells wire the override as a **live getter** (`setIdentityStrictOverride`), so a change
+takes effect on the next request, not the next launch — a stranded user must not have to restart the
+thing that is already broken — but no setting reaches into the strict bucket to release `browser`.
 
 ## Ids are path segments
 
@@ -394,6 +452,40 @@ nodes, so a `project.json` carrying both picks by array order whose token lands 
 and the other node reads it. The materialiser refuses tokens for the **whole colliding set** and
 sweeps anything an earlier pass wrote for them; those nodes fall back to `legacy`, the designed
 fail-open state.
+
+## Account scoping (S6): the same secret signs Codex account-scoped records
+
+The restart-stable node-auth secret above does a second job: it signs the Codex thread→node→**account**
+ownership records (`src/core/codex-identity-proxy.ts`). S6 gives a machine the system Codex login
+(`~/.codex`) alongside managed logins, and a record now binds the full 4-tuple
+`(threadId, accountScope, nodeId, hookEndpoint)` so one account can never be made to speak for
+another's threads. The full model is [Shared Codex node identity](shared-codex-node-identity.md); the
+parts that touch this secret and the invariants here:
+
+- **The codex identity secret is armed on both shells.** Desktop and Server Edition both call
+  `setCodexThreadIdentityAuthSecret(loadOrCreateNodeAuthSecret())` at boot — the desktop in
+  `src/main/index.ts`, the Server Edition in `src/server/node-identity-arm.ts` — so **managed records
+  sign on a headless host too** (raw `0600` `node-auth-key.bin`, no keychain). This is the both-shells
+  half of Decision 1; a keychain-only secret would regress Server Edition. With **no** secret armed, a
+  record write **throws** rather than writing an unsigned record (fail-closed) — nothing is minted.
+- **The switch is owner-authorized, main-side.** Moving a running node's conversation to another
+  account is a three-phase, TTL-bounded protocol keyed off `event.sender.id` — only the WebContents
+  that reserved the switch may commit or finish it. It resumes the **same conversation id** (an atomic
+  hardlink of the rollout inode), never a fork. The phone **never originates** an add/switch/copy.
+- **Ambiguity fails closed, like the latch.** The same thread id owned by two account scopes resolves
+  to **no owner** unless `owners.size === 1` — the same house rule as the pane-ownership and
+  invented-`kid` refusals: an owner that cannot be *proven* is denied, never picked by order.
+- **Ids are path segments, still.** A managed account id is a directory scope
+  (`<codexThreadIdentityRoot>/<accountId>/<threadId>`), so it passes `isSafeAccountId` (must start
+  alphanumeric — blocks `.`/`..`/leading-separator) before it becomes a path, exactly as `isSafeNodeId`
+  / `isSafeThreadId` do. The account id travels in the launcher's POST **body**, never on an argv
+  (invariant 1 — no credential *or* scope-shaping input on a command line).
+
+Two S6 surfaces remain **owed device verifications** rather than shipped-and-verified: the imperative
+pane-recycle glue behind a live switch, and the remote-host account **lifecycle** UI (add/login/remove
+*on* an SSH host — the local picker + switch are wired, the remote lifecycle surface is display-only,
+fail-closed). Both, plus the live-daemon and real-WAN legs, are in
+[the acceptance gate](codex-accounts-acceptance.md).
 
 ## Invariants a future change must not break
 

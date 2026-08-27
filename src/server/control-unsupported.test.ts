@@ -40,6 +40,7 @@ import {
   CONTROL_UNSUPPORTED_SENTENCE,
   controlUnsupportedMessage,
   EDITION_UNSUPPORTED_VERBS,
+  refusesProjectTargeting,
   serverEditionControlHandler,
   withEditionRefusals
 } from './control-unsupported'
@@ -124,8 +125,29 @@ describe('with no UI attached, the refusal is RETRYABLE and says so', () => {
     for (const verb of ['send', 'reply', 'notify']) {
       expect(EDITION_UNSUPPORTED_VERBS.has(verb), verb).toBe(false)
     }
-    // `browser` is the only member left, and it is structural rather than a wiring accident.
-    expect([...EDITION_UNSUPPORTED_VERBS]).toEqual(['browser'])
+    // What IS left, and why each one is structural rather than a wiring accident: `browser` needs
+    // Electron's <webview> + CDP, and `open-project` needs the desktop wrapper's authorization
+    // (verified caller, path resolution, grant cap) that this shell has no copy of.
+    expect([...EDITION_UNSUPPORTED_VERBS].sort()).toEqual(['browser', 'open-project'])
+  })
+
+  it('`open-project` is unreachable on this edition — the P8 pin for issue #338', async () => {
+    // No server code changed for #338 and none may need to: the SE registers this handler for
+    // ALL verbs, so open-project (and any --project-carrying open) answers the same permanent
+    // named refusal. Pinned by name so the contract cannot drift silently.
+    expect(await serverEditionControlHandler({ verb: 'open-project' })).toEqual({
+      ok: false,
+      error: CONTROL_UNSUPPORTED_ERROR,
+      message: controlUnsupportedMessage('open-project')
+    })
+    // And on the wire: open-project is verified-only at the route (requiresVerified runs before
+    // the handler on every edition), so a token is presented — the edition answer is what a
+    // caller that got PAST identity hears.
+    const res = await control('open-project', 'n-op', 'text/plain', nodeAuthToken(SECRET, 'n-op'))
+    expect(res.status).toBe(400)
+    const text = await res.text()
+    expect(text).toContain(CONTROL_UNSUPPORTED_ERROR)
+    expect(text).toContain('do not retry')
   })
 
   it('an unverified `send` is refused on IDENTITY first, and that refusal does not invite a retry either', async () => {
@@ -157,6 +179,38 @@ describe('with no UI attached, the refusal is RETRYABLE and says so', () => {
       expect(msg, verb).toContain('other canvas-control verbs work here')
       expect(msg, verb).not.toMatch(/^\S+: Canvas control is not available/)
     }
+  })
+
+  it('refuses ANY verb carrying --project, matched on the argument not the verb', async () => {
+    // The gate that authorizes cross-project targeting (own-or-granted) lives in the desktop shell's
+    // control wrapper. Forwarding a --project-carrying open here would reach this edition's renderer
+    // with nothing having checked it — a weaker gate than the desktop's, through the same call.
+    //
+    // Matched on the ARGUMENT because the targetable-verb set lives in src/main/project-grants.ts,
+    // which this shell may not import; refusing anything carrying --project is a superset of it and
+    // cannot go stale when a verb joins the set.
+    expect(refusesProjectTargeting({ project: 'p-1' })).toBe(true)
+    expect(refusesProjectTargeting({ project: '' })).toBe(true) // present-but-empty is still a target
+    expect(refusesProjectTargeting({ node: 'n-1' })).toBe(false)
+    expect(refusesProjectTargeting(undefined)).toBe(false)
+
+    const refused = await withEditionRefusals(async () => ({ ok: true, message: 'forwarded' }))({
+      verb: 'open-claude',
+      nodeId: 'n-1',
+      args: { project: 'p-other' }
+    })
+    expect(refused).toMatchObject({ ok: false, error: CONTROL_UNSUPPORTED_ERROR })
+    expect((refused as { message: string }).message).toContain('--project')
+    expect((refused as { message: string }).message).toContain('do not retry')
+
+    // …and the same verb WITHOUT --project is forwarded untouched.
+    expect(
+      await withEditionRefusals(async () => ({ ok: true, message: 'forwarded' }))({
+        verb: 'open-claude',
+        nodeId: 'n-1',
+        args: {}
+      })
+    ).toEqual({ ok: true, message: 'forwarded' })
   })
 
   it('adds that clause to `browser` and to nothing else', () => {

@@ -10,6 +10,9 @@ import { claudeCliCaps, registerClaudeCliIpc } from '../../core/claude-cli'
 import { registerCodexIdentityIpc } from '../../core/codex-identity-caps'
 import { UNKNOWN_CODEX_IDENTITY_CAPS } from '@shared/types'
 import { startUsageService } from '../../core/usage/usage-service'
+import { registerClaudeAccountsIpc } from '../../core/claude-accounts-service'
+import { codexUsageAccounts } from '../../core/codex-accounts-core'
+import { codexHomeFor } from '../../core/codex-config-dir'
 import {
   setMirrorUsageProvider,
   buildMirrorUsage,
@@ -77,13 +80,25 @@ export function registerCoreHandlers(
   // The secret question that used to block this is ANSWERED: src/server/index.ts arms
   // `hookServer.setNodeAuthSecret(await loadOrCreateNodeAuthSecret())` at boot, which on a headless
   // host is raw 0600 bytes in the data dir — a decision taken explicitly, not quietly (see
-  // src/core/agents/node-auth-secret.ts). What is still missing is only the codex-specific
-  // plumbing: `setCodexThreadIdentityAuthSecret(secret)`, `refreshCodexIdentityCaps()`, and the two
-  // `setCodexThread*Handler` registrations src/main/index.ts makes. Everything they call already
-  // lives in src/core and boots from CorePlatform, so this stays a scope line, not a blocker —
-  // until it is drawn differently, saying "no" here keeps the browser's Codex nodes identical to
-  // what they are today rather than half-armed.
+  // src/core/agents/node-auth-secret.ts). As of S6 PR 5 the same boot path also calls
+  // `setCodexThreadIdentityAuthSecret(secret)`, so a MANAGED Codex account's thread→node→account
+  // ownership records sign and verify on this headless host instead of throwing "identity
+  // authentication is unavailable" (the carried PR-2 obligation). What stays deliberately absent
+  // here is the shared-app-server plumbing (`refreshCodexIdentityCaps()` + the two
+  // `setCodexThread*Handler` registrations src/main/index.ts makes): the Server Edition answers "no
+  // shared identity" so its Codex nodes launch the bare `codex` — a working node with its own
+  // app-server, just without the shared one. Arming the record secret is orthogonal to that
+  // degrade: it never launches an app-server, it only lets the record layer sign.
   registerCodexIdentityIpc(() => UNKNOWN_CODEX_IDENTITY_CAPS)
+
+  // Managed CLAUDE accounts (issue #313). The lifecycle is core, so a browser-only deployment can
+  // create, log into and remove them exactly as the desktop does — env injection, the transcript
+  // readers, usage and the account pickers were already core and had nothing to bind to here.
+  // No `installSkill`: canvas control is not wired on this edition (its hook server answers
+  // `control unavailable` by name), so a per-account skill file would point at nothing.
+  // No `remote`: the Server Edition has no SSH-project manager, so an `AccountCtx` carrying a
+  // projectId takes the LOCAL path — the same degrade desktop takes before its manager exists.
+  registerClaudeAccountsIpc()
 
   // Claude subscription usage. Previously desktop-only — the browser bridge answered `null`, so
   // the pill never rendered in the Server Edition. The poll runs UNGATED here (the default), not
@@ -95,8 +110,22 @@ export function registerCoreHandlers(
   // poll all local managed accounts, and re-flush the mirror on every cache update.
   const localClaudeAccountIds = (): string[] =>
     (deps.getSettings().claudeAccounts ?? []).filter((a) => !a.host && !a.pending).map((a) => a.id)
+  // Local managed Codex accounts + their isolated homes, for the per-account usage fan-out
+  // (S6 §4.3). Managed Codex accounts run on the headless host too, so the Server Edition serves
+  // them the same way desktop does — a src/core change ships on both shells by construction.
+  const localCodexAccounts = (): Array<{
+    id: string
+    home: string
+    label: string
+    email?: string | null
+  }> =>
+    codexUsageAccounts(
+      (deps.getSettings().codexAccounts ?? []).filter((a) => !a.host && !a.pending),
+      codexHomeFor
+    )
   const usageService = startUsageService({
     localAccounts: localClaudeAccountIds,
+    codexAccounts: localCodexAccounts,
     onCacheUpdate: () => {
       void flushAgentStatusMirror()
     }

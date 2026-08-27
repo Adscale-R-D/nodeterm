@@ -3,7 +3,7 @@ import { AGENT_CONFIG, BUILTIN_AGENT_IDS, type AgentId, type BuiltinAgentId } fr
 import type { CustomAgent } from '@shared/types'
 import { formatShortcut, isHoldChord } from '@shared/shortcut'
 import { hasSpeechModel } from '@shared/speech'
-import { hintLabel } from '@shared/platform-utils'
+import { commandTooltip, dictationBinding } from '../lib/keybindingOverrides'
 import { AgentIcon } from '../lib/agentIcons'
 import { useSettings } from '../state/settings'
 import { useProjects } from '../state/projects'
@@ -17,6 +17,8 @@ interface DockProps {
   zoomPct: number
   canUndo: boolean
   canRedo: boolean
+  canGoBack: boolean
+  canGoForward: boolean
   onAddTerminal: () => void
   onAddSticky: () => void
   /** Opens the Spawn-a-team dialog (issue #78) — the conductor lands at the Dock's default spot. */
@@ -34,6 +36,8 @@ interface DockProps {
   onAddWorktree: () => void
   onUndo: () => void
   onRedo: () => void
+  onGoBack: () => void
+  onGoForward: () => void
   onSave: () => void
   onFitView: () => void
   onZoomIn: () => void
@@ -51,6 +55,8 @@ export function Dock({
   zoomPct,
   canUndo,
   canRedo,
+  canGoBack,
+  canGoForward,
   onAddTerminal,
   onAddSticky,
   onSpawnTeam,
@@ -65,6 +71,8 @@ export function Dock({
   onAddWorktree,
   onUndo,
   onRedo,
+  onGoBack,
+  onGoForward,
   onSave,
   onFitView,
   onZoomIn,
@@ -77,7 +85,10 @@ export function Dock({
   // ≥1 inheriting custom agent (one with a `baseAgent` matching it); otherwise it stays a flat
   // button, byte-identical to before this nesting existed.
   const [openSub, setOpenSub] = useState<BuiltinAgentId | null>(null)
-  const dictationShortcut = useSettings((s) => s.settings.speech.shortcut)
+  // The registry's first effective `speech.dictation` binding, `''` when the user unbound it.
+  // The selector returns a STRING, so zustand's default equality keeps an unrelated settings
+  // write from re-rendering the dock.
+  const dictationShortcut = useSettings(() => dictationBinding())
   const speechEngine = useSettings((s) => s.settings.speech.engine)
   const speechModel = useSettings((s) => s.settings.speech.model)
   // Whisper with the explicit None selection = dictation off (issue #143). The mic stays visible
@@ -281,11 +292,27 @@ export function Dock({
 
         <span className="dock-sep" />
 
-        <button className="dock-btn" title={hintLabel('Undo (⌘Z)')} disabled={!canUndo} onClick={onUndo}>
+        <button className="dock-btn" title={commandTooltip('Undo', 'canvas.undo')} disabled={!canUndo} onClick={onUndo}>
           <UndoIcon />
         </button>
-        <button className="dock-btn" title={hintLabel('Redo (⌘⇧Z)')} disabled={!canRedo} onClick={onRedo}>
+        <button className="dock-btn" title={commandTooltip('Redo', 'canvas.redo')} disabled={!canRedo} onClick={onRedo}>
           <RedoIcon />
+        </button>
+        <button
+          className="dock-btn"
+          title={commandTooltip('Go back', 'canvas.goBack')}
+          disabled={!canGoBack}
+          onClick={onGoBack}
+        >
+          <ArrowLeftIcon />
+        </button>
+        <button
+          className="dock-btn"
+          title={commandTooltip('Go forward', 'canvas.goForward')}
+          disabled={!canGoForward}
+          onClick={onGoForward}
+        >
+          <ArrowRightIcon />
         </button>
 
         <span className="dock-sep" />
@@ -302,9 +329,13 @@ export function Dock({
           title={
             dictationOff
               ? 'Dictation off — choose a model in Settings → Speech'
-              : isHoldChord(dictationShortcut)
-                ? `Dictate (hold ${formatShortcut(dictationShortcut, isMac)})`
-                : `Dictate (${formatShortcut(dictationShortcut, isMac)})`
+              : // The user unbound the shortcut: the mic button still dictates, so the tooltip
+                // keeps the label and drops the chord rather than promising a key that is gone.
+                dictationShortcut === ''
+                ? 'Dictate'
+                : isHoldChord(dictationShortcut)
+                  ? `Dictate (hold ${formatShortcut(dictationShortcut, isMac)})`
+                  : `Dictate (${formatShortcut(dictationShortcut, isMac)})`
           }
           onClick={onDictate}
         >
@@ -346,6 +377,20 @@ function RedoIcon() {
   return (
     <svg {...S}>
       <path d="M15 7l5 5-5 5M20 12H9a5 5 0 0 0 0 10h2" />
+    </svg>
+  )
+}
+function ArrowLeftIcon() {
+  return (
+    <svg {...S}>
+      <path d="M19 12H5M11 6l-6 6 6 6" />
+    </svg>
+  )
+}
+function ArrowRightIcon() {
+  return (
+    <svg {...S}>
+      <path d="M5 12h14M13 6l6 6-6 6" />
     </svg>
   )
 }

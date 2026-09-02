@@ -178,6 +178,14 @@ lane unaffected.
   sees the pane app's own bytes — see CLAUDE.md's "We have our own VT emulator" for the one place
   that reasoning is inverted.
 
+- **Finding a Windows executable is not the same as being able to spawn it.** A PATH lookup may
+  correctly resolve an npm CLI to `<name>.cmd`, but Node's `execFile`/`spawn` cannot execute that
+  shim directly. For short-lived app-owned subprocesses, pass the resolved path and argv through
+  `directExecutableInvocation` (`src/core/exec-path.ts`): it uses npm's sibling `.ps1` shim via
+  PowerShell `-File`, preserving the argv boundary. Do not fix this with `shell: true`; prompts and
+  other user-controlled arguments would become shell syntax. A `.bat` file has no equivalent safe
+  entry point and must fail explicitly.
+
 - **Normalize BOTH sides of a path comparison, through one function.** A marker normalized where
   it is built and matched raw where it is used is a no-op on the machine you wrote it on and a
   silent defect on Windows. That is issue #558: the managed-hook marker was folded to `/` while

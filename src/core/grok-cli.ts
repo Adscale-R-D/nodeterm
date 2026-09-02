@@ -11,6 +11,7 @@
 import { execFile } from 'child_process'
 import { promisify } from 'util'
 import { IPC } from '../shared/ipc'
+import { directExecutableInvocation } from './exec-path'
 import { findInLoginPath } from './pty-manager'
 import { platform } from './platform'
 import { grokModelsFrom } from '../shared/agents/model-gateway'
@@ -40,8 +41,6 @@ export function grokCliCapsFrom(
   }
 }
 
-let cached: Promise<GrokCliCaps> | null = null
-
 /**
  * The two spawns, separated from HOW they are spawned so the composition is testable.
  *
@@ -61,17 +60,31 @@ export async function grokCapsFromRunner(
   return grokCliCapsFrom(help, models)
 }
 
+/** Probe the grok binary at `bin`, which may be a Windows npm shim the platform cannot spawn
+ *  directly — `directExecutableInvocation` decides how it is run, once, for both subcommands. */
+export function probeGrokCliAt(bin: string): Promise<GrokCliCaps> {
+  return grokCapsFromRunner(async (args) => {
+    try {
+      const invocation = directExecutableInvocation(bin, args)
+      if (!invocation) return null
+      const { stdout } = await execFileP(invocation.executable, invocation.args, {
+        timeout: PROBE_TIMEOUT_MS
+      })
+      return stdout
+    } catch {
+      // Missing CLI, timeout, non-zero exit — all mean "unknown", which means "omit the flag".
+      return null
+    }
+  })
+}
+
+let cached: Promise<GrokCliCaps> | null = null
+
 async function probe(): Promise<GrokCliCaps> {
   // GUI apps don't inherit the shell PATH — resolve through the login shell like every other CLI
   // lookup in the app.
   const bin = await findInLoginPath('grok').catch(() => null)
-  if (!bin) return UNKNOWN_GROK_CLI_CAPS
-  return grokCapsFromRunner((args) =>
-    execFileP(bin, args, { timeout: PROBE_TIMEOUT_MS })
-      .then((r) => r.stdout)
-      // Missing CLI, timeout, non-zero exit — all mean "unknown", which means "omit the flag".
-      .catch(() => null)
-  )
+  return bin ? probeGrokCliAt(bin) : UNKNOWN_GROK_CLI_CAPS
 }
 
 /** The local grok CLI's capabilities. Memoized for the process lifetime. Never rejects. */

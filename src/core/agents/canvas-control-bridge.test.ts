@@ -11,7 +11,7 @@ import { IPC } from '../../shared/ipc'
 import { fakePlatform } from '../platform-fake'
 import {
   CONTROL_NO_UI_ERROR,
-  CONTROL_TIMEOUT_ERROR,
+  controlTimeoutError,
   initCanvasControlBridge,
   pickControlClient,
   type ControlResultPayload
@@ -131,10 +131,23 @@ describe('the refusals', () => {
       const { handler } = harness([1])
       const reply = handler({ verb: 'write', nodeId: 'n', args: { node: 'x', text: 'hi' } })
       await vi.advanceTimersByTimeAsync(51)
-      expect(await reply).toEqual({ ok: false, error: CONTROL_TIMEOUT_ERROR })
+      expect(await reply).toEqual({ ok: false, error: controlTimeoutError(50) })
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  it('the timeout names the wait and invites a retry — it must not read like a denial', () => {
+    // Upstream's 2026-09 desktop fix, adopted here when this bridge became the message's one owner:
+    // "timed out (no response / not confirmed)" read as though it covered a DENIAL too, so a caller
+    // that had merely waited out an unanswered confirm dialog treated it as final and gave up.
+    const msg = controlTimeoutError(120_000)
+    expect(msg).toContain('120s')
+    expect(msg).toContain('safe to retry')
+    expect(msg).not.toContain('not confirmed')
+    expect(msg).not.toMatch(/denied/i)
+    // Rendered from the timer, so the sentence cannot drift from the wait actually used.
+    expect(controlTimeoutError(50)).toContain('0s')
   })
 
   it('a late reply after the timeout changes nothing', async () => {
@@ -143,7 +156,7 @@ describe('the refusals', () => {
       const { handler, answer } = harness([1])
       const reply = handler({ verb: 'list', nodeId: 'n', args: {} })
       await vi.advanceTimersByTimeAsync(51)
-      expect(await reply).toEqual({ ok: false, error: CONTROL_TIMEOUT_ERROR })
+      expect(await reply).toEqual({ ok: false, error: controlTimeoutError(50) })
       expect(() => answer(1, { requestId: 'req-1', ok: true, message: 'too late' })).not.toThrow()
     } finally {
       vi.useRealTimers()

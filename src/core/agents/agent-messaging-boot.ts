@@ -42,7 +42,7 @@ import {
 export interface AgentMessagingBootDeps {
   ptyManager: {
     paneOwner: AgentMessagingDeps['paneOwner']
-    sendFramedPayload: AgentMessagingDeps['sendFramedPayload']
+    sendEnvelope: AgentMessagingDeps['sendEnvelope']
     hasLiveSession: AgentMessagingDeps['hasLiveSession']
   }
   /** The delivery SCOPE: every persisted canvas and its nodes — the same index the desktop reads. */
@@ -78,7 +78,7 @@ export interface AgentMessagingHandle {
 export function initAgentMessaging(boot: AgentMessagingBootDeps): AgentMessagingHandle {
   const deps: AgentMessagingDeps = {
     paneOwner: (id) => boot.ptyManager.paneOwner(id),
-    sendFramedPayload: (id, payload) => boot.ptyManager.sendFramedPayload(id, payload),
+    sendEnvelope: (id, envelope) => boot.ptyManager.sendEnvelope(id, envelope),
     hasLiveSession: (id) => boot.ptyManager.hasLiveSession(id),
     projects: () => boot.projects(),
     isRemoteNode: (id) => boot.isRemoteNode(id),

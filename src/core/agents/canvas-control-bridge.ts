@@ -86,7 +86,20 @@ export function controlNoUiReply(): ControlReply {
  */
 export const CONTROL_TIMEOUT_MS = 120_000
 
-export const CONTROL_TIMEOUT_ERROR = 'timed out (no response / not confirmed)'
+/**
+ * The timeout refusal, and it must NAME the timeout and say it is retryable.
+ *
+ * Adopted from upstream's desktop fix (2026-09) when this bridge became the one owner of the
+ * message: the old wording, "timed out (no response / not confirmed)", read as though it covered
+ * BOTH outcomes, so a caller that had merely waited out an unanswered confirm dialog treated it as
+ * a refusal and gave up. A DENIAL is a different answer with different guidance — `denied by user`
+ * is final and must never be retried — and collapsing the two costs the agent the work.
+ *
+ * Rendered from the timeout actually used, so the sentence cannot drift from the timer.
+ */
+export function controlTimeoutError(timeoutMs: number): string {
+  return `no answer within ${Math.round(timeoutMs / 1000)}s — the confirmation dialog may still be open; safe to retry`
+}
 
 /** Which candidate answers: the last to attach. Pure, so the choice is testable without a
  *  platform. `null` for none attached — the caller turns that into `controlNoUiReply()`. */
@@ -149,7 +162,7 @@ export function initCanvasControlBridge(deps: {
     return await new Promise<ControlReply>((resolve) => {
       const timer = setTimeout(() => {
         pending.delete(requestId)
-        resolve({ ok: false, error: CONTROL_TIMEOUT_ERROR })
+        resolve({ ok: false, error: controlTimeoutError(timeoutMs) })
       }, timeoutMs)
       pending.set(requestId, { resolve, timer, uiId })
       // If the client vanished between the pick and the send, `sendTo` drops silently and the

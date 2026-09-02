@@ -194,7 +194,12 @@ describe('with no UI attached, the refusal is RETRYABLE and says so', () => {
     expect(refusesProjectTargeting({ node: 'n-1' })).toBe(false)
     expect(refusesProjectTargeting(undefined)).toBe(false)
 
-    const refused = await withEditionRefusals(async () => ({ ok: true, message: 'forwarded' }))({
+    const forwardStub = async (_req: {
+      verb: string
+      nodeId: string
+      args: Record<string, string>
+    }): Promise<unknown> => ({ ok: true, message: 'forwarded' })
+    const refused = await withEditionRefusals(forwardStub)({
       verb: 'open-claude',
       nodeId: 'n-1',
       args: { project: 'p-other' }
@@ -205,7 +210,7 @@ describe('with no UI attached, the refusal is RETRYABLE and says so', () => {
 
     // …and the same verb WITHOUT --project is forwarded untouched.
     expect(
-      await withEditionRefusals(async () => ({ ok: true, message: 'forwarded' }))({
+      await withEditionRefusals(forwardStub)({
         verb: 'open-claude',
         nodeId: 'n-1',
         args: {}

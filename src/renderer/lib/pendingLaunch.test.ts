@@ -2,8 +2,11 @@ import { describe, it, expect } from 'vitest'
 import {
   dependencyEdges,
   launchesToFire,
-  mountLaunchAction,
+  launchRetryDelay,
+  launchTooltip,
   unmetDeps,
+  LAUNCH_DELIVERY_ATTEMPTS,
+  LAUNCH_STALL_MS,
   type ArmedNode,
   type StatusById
 } from './pendingLaunch'
@@ -139,45 +142,78 @@ describe('dependencyEdges', () => {
   })
 })
 
-describe('mountLaunchAction — who owns the first keystroke', () => {
-  const base = { fresh: true, agentId: 'claude', resumable: true }
-
-  it('an ARMED node types NOTHING, even though it looks cold-restorable', () => {
-    // THE REGRESSION, in the shape it was reported: armAfter leaves initialCommand unset, so an
-    // armed node is indistinguishable from a cold restore from inside the mount effect. It used to
-    // fall through to 'resume' and run `claude --resume <mintedSessionId>` for a session whose
-    // launch had not run yet — "No conversation found with session ID: …", in every reviewer of a
-    // verify panel, each with its own uuid.
-    expect(
-      mountLaunchAction({ ...base, pendingLaunch: { after: ['n-1'], command: 'claude -p "review"' } })
-    ).toBe('armed')
+/**
+ * Issue #569 item 1 — the delivery policy behind an armed node's held launch.
+ *
+ * The bug these pin: delivery used to be a flat 5 × 400 ms = 2 s budget started when the CANVAS
+ * decided a node was ready to launch, not when the node's terminal existed. A cold project switch
+ * spends that budget on loading the canvas, mounting the node and spawning tmux, so the launch was
+ * abandoned before there was anything to deliver into — and abandoned into a `console.warn`, which
+ * left a node reading QUEUED forever with no way to tell it apart from one still waiting on a
+ * dependency.
+ */
+describe('launch delivery policy (#569 item 1)', () => {
+  it('the schedule backs off and is bounded — exhaustion is reachable, so "gave up" can be told', () => {
+    const delays: number[] = []
+    for (let attempt = 1; ; attempt++) {
+      const d = launchRetryDelay(attempt)
+      if (d === null) break
+      delays.push(d)
+      expect(attempt).toBeLessThan(20) // guard: a schedule that never ends is the bug, not a fix
+    }
+    expect(delays.length).toBe(LAUNCH_DELIVERY_ATTEMPTS)
+    // Strictly increasing: a flat schedule is what made the old budget a fixed 2 s wall.
+    for (let i = 1; i < delays.length; i++) expect(delays[i]).toBeGreaterThan(delays[i - 1])
+    // And the whole window is comfortably wider than the old one, measured from READINESS.
+    expect(delays.reduce((a, b) => a + b, 0)).toBeGreaterThan(10_000)
   })
 
-  it('stays armed on a WARM reattach too — the launch is pending either way', () => {
-    expect(
-      mountLaunchAction({ ...base, fresh: false, pendingLaunch: { after: ['n-1'], command: 'x' } })
-    ).toBe('armed')
+  it('an attempt past the end has no delay — nothing silently retries forever', () => {
+    expect(launchRetryDelay(LAUNCH_DELIVERY_ATTEMPTS)).not.toBeNull()
+    expect(launchRetryDelay(LAUNCH_DELIVERY_ATTEMPTS + 1)).toBeNull()
   })
 
-  it('armed outranks initialCommand only in the impossible case — initialCommand still wins', () => {
-    // armAfter moves the command, so both should never be set at once. If they somehow are, running
-    // the one-shot is the safe answer: it is what the node would have done before it was armed, and
-    // Canvas's launchInFlight ledger still keeps the pending delivery exactly-once.
-    expect(
-      mountLaunchAction({ ...base, initialCommand: 'claude', pendingLaunch: { after: [], command: 'y' } })
-    ).toBe('initial')
+  it('the stall warning waits longer than a cold project switch could plausibly take', () => {
+    expect(LAUNCH_STALL_MS).toBeGreaterThanOrEqual(30_000)
+  })
+})
+
+describe('launchTooltip — the QUEUED badge never goes silent (#569 item 1)', () => {
+  const cmd = 'claude "review the diff"'
+
+  it('with nothing to report it names the dependencies, exactly as before', () => {
+    const t = launchTooltip(undefined, 'Builder, Tests', cmd)
+    expect(t).toContain('Waiting for Builder, Tests to finish')
+    expect(t).toContain(cmd)
+    expect(t).not.toContain('▶')
   })
 
-  it('a cold start of a resumable agent still resumes — the fix must not disable cold restore', () => {
-    expect(mountLaunchAction(base)).toBe('resume')
+  it('a stalled launch says it is still held, and does NOT claim a cause it never measured', () => {
+    const t = launchTooltip({ kind: 'stalled', since: 1 }, 'Builder', cmd)
+    expect(t).toContain('has not started yet')
+    expect(t).toContain('still held')
+    expect(t).toContain('▶')
+    // We know the terminal is not up; we do not know why. Naming a cause here would be the
+    // misleading-error failure this feature exists to avoid.
+    expect(t.toLowerCase()).not.toMatch(/ssh|host is down|crash/)
   })
 
-  it('a warm reattach types nothing (tmux redraws its own screen)', () => {
-    expect(mountLaunchAction({ ...base, fresh: false })).toBe('none')
+  it('a failed launch reports the attempt count and that nothing will retry it', () => {
+    const t = launchTooltip({ kind: 'failed', attempts: 5, at: 1 }, 'Builder', cmd)
+    expect(t).toContain('5 attempts')
+    expect(t).toContain('nothing will retry it')
+    expect(t).toContain('▶')
+    expect(t).toContain(cmd)
   })
 
-  it('a plain terminal and a non-resumable agent get nothing but the restored shell', () => {
-    expect(mountLaunchAction({ ...base, agentId: undefined, resumable: false })).toBe('none')
-    expect(mountLaunchAction({ ...base, resumable: false })).toBe('none')
+  it('singularises one attempt (the manual ▶ reports exactly one refusal)', () => {
+    expect(launchTooltip({ kind: 'failed', attempts: 1, at: 1 }, 'Builder', cmd)).toContain(
+      '1 attempt was refused'
+    )
+  })
+
+  it('failed outranks the dependency sentence — the warning is never buried', () => {
+    const t = launchTooltip({ kind: 'failed', attempts: 5, at: 1 }, 'Builder', cmd)
+    expect(t).not.toContain('Waiting for Builder')
   })
 })

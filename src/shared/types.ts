@@ -157,6 +157,19 @@ export interface PtyCreateResult {
    *  system account. The renderer flags the account chip (folder-missing warning) when true. */
   accountFallback?: boolean
   /**
+   * WARM reattach only (local tmux): the reattached session's live working directory no longer
+   * exists — the folder was deleted (or deleted and re-created, which is a DIFFERENT inode, so the
+   * shell inside keeps printing `getcwd: cannot access parent directories`; issue #464). `tmux
+   * new-session -A` ignores the cwd we pass on a reattach, so this is the only moment the fact is
+   * knowable cheaply. The renderer shows a dismissible banner with an explicit
+   * recycle-and-respawn action — NOTHING is typed into the pane and nothing restarts on its own
+   * (the pane may be mid-work, and text into a pane is injection).
+   *
+   * Absent = fine or unknowable (fresh spawn, plain shell, SSH-remote session, probe failed, or a
+   * core older than this field over the relay) — the banner never shows on a guess.
+   */
+  staleCwd?: boolean
+  /**
    * The CURRENT SCREEN of a session this create JOINED (co-attach), captured from tmux — write it
    * into the fresh xterm before the live stream starts.
    *
@@ -257,7 +270,9 @@ export interface RecycledInfo {
 }
 
 // 'subagent' and 'loop' are render-only (ephemeral hook-driven viz) and never persisted.
-export type NodeKind = 'terminal' | 'sticky' | 'group' | 'editor' | 'diff' | 'video' | 'web' | 'browser' | 'subagent' | 'loop' | 'dino'
+// 'trigger' is a first-class PERSISTED kind (issue #493) — the canvas-owned schedule node; its
+// spec rides `CanvasNodeState.trigger` and is sanitized on every load path (@shared/trigger).
+export type NodeKind = 'terminal' | 'sticky' | 'group' | 'editor' | 'diff' | 'video' | 'web' | 'browser' | 'subagent' | 'loop' | 'dino' | 'trigger'
 
 /** Persisted state of a single canvas node (terminal, sticky note, group frame, or editor). */
 /**
@@ -378,6 +393,14 @@ export interface CanvasNodeState {
   /** group-only: when bound, the git worktree this group works in. */
   worktree?: GroupWorktree
   /**
+   * trigger-only: the schedule + payload + target this node represents (issue #493). Git-shared
+   * CONTENT — deliberately, the team shares the definition — which is exactly why it is treated
+   * as hostile on every load path (`sanitizeNodeTriggers` in core/workspace-files) and why the
+   * definition alone never fires: execution additionally requires this machine's arm record
+   * (`core/trigger-arm-store.ts`), bound to the spec's exact content. See @shared/trigger.
+   */
+  trigger?: import('./trigger').TriggerSpec
+  /**
    * Set while the node is maximized to fill the viewport (issue #399): the rect to give back on
    * the toggle's second click — the node's ROOT-space (absolute canvas) position plus its size.
    * Absent = not maximized. Persisted so the restore survives a reload. Root-space on purpose:
@@ -386,6 +409,32 @@ export interface CanvasNodeState {
    */
   premaxRect?: { x: number; y: number; width: number; height: number }
 }
+
+/**
+ * One entry in `Project.closedSessions` — everything needed to recreate a fresh node in the same
+ * spot a deleted one used to occupy. `node` is the exact shape a live node is already persisted
+ * as (`CanvasNodeState`); `absolutePosition` is captured at delete time because `node.position`
+ * is relative-to-parent when `node.parentId` is set, and that parent group may not exist by the
+ * time this entry is reopened.
+ */
+export interface ClosedSessionEntry {
+  id: string
+  closedAt: number
+  node: CanvasNodeState
+  absolutePosition: { x: number; y: number }
+}
+
+/**
+ * How many closed-session entries one project keeps (newest-first; the rest are dropped).
+ *
+ * ONE definition, because the cap must hold at every point an entry list is produced OR admitted:
+ * the store mutator that records a delete (`recordClosedSessions`), and every load path that
+ * admits `IndexEntryV3.closedSessions` (a ref'd project's machine-local history) or an inline
+ * project's embedded one. Enforcing it only where WE append is not enforcement at all —
+ * workspace.json is hand-editable input too, so an inflated list can arrive from outside (a
+ * pre-cap build's file, a hand edit) and would render unbounded rows and be written back in full.
+ */
+export const CLOSED_SESSIONS_CAP = 20
 
 /**
  * A snapshot of one canvas's nodes in the form sent over the remote mirror wire.
@@ -672,6 +721,21 @@ export interface Project {
    * list. Absent/false = an open tab. A closed project never becomes `activeProjectId`.
    */
   closed?: boolean
+  /** Set alongside `closed: true` — when this project was closed, for sorting "recently closed"
+   *  history newest-first. Machine-local (see `IndexEntryV3.closedAt`) — never written into the
+   *  shared project file, same rule as `closed` itself. Absent on a project closed before this
+   *  field existed; such entries sort last. */
+  closedAt?: number
+  /**
+   * Sessions (terminal/agent/sticky/…) deleted from this project, most-recent-first, capped at
+   * 20. MACHINE-LOCAL, same rule as `closedAt`/`breadcrumbs` — see `IndexEntryV3.closedSessions`,
+   * never written into the shared project file (a delete's full node-state blob — title, cwd,
+   * position — would otherwise churn a committed, teammate-visible document on every one). Whose
+   * trash can holds what is a per-machine fact, not shared content. A fresh id per entry;
+   * recreating a node from one always mints a new node id/session, never reuses the original
+   * (see `recreateNodeFromSnapshot`).
+   */
+  closedSessions?: ClosedSessionEntry[]
   /**
    * Set at load time when the project's .nodeterm/project.json could not be read
    * (folder missing, server unreachable, corrupt file). Runtime-only — never persisted.
@@ -1085,6 +1149,10 @@ export interface ClaudeAccount {
   host?: string
   /** True until `claude /login` completes in the account dir and the email is captured. */
   pending?: boolean
+  /** Optional default node color for nodes opened under this account (Settings → Accounts);
+   *  unset = the agent's own brand color. Read through `accountNodeColor`, which re-validates it
+   *  as a string — this file is hand-editable and nothing checks it field-by-field on load. */
+  color?: string
   createdAt: number
 }
 
@@ -1199,6 +1267,21 @@ export interface Settings {
   /** ms to dwell over a terminal before it takes pointer focus (pan-across guard). */
   panHoverDelay: number
   doubleClickFocus: boolean
+  /** Open Markdown files (.md, .markdown, …) in rendered preview instead of the code editor.
+   *  Only picks the view an editor node OPENS in — the node's Preview/Edit toggle (and the
+   *  markdown-toggle chord) still switches either way. Default ON since the release after
+   *  v0.3.3 (maintainer decision on issue #495; a preview is one ⌘M from the editor, so the
+   *  rendered view is the better first sight for docs). A one-shot load migration keyed on
+   *  `openMarkdownPreviewMigrated` (see mergeSettings) forces this ON once for every existing
+   *  file — including one saved by v0.3.3, the one release that defaulted off and whose
+   *  full-snapshot saves materialized `false` for users who never touched the toggle. After
+   *  the migration the user's own opt-out is permanent. */
+  openMarkdownPreview: boolean
+  /** One-shot marker for the openMarkdownPreview default flip (#495). Absent = the file
+   *  predates the flip → the load migration sets `openMarkdownPreview: true` and stamps this
+   *  true; present = the migration already ran (or the install was born after it) and the
+   *  stored `openMarkdownPreview` value is the user's own, never touched again. */
+  openMarkdownPreviewMigrated: boolean
   /**
    * Let a MIDDLE CLICK inside a terminal paste (Linux in practice — macOS and Windows have no
    * PRIMARY selection and no tmux middle-click habit, so the guard changes nothing visible there).
@@ -1218,9 +1301,17 @@ export interface Settings {
    *  scroll keeps panning independently (see canvas/wheel-gesture.ts), so mouse and trackpad
    *  coexist; elsewhere this still trades away scroll-to-pan, so it stays opt-in. */
   wheelZoom: boolean
+  /** How far one plain wheel click zooms, as a multiplier on the canvas zoom step (0.2–2,
+   *  default 1 = historical feel). Applies only to the `wheelZoom` path — Cmd/Ctrl+wheel and
+   *  pinch keep the fixed step, so tuning a chunky mouse down never slows the trackpad.
+   *  Validated at point of use (canvas/wheel-zoom.ts `clampWheelZoomSpeed`). */
+  wheelZoomSpeed: number
   /** macOS only: a two-finger trackpad scroll pans the canvas, independently of `wheelZoom`
    *  (see canvas/wheel-gesture.ts). Off restores the pre-router behavior — `wheelZoom` alone
-   *  decides — which is also the recourse for a precise-pixel MOUSE that reads as a trackpad. */
+   *  decides. On the desktop the device is identified from the main process's raw input stream
+   *  (main/trackpad-gesture.ts), so mouse zoom and trackpad pan coexist; the off-switch is the
+   *  remaining recourse for the Server Edition's browser tab, where detection is heuristic and a
+   *  precise-pixel MOUSE still reads as a trackpad. */
   trackpadPan: boolean
   /** What a left-drag on EMPTY canvas does. 'select' (default) rubber-band selects, like
    *  Figma's move tool — pan stays on middle-drag / two-finger scroll. 'pan' drags the map
@@ -1358,6 +1449,13 @@ export interface Settings {
   agentHibernationEnabled: boolean
   /** How long a session must be idle + offscreen before "Eco" hibernates it (minutes). */
   agentHibernationIdleMinutes: number
+  /** When Eco hibernates a session, also mark it PAUSED (see `AgentNodeStatus.paused`) so it does
+   *  NOT auto-resume the next time the project or app reopens — only an explicit Resume brings it
+   *  back. Off by default: ordinary Eco already resumes automatically on the next reveal, and this
+   *  opts a hibernated session OUT of that for good, trading convenience for a colder, smaller
+   *  footprint across restarts. Independent of manual "Pause session", which always persists this
+   *  way regardless of this setting. */
+  agentHibernationPersistAcrossRestart: boolean
   /** Send anonymous usage data (version/OS) to the telemetry backend. Opt-OUT (default on):
    *  version/OS only, nothing personal, client IP never stored. Turn it off in Settings → Privacy
    *  (or hard-disable with DO_NOT_TRACK / NODETERM_TELEMETRY_DISABLED). Note: a lighter anonymous
@@ -1477,8 +1575,11 @@ export const DEFAULT_SETTINGS: Settings = {
   worktreePathTemplate: DEFAULT_WORKTREE_PATH_TEMPLATE,
   panHoverDelay: 600,
   doubleClickFocus: true,
+  openMarkdownPreview: true,
+  openMarkdownPreviewMigrated: true,
   terminalMiddleClickPaste: false,
   wheelZoom: false,
+  wheelZoomSpeed: 1,
   trackpadPan: true,
   canvasDragMode: 'select',
   browserMemorySaver: true,
@@ -1527,6 +1628,7 @@ export const DEFAULT_SETTINGS: Settings = {
   // is deliberately long — shorter windows exit sessions the user is between turns on.
   agentHibernationEnabled: false,
   agentHibernationIdleMinutes: 30,
+  agentHibernationPersistAcrossRestart: false,
   // Opt-out (default on). Existing users pick this up on hydrate ONLY if their settings.json has
   // no telemetryEnabled key yet; anyone who already saved settings keeps their stored value.
   telemetryEnabled: true,
@@ -2798,6 +2900,23 @@ export interface ShortcutsApi {
   setTerminalFocused(focused: boolean): void
 }
 
+/**
+ * Trigger nodes (issue #493): the card's IPC surface. `arm` binds this machine's consent to the
+ * exact spec the user was shown (content-bound — see @shared/trigger); `runNow` chooses only WHEN,
+ * never WHAT (the payload is resolved core-side from the node's persisted content). Real on
+ * desktop and the Server Edition; the relay stub refuses (another machine's arm store is not ours
+ * to write).
+ */
+export interface TriggersApi {
+  arm(projectId: string, nodeId: string, spec: import('./trigger').TriggerSpec): Promise<boolean>
+  disarm(projectId: string, nodeId: string): Promise<void>
+  status(projectId: string, nodeId: string): Promise<import('./trigger').TriggerNodeStatus>
+  runNow(
+    projectId: string,
+    nodeId: string
+  ): Promise<{ outcome: 'fired' | 'missed' | 'failed' | 'queued'; detail?: string }>
+}
+
 export interface NodeTerminalApi {
   pty: PtyApi
   workspace: WorkspaceApi
@@ -2827,6 +2946,7 @@ export interface NodeTerminalApi {
   githubControl: import('./github-issues').GitHubControlApi
   usage: UsageApi
   sessionMemory: SessionMemoryApi
+  triggers: TriggersApi
   context: ContextApi
   canvas: CanvasApi
   codex: CodexApi
@@ -2899,6 +3019,13 @@ export interface NodeTerminalApi {
    *  minutes; `level: 'none'` means the banner should come down. Returns unsubscribe.
    *  Server Edition: never fires — the reaper leg runs host-side only (see src/server/index.ts). */
   onPtyPressure(listener: (reading: PtyPressure) => void): () => void
+  /** Fires when a macOS trackpad gesture (two-finger scroll or pinch) opens or closes on the
+   *  main window — edge transitions from the main process's raw input stream
+   *  (main/trackpad-gesture.ts), a handful per physical gesture. The canvas wheel router uses
+   *  this as ground-truth device identity so a precise-pixel mouse (MX Master) can zoom while the
+   *  trackpad pans. Returns unsubscribe. Server Edition: never fires — a browser tab has no raw
+   *  input stream, and the router keeps its delta-shape heuristics there. */
+  onCanvasTrackpadGesture(listener: (active: boolean) => void): () => void
   /** Raise this Mac's pty-device ceiling (`kern.tty.ptmx_max`) now AND across reboots, behind
    *  macOS's own administrator-password dialog. Called ONLY from the banner's explicit
    *  "Fix automatically…" click — never on the app's initiative. macOS only; a dismissed password
@@ -2924,6 +3051,31 @@ export interface NodeTerminalApi {
   onUnreadClear(listener: (nodeId: string) => void): () => void
   /** Fires on each normalized agent hook event (working/done/waiting/subagent/…). Returns unsubscribe. */
   onAgentStatus(listener: (e: NormalizedAgentEvent) => void): () => void
+  /** Report a node's Eco hibernation flag to the core (the renderer owns the flag; the core only
+   *  mirrors it into the agent-status file so the phone can render SLEEPING). Fire-and-forget;
+   *  called on every `setHibernated` change and replayed for the persisted set at boot. */
+  reportHibernated(nodeId: string, on: boolean): void
+  /** Fires when the core asks this renderer to WAKE a hibernated node NOW (a phone viewer just
+   *  attached to its session over the relay). A nudge with `wakeHibernatedNode`'s exact contract:
+   *  re-read the flag, no-op when not hibernated or not mounted. Returns unsubscribe.
+   *  Desktop-only signal (the relay host lives in the desktop main process); the ws-bridge
+   *  subscribes to nothing and returns a no-op unsubscribe. */
+  onAgentWake(listener: (nodeId: string) => void): () => void
+  /** Fires with the CURRENT set of node ids that have a live relay (phone) viewer attached — the
+   *  full set each change, never a delta. Feeds `isNodeWatched` so Eco cannot hibernate a session
+   *  someone is watching from a phone. Desktop-only signal, like `onAgentWake`. */
+  onRemoteViewers(listener: (nodeIds: string[]) => void): () => void
+  /** Fires when the core asks this renderer to reload a terminal node's view in place (bump its
+   *  `respawnNonce` — fresh attach to the SAME tmux session) — the phone relay host's
+   *  `node.refresh` verb. A nudge with the `onAgentWake` contract: no-op for an unknown,
+   *  non-terminal or unmounted node. Desktop-only signal (the relay host lives in the desktop
+   *  main process); the ws-bridge subscribes to nothing and returns a no-op unsubscribe. */
+  onAgentRefreshNode(listener: (nodeId: string) => void): () => void
+  /** Fires when the core asks this renderer to rename a node on a phone's behalf (the relay
+   *  host's `node.rename` verb, title already sanitized host-side). The renderer routes it
+   *  through the same `renameSession` funnel as the node header. Desktop-only signal, like
+   *  `onAgentRefreshNode`. */
+  onAgentRenameNode(listener: (payload: { nodeId: string; title: string }) => void): () => void
   /** Fires with live subagent transcript chunks while a subagent runs. Returns unsubscribe. */
   onSubagentActivity(listener: (e: SubagentActivity) => void): () => void
   /** Fires when an agent's `nodeterm` CLI requests a canvas action. Returns unsubscribe. */

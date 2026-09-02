@@ -21,8 +21,10 @@ npm test           # vitest, unit + integration
 
 **If `src/main/node-pty-patch.test.ts` is red, your `node_modules` is unpatched — not your code.**
 Run `npm run rebuild`. node-pty 1.1.0 leaks a pty device per spawn on macOS
-([node-pty#950](https://github.com/microsoft/node-pty/issues/950)); we patch its source before
-`electron-rebuild` compiles it, and that test guards the patch surviving upgrades.
+([node-pty#950](https://github.com/microsoft/node-pty/issues/950)) and, on Windows, leaves a
+conhost alive per killed session (its exit thread deletes the ConPTY baton without closing the
+HPCON); we patch both sources before `electron-rebuild` compiles them, and that test guards the
+patches surviving upgrades.
 
 ## Where code goes
 
@@ -74,6 +76,22 @@ The **canvas and the kanban board are two views of the same nodes.** When you ad
 canvas node — a header action, a badge, a menu item — ask whether the board's card and card modal
 need it too, and wire it in the same change.
 
+A board card's **source** is a registry entry, not a branch you add at a call site
+(`renderer/lib/kanbanSources.ts`). Declare the source once — filter label, `placement`
+(`assignment` = the board's own persisted assignments, `provider` = the provider owns the column),
+in-column `lane` order, whether it is `configured` for a board, whether it is `readOnly` (the
+board never writes it: no drag, no move control) — and give it its one leaf (a card component and
+the list path feeding it). Columns take lanes and name no source; the drag path branches on
+`placement`. If you find yourself writing `=== 'github'` outside the registry, the registry is
+missing a field.
+
+Before adding a GitHub read, check what the existing poll already fetches. Pull request cards
+needed no new request at all: `/repos/{repo}/issues` returns pull requests, and the client used to
+discard them. `/repos/{repo}/pulls` looks like the obvious endpoint and is the expensive one — it
+**ignores `since`**, so it can reuse none of the incremental machinery, and its items are ~3.5× the
+bytes. CLAUDE.md's kanban section has the measurements and the eviction rule that keeps the issue
+lane unaffected.
+
 ## House rules
 
 - **Anything path-shaped: Windows is a delivery target.** Most of this was written on
@@ -86,6 +104,14 @@ need it too, and wire it in the same change.
   on POSIX a backslash is legal filename text — do not treat both separators as interchangeable
   unless the owning filesystem is known to be Windows.
 
+- **Normalize BOTH sides of a path comparison, through one function.** A marker normalized where
+  it is built and matched raw where it is used is a no-op on the machine you wrote it on and a
+  silent defect on Windows. That is issue #558: the managed-hook marker was folded to `/` while
+  the stored command still carried `\`, so nodeterm stopped recognizing its own hook entries and
+  appended a fresh copy of all nine on every launch — nine hook processes per event, nine
+  concurrent 45 s permission waits racing one prompt. Write the normalizer once, use it on both
+  sides, and pin it with a `C:\`-shaped test.
+
 - **Never publish a file with a bare `fs.rename`.** Use `renameAtomic` or `writeFileAtomic` from
   `src/core/fs-atomic.ts`. On Windows a rename fails with `EPERM` whenever anything has the
   destination open — Defender scanning the file you just wrote, the search indexer, OneDrive — so
@@ -95,6 +121,16 @@ need it too, and wire it in the same change.
   including paths embedded in generated SSH commands or handed to scp, which the `fs` scan cannot
   see. Keep a remote temp's own leaf bounded: extending an already-valid maximum-length target leaf
   with a UUID suffix turns an atomic write into a guaranteed `ENAMETOOLONG` failure.
+
+- **Never write to a child's stdin without an `'error'` listener on that stream.** A pipe write's
+  failure is not a throw at the call site: when the child exits before draining stdin (a CLI handed
+  a flag it doesn't know, an unreachable ssh host), Node re-emits the EPIPE as an async `'error'`
+  EVENT on the stream — a try/catch around the write is inert, and the unhandled event crashes the
+  whole main process with an "Uncaught Exception: write EPIPE" dialog (issue #382's class). Attach
+  `child.stdin.on('error', ...)` before the first write — log via `console.warn` so the debug ring
+  sees it, or settle the pending call; the child's exit code stays the authority on the outcome
+  (see `tmux-control-client.ts` and `pty-manager.ts` `runWithStdin` for the house pattern). A test
+  (`src/core/stream-epipe.guard.test.ts`) scans for this and will fail your PR.
 
 - **Never unmount, move or re-key a browser/web node's element.** An Electron `<webview>`'s guest
   process dies on DOM detach — and a detach includes any `insertBefore`/`appendChild` MOVE of an
@@ -189,6 +225,18 @@ to kill the process. The stack it carries was captured at the write, so the cras
 happened synchronously at your `console.log`, and wrapping that call in `try/catch` changes nothing
 (measured on node 22). If you write to a stream that can go away, attach an `'error'` listener and
 latch the writer off — `installLogSink` (`src/core/log-sink.ts`) is the worked example. Issue #382.
+
+**A retry budget must measure the thing it is waiting for, and running out must be VISIBLE.** The
+armed-launch loop (canvas-control `--after`, and the cold open a `--project` node gets) delivered its
+held command on a flat 5 × 400 ms budget started when the *canvas* held the node — so on a cold
+project switch it was spent loading the canvas, mounting the node and spawning tmux, and the launch
+was abandoned before the session it was for existed. Two rules came out of issue #569: wait on a
+real signal (`isSessionReady`, published by the node when its shell settles) rather than on a
+stopwatch aimed at the wrong start, and never let "we gave up" live only in a `console.warn` — the
+node shows it (`state/launchDelivery.ts` → the QUEUED badge's ⚠ + tooltip) and the canvas-control
+reply carries it (`queued` / `queuedIds`), because a user who cannot see the failure and an
+orchestrator that is told "opened" both act on a session that is not there. If you add a bounded
+retry anywhere, ask what the clock actually starts on and where its exhaustion becomes visible.
 
 **Agent features attach to base harness capabilities, not frontend allowlists.** A custom agent can
 inherit a builtin harness, so add the capability and its one shared leaf (`src/shared/agents`) and

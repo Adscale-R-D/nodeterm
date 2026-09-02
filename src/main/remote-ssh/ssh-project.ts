@@ -5,7 +5,15 @@ import { spawn, execFile, execFileSync } from 'child_process'
 import { app, ipcMain } from 'electron'
 import { IPC } from '../../shared/ipc'
 import { getMainWindow, sendToMain } from '../main-window'
-import { parseLsDirs, posixQuote, quoteRemotePath, remoteTmuxConf, sshHostKey, type SshConnection } from '../../shared/ssh'
+import {
+  parseLsDirs,
+  posixQuote,
+  quoteRemotePath,
+  remoteTmuxConf,
+  remoteTmuxPathPrologue,
+  sshHostKey,
+  type SshConnection
+} from '../../shared/ssh'
 import type { DownloadResult, SshPassphraseRequest, SshProjectStatusEvent } from '../../shared/types'
 import { candidateName, safeDownloadBasename } from '../../core/download-name'
 import { removeAtomic, renameAtomic } from '../../core/fs-atomic'
@@ -718,7 +726,7 @@ export class SshProjectManager {
             )
             if (w.code === 0) {
               // source-file is best-effort (pushes options into a warm server); ignore its result.
-              await this.r.run(childArgs(conn, controlPath, `tmux -L ${RMT_TMUX_SOCKET} source-file ${posixQuote(confPath)}`))
+              await this.r.run(childArgs(conn, controlPath, `${remoteTmuxPathPrologue()}tmux -L ${RMT_TMUX_SOCKET} source-file ${posixQuote(confPath)}`))
               tmuxConfPath = confPath
             }
           } catch {
@@ -2312,6 +2320,13 @@ export function initSshProject(
             resolve({ code: err ? ((err as { code?: number }).code ?? 1) : 0, stdout: stdout ?? '' })
         )
         if (stdin !== undefined) {
+          // ssh can die before draining stdin (unreachable host, bad option, instant auth
+          // refusal) — that EPIPE is an async 'error' EVENT on the pipe, not a throw here, and
+          // unhandled it kills the main process (issue #382's class). The execFile callback
+          // above already reports the child's exit; log and stand by.
+          child.stdin?.on('error', (e: NodeJS.ErrnoException) => {
+            console.warn(`[ssh-project] ssh stdin write failed (${e.code ?? e})`)
+          })
           child.stdin?.end(stdin)
         }
       }),

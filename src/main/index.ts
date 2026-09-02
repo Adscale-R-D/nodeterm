@@ -1,5 +1,6 @@
 import { join, resolve, posix } from 'path'
 import { startSessionNameSweep, displayNodeTitle } from '../core/session-name-sweep'
+import { startTriggerService } from '../core/trigger-service'
 import { readAgentSessionName, type AgentSessionNameDeps } from '../core/agent-session-name'
 import { readFile, realpath as fsRealpath, lstat as fsLstat, writeFile as fsWriteFile } from 'fs/promises'
 import { existsSync, statSync, openSync, fstatSync, readFileSync, closeSync } from 'fs'
@@ -16,6 +17,7 @@ installLogSink(logBuffer)
 import { writeFilesToClipboard } from './clipboard-files'
 import { pickProjectIcon } from './project-icon-upload'
 import { allowGuestNavigation } from './webview-nav'
+import { guestContextMenuTemplate } from './webview-context-menu'
 import { BrowserControlLedger } from './browser-control-ledger'
 import {
   recordOpenProjectGrant,
@@ -46,6 +48,7 @@ import {
   type RevocationTargets
 } from './browser-revocation'
 import { registerFsHandlers } from '../core/fs-handlers'
+import { TrackpadGestureLedger } from './trackpad-gesture'
 import { LogBuffer } from '../core/log-buffer'
 import { installLogSink, splitTag } from '../core/log-sink'
 import { registerLogHandlers } from '../core/log-handlers'
@@ -155,6 +158,7 @@ import {
   isEventUnresolved,
   type MirrorSettings,
   setNodeSessionName,
+  setNodeHibernated,
   sessionNameSweepEntries,
   nodeState,
   nodeSessionName,
@@ -184,6 +188,7 @@ import { codexContextParse } from '../core/codex-session'
 import { createCodexSubagentFormatter } from '../core/codex-subagent-format'
 import { codexHome } from '../core/usage/codex-usage'
 import { grokRawFields, isAsyncSubagentLaunch, type NormalizedAgentEvent } from '../shared/agents/normalize'
+import { agentAccountColor } from '../shared/agents/account-color'
 import { grokSessionDir, grokSessionsDir } from '../core/agents/grok-paths'
 import { forgetGrokSession, rememberGrokSessionDir } from '../core/grok-session'
 import {
@@ -215,6 +220,7 @@ import { buildHandoff, type HandoffRemote } from './handoff'
 import { initContextLink, setNodeTranscript } from '../core/context-link'
 import { transcriptPathOf } from '../core/context-link-core'
 import { initCanvasControl, installCanvasSkillInto } from '../core/agents/canvas-control-install'
+import { DRY_RUN_VERBS, dryRunRequested, dryRunRefusal } from '../shared/control-verbs'
 import { initTranscriptIndex, searchTranscripts } from '../core/transcript-index'
 import { initTelemetry } from './telemetry'
 import { initClaudeUsage } from './claude-usage'
@@ -272,7 +278,7 @@ import {
   allowMediaPath,
   writeAgentHtml
 } from './media-protocol'
-import { initPlatform } from '../core/platform'
+import { initPlatform, platform } from '../core/platform'
 import { electronPlatform } from './platform-electron'
 import { wirePeerRegistry } from './peer-registry'
 import { WEBGL_CONTEXT_CAP_DESKTOP } from '../shared/webgl'
@@ -976,6 +982,20 @@ function createWindow(): BrowserWindow {
   // (both projects, every terminal). Bounded by the policy so a boot-path crash can't loop;
   // past the budget the user decides. The tmux sessions all live in this process, so a reload
   // costs nothing but the canvas re-hydrating from the workspace store.
+  // Trackpad-vs-mouse ground truth for the canvas wheel router: macOS wraps trackpad scrolls and
+  // pinches in gesture begin/end events a wheel mouse never emits, visible only here in main.
+  // The ledger reduces the raw stream (which includes every ~120Hz pointer packet — observe() is
+  // one Set lookup on the hot path) to edge transitions, so the renderer hears a few messages per
+  // physical gesture. Attached unconditionally: on non-mac these events simply never fire, and
+  // the renderer's router ignores the flag off macOS anyway. See main/trackpad-gesture.ts and
+  // canvas/wheel-gesture.ts for the two halves of the contract.
+  const trackpadLedger = new TrackpadGestureLedger()
+  win.webContents.on('input-event', (_event, input) => {
+    const active = trackpadLedger.observe(input.type)
+    if (active !== null && !win.isDestroyed()) {
+      win.webContents.send(IPC.canvasTrackpadGesture, active)
+    }
+  })
   const crashReload = createCrashReloadPolicy()
   win.webContents.on('render-process-gone', (_event, details) => {
     ptyManager.dropClient(presenceId)
@@ -1139,6 +1159,44 @@ app.whenReady().then(async () => {
         sendToMain(IPC.browserNewWindow, { url, sourceNodeId })
       }
       return { action: 'deny' }
+    })
+    // Electron ships no context menu for web content, so a right-click inside a guest page did
+    // nothing at all. Passing `frame` is what turns on macOS's own AutoFill, Writing Tools and
+    // Services submenus (off by default in Electron): that is the "AutoFill > Passwords..." row
+    // on a password field. Template and its refusals: webview-context-menu.ts.
+    contents.on('context-menu', (_e, params) => {
+      const template = guestContextMenuTemplate(
+        {
+          linkURL: params.linkURL,
+          srcURL: params.srcURL,
+          mediaType: params.mediaType,
+          hasImageContents: params.hasImageContents,
+          isEditable: params.isEditable,
+          selectionText: params.selectionText,
+          misspelledWord: params.misspelledWord,
+          dictionarySuggestions: params.dictionarySuggestions,
+          editFlags: params.editFlags,
+          canGoBack: contents.navigationHistory.canGoBack(),
+          canGoForward: contents.navigationHistory.canGoForward()
+        },
+        {
+          back: () => contents.navigationHistory.goBack(),
+          forward: () => contents.navigationHistory.goForward(),
+          reload: () => contents.reload(),
+          // Same route a popup takes: a new browser node, never a real window.
+          openLinkInNode: (url) => {
+            const sourceNodeId = browserGuests.get(contents.id)?.nodeId
+            if (sourceNodeId) sendToMain(IPC.browserNewWindow, { url, sourceNodeId })
+          },
+          copyText: (text) => clipboard.writeText(text),
+          copyImage: () => contents.copyImageAt(params.x, params.y),
+          replaceMisspelling: (word) => contents.replaceMisspelling(word),
+          inspect: () => contents.inspectElement(params.x, params.y)
+        }
+      )
+      // `frame` is null once the frame navigated away or died; the menu still opens, just without
+      // the AppKit additions.
+      Menu.buildFromTemplate(template).popup(params.frame ? { frame: params.frame } : {})
     })
   })
 
@@ -1602,10 +1660,6 @@ app.whenReady().then(async () => {
   // desktop-only for no reason but where its wiring sat — every dependency it has is core or shared.
   //
   // `isRemoteNode` is the one genuinely shell-specific answer: only the desktop has SSH projects.
-  //
-  // `wake`/`isHibernated` remain RENDERER state (Eco lives in `useAgentStatus`, the wake registry in
-  // the renderer's agent-restart) with no main-side signal: the BUSY-target leg is fully wired, the
-  // hibernated leg's renderer->main wake is a recorded residual. Unchanged by the move.
   const messaging = initAgentMessaging({
     ptyManager,
     projects: () => workspaceStore.persistedCanvases(),
@@ -1742,6 +1796,18 @@ app.whenReady().then(async () => {
     // READS a name) is core's default, `supportsTitleRead`. A copy here would be a second place to
     // get it wrong, and getting it wrong is invisible — the wrong list silently skips an agent's
     // nodes with every test still green.
+  })
+  // Trigger nodes (issue #493): the whole host-side machine — arm store, scheduler, delivery with
+  // its deliver-on-idle queue, and the mirror's idle signal — composed ONCE in core
+  // (`startTriggerService`); this shell only supplies its seams. Identical call in
+  // src/server/index.ts. Arming still has no IPC/UI (phase 4), so nothing fires in production yet.
+  startTriggerService({
+    userDataDir: app.getPath('userData'),
+    listCanvases: () => workspaceStore.persistedCanvases(),
+    getNode: (nodeId) => workspaceStore.getNode(nodeId),
+    sendText: (nodeId, text) => ptyManager.sendText(nodeId, text),
+    paneCommand: (nodeId) => ptyManager.paneCommand(nodeId),
+    handle: (channel, handler) => platform().handle(channel, handler)
   })
   // macOS Notch HUD (docs/notch-hud.md): walking agent mascots by the notch. darwin + setting only;
   // reads the same agent-status seams the mirror does. Live-toggled via settings below.
@@ -2784,15 +2850,17 @@ app.whenReady().then(async () => {
   // host's tails too, instead of leaking them.
   corePlatform.on(IPC.ptyDestroy, (nodeId: string) => releaseNodeTails(nodeId))
   corePlatform.on(IPC.ptyRecycle, (nodeId: string) => releaseNodeTails(nodeId))
+  // Agent canvas control: the spawned agent's `nodeterm` CLI POSTs a verb to the hook server,
+  // which we forward to the renderer and await a reply. A pending-request map (keyed by a random
+  // requestId) bridges the two async hops; both the reply and the timeout below clear the entry.
+  // The window is generous because a confirm-gated verb waits on a human, not on the renderer.
   // Agent canvas control: the spawned agent's `nodeterm` CLI POSTs a verb to the hook server, which
   // we forward to the renderer and await a reply. Both async hops, the pending-request map, the
-  // result listener and the 120s timeout live ONCE in core so BOTH shells forward identically —
-  // `core/agents/canvas-control-bridge.ts`. Registered here (not at the setControlHandler call) so
-  // the result listener is installed with the rest of main's listeners.
+  // result listener, the timeout and its wording live ONCE in core so BOTH shells forward
+  // identically — `core/agents/canvas-control-bridge.ts`.
   //
   // `candidates` is the MAIN WINDOW ONLY: `corePlatform.clientIds()` also carries relay peers, and a
-  // relay peer is a phone attached to sessions with no canvas to act on — handing it `open-claude`
-  // would burn the agent's whole timeout while the desktop canvas sat right there.
+  // relay peer is a phone attached to sessions with no canvas to act on.
   const forwardControlToCanvas = initCanvasControlBridge({
     platform: corePlatform,
     candidates: mainWindowClientIds
@@ -3056,6 +3124,15 @@ app.whenReady().then(async () => {
   const projectIdOfNode = (id: string): string | undefined =>
     workspaceStore.persistedCanvases().find((c) => c.nodes.some((n) => n.id === id))?.id
   hookServer.setControlHandler(async ({ verb, nodeId, args, verified }) => {
+    // `--dry-run` (issue #532) is honoured by the spawn verbs only, and this gate runs FIRST —
+    // before the browser intercept, the open-project gates and the renderer forward — because a
+    // verb that cannot dry-run must REFUSE rather than silently perform: a `close --dry-run`
+    // that closes is worse than no flag at all. Supported verbs pass through with the flag
+    // intact; their renderer dispatch case stops before the mutation.
+    if (dryRunRequested(args) && !DRY_RUN_VERBS.has(verb)) {
+      const msg = dryRunRefusal(verb)
+      return { ok: false, error: msg, message: msg }
+    }
     // `browser` is answered in MAIN and never forwarded to the renderer's agent-control dispatch:
     // the debugger handle and the CDP allowlist are main-side, and the renderer is the more
     // attackable half. Every other verb still round-trips to the renderer below.
@@ -3101,12 +3178,9 @@ app.whenReady().then(async () => {
       if (gate !== 'allow') return { ok: false, error: gate.refuse, message: gate.refuse }
     }
     // The two async hops live ONCE in core (`agents/canvas-control-bridge.ts`) so the Server
-    // Edition — which had no control handler at all and refused every verb by name — runs the same
-    // forwarding. Every gate above stays exactly where it was: `browser` is still answered in main,
-    // and open-project/`--project` are still decided before anything is forwarded.
-    //
-    // `candidates` is the MAIN WINDOW ONLY, deliberately: `corePlatform.clientIds()` also carries
-    // relay peers, and a relay peer is a phone attached to sessions with no canvas to act on.
+    // Edition runs the same forwarding. Every gate above stays where it was: `browser` is still
+    // answered in main, and open-project/`--project` are still decided before anything is forwarded.
+    // The timeout and its retryable wording moved into the bridge with the hops.
     const result = await forwardControlToCanvas({ verb, nodeId, args })
     // Record browser ownership the moment an open-browser succeeds — and ONLY when the caller's
     // identity verdict for THIS request was `verified` (main's own verdict, not anything off the
@@ -3266,22 +3340,100 @@ app.whenReady().then(async () => {
     registerNode: (
       projectId: string,
       node: { id: string; title?: string; agentId?: string; accountId?: string }
-    ) => workspaceStore.appendRemoteNode(projectId, node),
+    ) =>
+      workspaceStore.appendRemoteNode(
+        projectId,
+        node,
+        new Date(),
+        // Host-derived, exactly as on the canvas: the account's default color beats the agent's,
+        // so a phone-started session under a colored account is recognizable in the same way. The
+        // agent decides WHICH account list answers (agentAccountColor) — the phone supplies both
+        // ids, and the two lists are keyed independently.
+        agentAccountColor(node.agentId, node.accountId, {
+          claude: settingsStore.get().claudeAccounts ?? [],
+          codex: settingsStore.get().codexAccounts ?? []
+        })
+      ),
     // "End session" from the phone (`pty.destroy`): the SAME two steps the desktop × performs —
     // kill the tmux session on every socket it could live on (the sweep may have seen it on either
     // — see the session-memory panel's kill rule), then take the node off its project's canvas
     // (written as an outside edit, so the watcher broadcasts it and the canvas drops the node
     // live). Node removal is best-effort by design: an unregistered phone session or an inline
     // project has no file entry to remove, and that must not fail a destroy that already landed.
+    //
+    // The kill is VERIFIED before the node comes off the canvas (issue #581): destroySession
+    // swallows its per-step failures by design, so it can resolve having ended nothing — and
+    // removing the node then would strand a live session with no canvas entry pointing at it.
+    // The throw also rides back to the phone as the verb's honest error.
     destroyNode: async (nodeId: string) => {
       await ptyManager.destroySession(null, nodeId, { everySocket: true })
+      if (await ptyManager.sessionExists(nodeId).catch(() => true)) {
+        throw new Error('The session is still running — the host could not end it.')
+      }
       await workspaceStore.removeRemoteNode(nodeId).catch(() => false)
     },
+    // Relay-viewer presence (Eco × phone): a COUNT per node id, shared by the interactive host and
+    // every standing-host pool session (several phones can watch at once, and one phone switching
+    // sessions overlaps its old and new streams). Two consumers, both renderer-side:
+    //  - `agent:remote-viewers` carries the full watched SET each change, so Eco's `isNodeWatched`
+    //    stops hibernating a session someone is watching from a phone (the phone viewer used to be
+    //    invisible to every attention predicate — the kanban-modal gap, one surface further out);
+    //  - `agent:wake` fires on each attach, so a hibernated node someone just opened on their
+    //    phone resumes its CLI — the same nudge contract as `wakeHibernatedNode` (re-reads the
+    //    flag, no-ops when not hibernated or not mounted).
+    remoteViewer: (() => {
+      const counts = new Map<string, number>()
+      const toRenderer = (channel: string, payload: unknown): void => {
+        if (!win.isDestroyed()) win.webContents.send(channel, payload)
+      }
+      const broadcast = (): void => toRenderer(IPC.agentRemoteViewers, [...counts.keys()])
+      return {
+        attached(nodeId: string) {
+          counts.set(nodeId, (counts.get(nodeId) ?? 0) + 1)
+          broadcast()
+          toRenderer(IPC.agentWake, nodeId)
+        },
+        detached(nodeId: string) {
+          const n = (counts.get(nodeId) ?? 0) - 1
+          if (n <= 0) counts.delete(nodeId)
+          else counts.set(nodeId, n)
+          broadcast()
+        }
+      }
+    })(),
+    // Renderer-nudge node actions for the phone's session-LIST long-press menu (`node.wake` /
+    // `node.refresh` / `node.rename`). Each returns whether it reached a LIVE window — the verb
+    // answers ok only on delivery, never on outcome (nudge contract: the renderer re-reads its
+    // own state and no-ops for a node it cannot resolve). `wake` reuses the exact `agent:wake`
+    // channel the attach path fires, so the renderer needs no new wiring for it; `rename` rides
+    // `agent:rename-node` into the renderer's `renameSession` funnel (titleAuto:false + `/rename`
+    // push) — deliberately NOT canvas:mutate's raw title write, which the session-name poll would
+    // overwrite on the next tick.
+    nodeActions: (() => {
+      const deliver = (channel: string, payload: unknown): boolean => {
+        if (win.isDestroyed()) return false
+        win.webContents.send(channel, payload)
+        return true
+      }
+      return {
+        wake: (nodeId: string) => deliver(IPC.agentWake, nodeId),
+        refresh: (nodeId: string) => deliver(IPC.agentRefreshNode, nodeId),
+        rename: (nodeId: string, title: string) => deliver(IPC.agentRenameNode, { nodeId, title })
+      }
+    })(),
     // Jail roots beyond the active canvas: the phone browses EVERY project (projects.list), so
     // its fs/git access spans every local project root — not just the tab the desktop happens
     // to have focused (that gap read as "cwd is outside the shared project roots" on the phone).
     workspaceRoots: () => workspaceStore.localProjectCwds()
   }
+  // The renderer owns the Eco hibernation flag (persisted in ITS localStorage) and main only
+  // mirrors it — same direction as `terminalFocused`. Feeds the agent-status mirror so the phone
+  // renders SLEEPING (and re-fed at renderer boot from the persisted store, so a desktop restart
+  // does not blank the phone's view of a still-hibernated session).
+  ipcMain.on(IPC.agentHibernated, (_e, msg: { nodeId?: unknown; on?: unknown } = {}) => {
+    if (typeof msg?.nodeId !== 'string' || !msg.nodeId) return
+    setNodeHibernated(msg.nodeId, msg.on === true)
+  })
   initRemoteHost(win, ptyManager, listProjectsOutput, hostBridge)
   // NEW interactive relay host (Stage 4): a connecting peer desktop becomes a first-class
   // CorePlatform client of this desktop after mutual SAS approval. Runs BESIDE initRemoteHost (the
@@ -3605,6 +3757,12 @@ app.on('before-quit', (e) => {
     // And the askpass relay's socket file: close() is what unlinks a unix socket (process exit
     // does not), and a lingering file is one more thing the next start() has to clear.
     askpassServer.stop()
+    // Hook server last among the closers, and on THIS pass so the flush window above could still
+    // receive hook POSTs: stopping unlinks its socket AND its endpoint file (issue #445), so a
+    // graceful quit never leaves an advertisement pointing at a dead port for the tmux sessions
+    // that outlive the app. The next launch rewrites both; a crash skips this, which is what the
+    // generated clients' endpoint failover exists for.
+    hookServer.stop()
     // A SIGTERM quit (dev runners, `kill`, logout) arrives through Chromium's shutdown
     // detector, and this pass's re-issued app.quit() cannot resume the OS-initiated
     // termination the first pass preventDefault'ed: both passes run, but will-quit never

@@ -68,6 +68,7 @@ export function probeGrokCliAt(bin: string): Promise<GrokCliCaps> {
       const invocation = directExecutableInvocation(bin, args)
       if (!invocation) return null
       const { stdout } = await execFileP(invocation.executable, invocation.args, {
+        ...invocation.options,
         timeout: PROBE_TIMEOUT_MS
       })
       return stdout

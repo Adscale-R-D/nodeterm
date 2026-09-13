@@ -1504,6 +1504,32 @@ body,
   will-change: auto;
 }
 
+/* ---- Covered-canvas animation gate -----------------------------------------------------------
+   The kanban board is an opaque overlay and the canvas stays MOUNTED underneath it, because
+   `display: none` would resize every terminal to 0x0 and fire a tmux SIGWINCH. So every glow and
+   pulse on that canvas keeps the compositor producing frames for something nobody can see through.
+   MEASURED with twenty pulsing nodes: 101 % total browser CPU uncovered, 12.8 % under an opaque
+   full-screen div (Chromium culls a lot of it, but not the frame loop), 1.5 % with this rule.
+
+   `--nt-anim-state` INHERITS, so overriding it on the canvas subtree is the whole gate for every
+   animation that reads it — no second list of selectors to keep in step. The three node glows are
+   not in that scheme (see the idle rules above) and take an explicit pause here; under an opaque
+   board there is no readability argument for freezing them lit, so they simply stop.
+
+   A SEPARATE attribute from `data-nt-window` on purpose: the two facts are independent (a board on
+   a focused window, an unfocused window with no board), and one attribute with two writers is a
+   race over who clears it. Scoped to the canvas and nothing else — the controls cluster and the
+   pills sit ABOVE the board (z 26) and are genuinely on screen, so they keep animating. */
+:root[data-nt-canvas='covered'] .react-flow {
+  --nt-anim-state: paused;
+}
+
+:root[data-nt-canvas='covered'] .react-flow__node:has(.term-node.unread)::after,
+:root[data-nt-canvas='covered'] .react-flow__node:has(.term-node.working)::after,
+:root[data-nt-canvas='covered'] .react-flow__node:has(.term-node.attention)::after {
+  animation-play-state: paused;
+}
+
 /* Bridge link handles (Claude nodes): dots on the header row, on top of the node so they're
    never buried under the terminal body. Subtle until you hover the node, then prominent.
    Never set `transform` on a React Flow handle: the side classes (.react-flow__handle-left/right/

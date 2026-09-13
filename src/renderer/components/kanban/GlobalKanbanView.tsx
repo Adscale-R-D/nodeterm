@@ -12,6 +12,7 @@ import { KanbanColumn, type KanbanLane } from './KanbanColumn'
 import { SessionCard } from './SessionCard'
 import { toKanbanSessionState } from '../../canvas/toKanbanSessionState'
 import { createAgentNode, createBrowserNode, createStickyNode, createTerminalNode, flowToNodeStates, resolveNewNodeAccount } from '../../state/workspace'
+import { markCanvasCovered } from '../../lib/canvasCovered'
 import { useViewMode } from '../../state/viewMode'
 import { useSession } from '../../session/session'
 import { activePermissionMode } from '../../state/permissionMode'
@@ -287,6 +288,8 @@ const Swimlane = memo(function Swimlane({
 })
 
 export const GlobalKanbanView = memo(function GlobalKanbanView() {
+  // Same rule as the per-project board: the canvas is covered but mounted underneath.
+  useEffect(() => markCanvasCovered(document.documentElement), [])
   const projects = useProjects(s => s.projects.filter(p => !p.closed))
   const { api } = useSession()
   const modalRef = useRef<string | null>(null)

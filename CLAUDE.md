@@ -3843,6 +3843,28 @@ callbacks — the default renderer path has no self-perpetuating rAF loop (glyph
 idle frames and is opt-in; the dino game's is focus-gated). Before adding a timer gate for energy
 reasons, measure: at these frequencies a JS wakeup is nothing beside one frame of compositing.
 
+**The board is the second gate, and it is a SEPARATE attribute on purpose.** The canvas stays
+mounted under the kanban overlay (`display: none` would 0x0-resize every terminal into a tmux
+SIGWINCH), so its glows and pulses keep animating under something nobody can see through — 12.8 %
+in the table above. `renderer/lib/canvasCovered.ts` marks `data-nt-canvas="covered"` for as long as
+a full-page board view is MOUNTED (mount is the signal: both board views are conditionally
+rendered, so it cannot drift from the view state the way a recomputed `kanbanOpen` flag can, and it
+needs nothing from Canvas), and `:root[data-nt-canvas='covered'] .react-flow` overrides
+`--nt-anim-state` on that subtree alone — the variable INHERITS, so that one declaration is the
+whole gate for every animation reading it. It is not a second writer of `data-nt-window` because
+the two facts are independent (a board on a focused window; an unfocused window with no board) and
+one attribute with two owners is a race over who clears it. The claim is refcounted: React can
+mount the incoming view before unmounting the outgoing one, and a plain set/clear pair would let
+that unmount erase the live view's claim.
+
+**Specificity is the quiet failure mode in all of this, and it has already happened twice.** The
+three glows carry their own `animation:` shorthand, which RESETS `animation-play-state` — so
+inheriting the variable does nothing for them and every gate has to name them explicitly. A first
+draft of the covered rule used `.react-flow__node::after`, lost to
+`.react-flow__node:has(.term-node.working)::after` on specificity, and measured EXACTLY the
+unpatched number while looking correct in the diff. When you add a gate, verify the COMPUTED
+`animation-play-state` on a real element, not the presence of the declaration.
+
 The gate itself: `renderer/lib/windowActivity.ts` sets `data-nt-window="idle"` on the document
 element when the window loses focus or the page hides, `:root[data-nt-window='idle']` flips
 `--nt-anim-state` to `paused`, and the three per-node glows take a static-lit rule instead of the

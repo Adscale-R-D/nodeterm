@@ -98,6 +98,34 @@
   color-scheme: dark;
 }
 
+/* ---- Idle-window animation gate --------------------------------------------------------------
+   Every `infinite` animation in this file is a STATUS or DECORATION — a pulsing dot, a glow, a
+   spinner, a walking mascot. None of them settles, so none of them carries state that is lost by
+   being held still; they exist to catch the eye of somebody who is looking at this window.
+
+   While nobody is (the window is not focused, or the page is hidden), they are pure battery. A
+   running CSS animation obliges the compositor to produce a frame every vsync — 120/s on a
+   ProMotion display — for as long as it runs, and each of those frames re-rasters and re-composites
+   the window. MEASURED on the Server Edition with a 40-terminal canvas, idling for 25 s under
+   headless Chrome: 1.5 % total browser CPU with nothing animating, 33 % with ONE node pulsing,
+   101 % with twenty. The same twenty with `animation-play-state: paused`: 1.6 %. The step happens
+   at the FIRST animation — what costs is that frames are produced at all — which is why this is
+   applied to every infinite animation in the file rather than to the worst few: one that keeps
+   running holds the frame loop open and the rest of the fix buys nothing. `lib/windowActivity.ts`
+   sets the attribute; `styles.animation-gate.test.ts` fails if a new `infinite` animation is added
+   without joining in.
+
+   `paused` is deliberately not `none`: it freezes each animation where it stands instead of
+   snapping it to its resting frame, so nothing MOVES at the moment the window loses focus, and
+   refocusing resumes rather than restarts. The three node glows below are the one exception. */
+:root {
+  --nt-anim-state: running;
+}
+
+:root[data-nt-window='idle'] {
+  --nt-anim-state: paused;
+}
+
 /* ---- Light appearance ----------------------------------------------------------------------
    Set by App.tsx from `settings.appTheme` (see lib/appTheme.ts); absent = dark, so an install
    that never picks one is byte-for-byte unchanged.
@@ -1059,6 +1087,7 @@ body,
   border-color: rgba(255, 69, 58, 0.5);
   color: var(--danger);
   animation: dictation-pulse 1.4s ease-in-out infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 
 .dictation__mic--small {
@@ -1127,6 +1156,7 @@ body,
   border-top-color: transparent;
   opacity: 0.85;
   animation: ui-spin 0.8s linear infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 @keyframes ui-spin {
   to {
@@ -1141,6 +1171,7 @@ body,
   border: 2px solid var(--border);
   border-top-color: var(--accent);
   animation: dictation-spin 0.8s linear infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 
 @keyframes dictation-spin {
@@ -1443,6 +1474,36 @@ body,
   }
 }
 
+/* The three glows above, while the window is idle (see the animation gate near the top of the
+   file). They do NOT take the shared `--nt-anim-state: paused`, because pausing freezes an
+   animation wherever its clock happened to stop and `nt-unread-glow` rests at `opacity: 0` — a
+   coin flip on whether the glow that says "this agent finished while you were away" is still on
+   screen when you come back to look for it. So each one goes STATIC-LIT instead: no frames, and
+   the state reads at a glance from across the room, which is the whole job of a glow you are not
+   in front of. The value sits between each keyframe's floor and its peak, so the node neither
+   flashes brighter nor drops out at the moment focus leaves.
+
+   `will-change` is dropped with the animation: it is a promise about a property that is about to
+   change, and nothing is about to change any more — holding the compositor layer for every idle
+   working/unread/attention node on a 100-node canvas is exactly the cost this block is removing. */
+:root[data-nt-window='idle'] .react-flow__node:has(.term-node.unread)::after {
+  animation: none;
+  opacity: 0.85;
+  will-change: auto;
+}
+
+:root[data-nt-window='idle'] .react-flow__node:has(.term-node.working)::after {
+  animation: none;
+  opacity: 0.7;
+  will-change: auto;
+}
+
+:root[data-nt-window='idle'] .react-flow__node:has(.term-node.attention)::after {
+  animation: none;
+  opacity: 0.8;
+  will-change: auto;
+}
+
 /* Bridge link handles (Claude nodes): dots on the header row, on top of the node so they're
    never buried under the terminal body. Subtle until you hover the node, then prominent.
    Never set `transform` on a React Flow handle: the side classes (.react-flow__handle-left/right/
@@ -1664,6 +1725,7 @@ body,
 
 .term-node__status--busy .term-node__status-dot {
   animation: nt-pulse 1.1s ease-in-out infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 
 /* DRIVING: an agent holds a control lease on this browser node (S8 PR 6). Same clay as RUNNING so
@@ -1677,6 +1739,7 @@ body,
 
 .term-node__status--driven .term-node__status-dot {
   animation: nt-pulse 1.1s ease-in-out infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 
 .browser-driving__label {
@@ -1734,6 +1797,7 @@ body,
   height: var(--mascot-h);
   background-size: calc(var(--mascot-w) * 2) var(--mascot-h);
   animation: mascot-walk-claude 0.8s steps(1) infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 
 /* Grok, gemini and opencode have no critter: their RUNNING indicator is the brand mark itself,
@@ -1746,6 +1810,7 @@ body,
    Agent-neutral by design: no rule below names an agent. */
 .term-node__mascot--pulse {
   animation: mascot-pulse-brand 1.6s ease-in-out infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 
 @keyframes mascot-pulse-brand {
@@ -1795,6 +1860,7 @@ body,
   background-position: 0 0;
   background-size: var(--cmascot-sheet-w) var(--cmascot-sheet-h);
   animation: mascot-walk-codex 0.96s steps(8) infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 
 @keyframes mascot-walk-codex {
@@ -1878,6 +1944,7 @@ body,
 
 .term-node__status--attention .term-node__status-dot {
   animation: nt-pulse 1.1s ease-in-out infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 
 .term-node__status--unread {
@@ -2289,6 +2356,7 @@ body,
   border: 2px solid var(--border);
   border-top-color: var(--accent);
   animation: dictation-spin 0.8s linear infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 
 /* Drop-target hint while dragging a file from Finder into the terminal. */
@@ -4685,6 +4753,7 @@ body,
 
 .scm-gen.is-generating {
   animation: scm-gen-pulse 0.9s ease-in-out infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 
 @keyframes scm-gen-pulse {
@@ -4876,6 +4945,7 @@ body,
   border-top-color: var(--accent);
   border-radius: 50%;
   animation: ex-dls-spin 0.8s linear infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 
 /* Download strip: pinned under the tree, one row per transfer. */
@@ -4947,6 +5017,7 @@ body,
   border-top-color: var(--accent);
   border-radius: 50%;
   animation: ex-dls-spin 0.8s linear infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 
 @keyframes ex-dls-spin {
@@ -6286,6 +6357,7 @@ button.group-node__setup:disabled {
 
 .subagent-node.working .subagent-node__dot {
   animation: nt-pulse 1.1s ease-in-out infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 
 .subagent-node.done .subagent-node__dot {
@@ -6401,6 +6473,7 @@ button.group-node__setup:disabled {
 
 .loop-node.working .loop-node__dot {
   animation: nt-pulse 1.1s ease-in-out infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 
 .loop-node__type {
@@ -6595,10 +6668,12 @@ button.group-node__setup:disabled {
 .minimap .mm-working {
   filter: drop-shadow(0 0 3px rgba(255, 214, 10, 0.8));
   animation: mm-pulse-soft 2.6s ease-in-out infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 .minimap .mm-attention {
   filter: drop-shadow(0 0 3px rgba(255, 69, 58, 0.9));
   animation: mm-pulse 1.8s ease-in-out infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 /* Unread = clay, the agent-hook colour (RUNNING badge, working glow). Its own keyframes: at
    minimap scale a node is a few pixels tall, so opacity alone reads as a faint flicker — the
@@ -6606,6 +6681,7 @@ button.group-node__setup:disabled {
 .minimap .mm-unread {
   filter: drop-shadow(0 0 4px rgba(217, 119, 87, 0.95));
   animation: mm-pulse-unread 1.6s ease-in-out infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 @keyframes mm-pulse-unread {
   0%,
@@ -6834,7 +6910,7 @@ button.group-node__setup:disabled {
 .usage-pill__dim,
 .sysres-pill__dim { color: rgba(var(--tint-rgb), 0.5); }
 .usage-pill__pulse,
-.sysres-pill__pulse { animation: usage-pulse 1.2s ease-in-out infinite; }
+.sysres-pill__pulse { animation: usage-pulse 1.2s ease-in-out infinite; animation-play-state: var(--nt-anim-state); }
 @keyframes usage-pulse { 0%, 100% { opacity: 0.4; } 50% { opacity: 1; } }
 
 /* Expanded: hover, keyboard focus, or an open panel. `width: auto` cannot be transitioned, so the
@@ -6924,7 +7000,7 @@ button.group-node__setup:disabled {
   width: 14px;
   height: 14px;
 }
-.usage-refresh.spin svg { animation: usage-spin 0.9s linear infinite; }
+.usage-refresh.spin svg { animation: usage-spin 0.9s linear infinite; animation-play-state: var(--nt-anim-state); }
 @keyframes usage-spin { to { transform: rotate(360deg); } }
 
 .usage-popover {
@@ -7145,6 +7221,7 @@ button.group-node__setup:disabled {
   background: var(--success);
   /* Reuse the terminal-header badge pulse rather than a bespoke keyframe. */
   animation: nt-pulse 1.1s ease-in-out infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 .sessmem-row__dot--attention { background: var(--warn); }
 .sessmem-row__dot--idle { background: rgba(var(--tint-rgb), 0.3); }
@@ -7267,7 +7344,7 @@ button.group-node__setup:disabled {
 .sessmem-panel__refresh:hover { color: var(--text-strong); background: rgba(var(--tint-rgb), 0.08); }
 .sessmem-panel__refresh:disabled { opacity: 0.4; cursor: default; }
 /* Same spin as the usage panel's refresh. */
-.sessmem-panel__refresh.spin svg { animation: usage-spin 0.9s linear infinite; }
+.sessmem-panel__refresh.spin svg { animation: usage-spin 0.9s linear infinite; animation-play-state: var(--nt-anim-state); }
 
 /* ---- Claude context-window meter (per-node header pill + popover) ---- */
 .ctx-meter {
@@ -7615,17 +7692,18 @@ button.group-node__setup:disabled {
 .ss-dot--done { background: var(--success); }
 .ss-check { color: var(--success); margin-top: 2px; flex: 0 0 auto; line-height: 0; }
 /* Unread: the same check, accent-blue and pulsing until the user visits the node. */
-.ss-check--unread { color: var(--accent); animation: nt-pulse 1.1s ease-in-out infinite; }
+.ss-check--unread { color: var(--accent); animation: nt-pulse 1.1s ease-in-out infinite; animation-play-state: var(--nt-anim-state); }
 .ss-check svg { width: 13px; height: 13px; }
 /* attention renders as a red bell (ss-bell) — "it's ringing for you". Gentle pulse,
    same cadence as the header badge dot. */
-.ss-bell { color: var(--danger); margin-top: 2px; flex: 0 0 auto; line-height: 0; animation: nt-pulse 1.1s ease-in-out infinite; }
+.ss-bell { color: var(--danger); margin-top: 2px; flex: 0 0 auto; line-height: 0; animation: nt-pulse 1.1s ease-in-out infinite; animation-play-state: var(--nt-anim-state); }
 .ss-bell svg { width: 13px; height: 13px; }
 .ss-dot--working {
   background: transparent;
   border: 2px solid var(--agent-working);
   border-top-color: transparent;
   animation: nt-spin 1s steps(12, end) infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 
 .ss-row__body { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 2px; }
@@ -7920,6 +7998,7 @@ button.group-node__setup:disabled {
   border: 1.5px solid var(--agent-working);
   border-top-color: transparent;
   animation: nt-spin 1s steps(12, end) infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 /* Respect the OS setting: spinning ring/arc badges freeze in place rather than
    keep animating forever. */
@@ -8204,6 +8283,7 @@ button.group-node__setup:disabled {
   width: 35%;
   background: var(--accent);
   animation: webview-progress-slide 1.1s ease-in-out infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 @keyframes webview-progress-slide {
   from {
@@ -8403,12 +8483,14 @@ button.group-node__setup:disabled {
   color: #d97757;
   background: rgba(217, 119, 87, 0.15);
   animation: nt-pulse 1.1s ease-in-out infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 /* NEEDS YOU is red everywhere (same as the terminal attention badge). */
 .chat-node__badge--needs {
   color: var(--danger);
   background: rgba(255, 69, 58, 0.15);
   animation: nt-pulse 1.1s ease-in-out infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 .chat-node__cost {
   flex: 0 0 auto;
@@ -8441,6 +8523,7 @@ button.group-node__setup:disabled {
   border-radius: 50%;
   background: rgba(var(--tint-rgb), 0.55);
   animation: chat-typing 1.2s ease-in-out infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 .chat-node__typing span:nth-child(2) {
   animation-delay: 0.15s;
@@ -8899,6 +8982,7 @@ button.group-node__setup:disabled {
    warning. It decays ~2s after the last keystroke (TYPING_DECAY_MS, swept in state/presence.ts). */
 .presence-chip--typing {
   animation: nt-typing-pulse 1.1s ease-out infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 
 @keyframes nt-typing-pulse {
@@ -9824,6 +9908,7 @@ button.group-node__setup:disabled {
   background: rgba(50, 215, 75, 0.12);
   /* reuse the terminal-header badge pulse (nt-pulse) rather than a bespoke keyframe */
   animation: nt-pulse 1.1s ease-in-out infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 .kanban-badge--needs {
   color: var(--warn);
@@ -11032,6 +11117,7 @@ button.group-node__setup:disabled {
   border-radius: 10px;
   background: rgba(163, 141, 255, 0.045);
   animation: onb-float 9s ease-in-out infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 .onb-ghost--a { top: 14%; left: 12%; }
 .onb-ghost--b { top: 22%; right: 14%; width: 180px; animation-delay: -3s; }
@@ -11049,6 +11135,7 @@ button.group-node__setup:disabled {
   stroke-width: 1.5;
   stroke-dasharray: 6 7;
   animation: onb-dash 14s linear infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 @keyframes onb-float {
   0%, 100% { transform: translateY(0); }
@@ -11369,6 +11456,7 @@ button.group-node__setup:disabled {
   left: 30px;
   top: 200px;
   animation: onb-cursor-path 7s ease-in-out infinite;
+  animation-play-state: var(--nt-anim-state);
   filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.6));
 }
 @keyframes onb-cursor-path {
@@ -11386,6 +11474,7 @@ button.group-node__setup:disabled {
   border: 1.5px solid rgba(163, 141, 255, 0.8);
   opacity: 0;
   animation: onb-ripple 7s ease-out infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 @keyframes onb-ripple {
   0%, 16% { opacity: 0; transform: scale(0.3); }
@@ -11404,6 +11493,7 @@ button.group-node__setup:disabled {
   opacity: 0;
   transform-origin: top left;
   animation: onb-menu 7s ease infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 @keyframes onb-menu {
   0%, 19% { opacity: 0; transform: scale(0.92); }
@@ -11416,6 +11506,7 @@ button.group-node__setup:disabled {
 }
 .onb-menu__hl {
   animation: onb-menu-hl 7s ease infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 @keyframes onb-menu-hl {
   0%, 30% { background: transparent; }
@@ -11436,6 +11527,7 @@ button.group-node__setup:disabled {
   box-shadow: 0 8px 28px rgba(0, 0, 0, calc(0.4 * var(--shadow-k)));
   opacity: 0;
   animation: onb-node-pop 7s cubic-bezier(0.34, 1.4, 0.5, 1) infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 @keyframes onb-node-pop {
   0%, 56% { opacity: 0; transform: scale(0.7); }
@@ -11510,6 +11602,7 @@ button.group-node__setup:disabled {
   font-size: 15px;
   font-weight: 600;
   animation: onb-keypress 8s ease infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 .onb-kbd--hold {
   animation-name: onb-keyhold;
@@ -11530,6 +11623,7 @@ button.group-node__setup:disabled {
   margin-left: 4px;
   opacity: 0;
   animation: onb-holdhint 8s ease infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 @keyframes onb-holdhint {
   0%, 5% { opacity: 0; }
@@ -11540,6 +11634,7 @@ button.group-node__setup:disabled {
 .onb-mic-wrap {
   opacity: 0;
   animation: onb-micgate 8s ease infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 @keyframes onb-micgate {
   0%, 6% { opacity: 0; transform: scale(0.9); }
@@ -11562,6 +11657,7 @@ button.group-node__setup:disabled {
   border-radius: 50%;
   border: 1.5px solid rgba(255, 55, 95, 0.5);
   animation: onb-ring 2.4s ease-out infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 .onb-mic__ring--late {
   animation-delay: 1.2s;
@@ -11582,6 +11678,7 @@ button.group-node__setup:disabled {
   border-radius: 2px;
   background: rgba(255, 55, 95, 0.85);
   animation: onb-wave 1s ease-in-out infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 @keyframes onb-wave {
   0%, 100% { height: 6px; }
@@ -11608,6 +11705,7 @@ button.group-node__setup:disabled {
   white-space: nowrap;
   max-width: 0;
   animation: onb-type 8s steps(32) infinite;
+  animation-play-state: var(--nt-anim-state);
   color: rgba(235, 235, 245, 0.85);
 }
 /* types only AFTER the release (58%) — the transcription arrives when you let go */
@@ -11620,6 +11718,7 @@ button.group-node__setup:disabled {
   height: 13px;
   background: rgba(235, 235, 245, 0.8);
   animation: onb-caret 1s steps(1) infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 @keyframes onb-caret {
   50% { opacity: 0; }
@@ -11742,6 +11841,7 @@ button.group-node__setup:disabled {
   background: var(--canvas-bg);
   border-radius: 0 0 10px 10px;
   animation: onb-capsule 6s ease-in-out infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 .onb-capsule__left {
   display: flex;
@@ -11759,6 +11859,7 @@ button.group-node__setup:disabled {
   border-radius: 50%;
   background: rgb(48, 209, 88);
   animation: onb-blob 1.6s ease-in-out infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 @keyframes onb-capsule {
   0%, 10% { padding-right: 8px; }
@@ -11781,6 +11882,7 @@ button.group-node__setup:disabled {
   border-radius: 0 0 12px 12px;
   transform-origin: top center;
   animation: onb-notchpanel 6s ease-in-out infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 .onb-notchpanel__row {
   display: flex;
@@ -11813,6 +11915,7 @@ button.group-node__setup:disabled {
   color: rgba(235, 235, 245, 0.45);
   transform-origin: top center;
   animation: onb-bell 5s ease-in-out infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 @keyframes onb-bell {
   0%, 8% { transform: rotate(0); }
@@ -11832,6 +11935,7 @@ button.group-node__setup:disabled {
   padding: 10px 12px;
   box-shadow: 0 14px 36px rgba(0, 0, 0, calc(0.5 * var(--shadow-k)));
   animation: onb-notif 5s ease infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 @keyframes onb-notif {
   0%, 6% { opacity: 0; transform: translateX(60px); }
@@ -11882,6 +11986,7 @@ button.group-node__setup:disabled {
   box-shadow: 0 18px 50px rgba(0, 0, 0, calc(0.55 * var(--shadow-k)));
   padding: 28px 10px 12px;
   animation: onb-float 7s ease-in-out infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 .onb-phone__notch {
   position: absolute;
@@ -11943,6 +12048,7 @@ button.group-node__setup:disabled {
   border-radius: 999px;
   box-shadow: 0 8px 20px rgba(0, 0, 0, calc(0.4 * var(--shadow-k)));
   animation: onb-soon 3.2s ease-in-out infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 @keyframes onb-soon {
   0%, 100% { transform: rotate(8deg) scale(1); }

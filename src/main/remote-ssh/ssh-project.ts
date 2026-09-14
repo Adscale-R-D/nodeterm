@@ -40,6 +40,7 @@ import {
   scpDownArgs,
   RMT_TMUX_SOCKET
 } from '../../core/remote-ssh/control-master'
+import { SshChildGate } from '../../core/remote-ssh/ssh-child-gate'
 import { claudeVersionProbeCommand, parseClaudeVersionProbe } from '../../core/remote-ssh/claude-version-probe'
 import { RemoteHooks } from './remote-hooks'
 import {
@@ -2315,6 +2316,12 @@ export function resolvePassphrasePrompt(requestId: string, value: string | null)
   pendingPassphrasePrompts.delete(requestId)
 }
 
+/** One concurrency budget per ControlMaster, shared by every ssh exec child this process runs
+ *  (the manager's own commands and every `sshRun` caller — transcript reads, remote git, the
+ *  board-log poll, the session-memory sweep). Module-level so a manager rebuilt in a test does
+ *  not hand a host two budgets. */
+const sshChildGate = new SshChildGate()
+
 export function initSshProject(
   onConnected?: (projectId: string) => void,
   askpassScriptPath?: string,
@@ -2401,34 +2408,41 @@ export function initSshProject(
         // The master may already be gone, the host unreachable, or the timeout hit. Best effort.
       }
     },
+    // Bounded per ControlMaster: a connect's install fan-out, a Source Control refresh and a
+    // switch's mount burst all land on one multiplexed connection, and past the host's
+    // `MaxSessions` every excess child silently becomes a full login — enough of those at once
+    // and sshd's `MaxStartups` resets some outright, which the app sees as a dropped terminal.
+    // Mux control commands and the terminals themselves are never queued (see ssh-child-gate.ts).
     run: (args, stdin) =>
-      new Promise((resolve) => {
-        // 16 MB ceiling: remote transcript reads pull up to REMOTE_TRANSCRIPT_CAP (5 MB) via
-        // RemoteFile; the default 1 MB maxBuffer would kill the child and silently break the
-        // remote context meter / subagent transcript / content search for large transcripts.
-        // (cf. pty-manager tmux capture 50 MB, git-service 20–50 MB.) Just a ceiling, safe for
-        // the small Phase-1/2a control commands too.
-        // The agent env rides along here too: `childArgs` uses `ControlMaster=auto`, so with the
-        // master down the first child ssh authenticates for real, and the only place the unlocked
-        // key lives is the app-private agent.
-        const child = execFile(
-          ssh,
-          args,
-          { timeout: 15000, maxBuffer: 16 * 1024 * 1024, env: { ...process.env, ...appSshAgent.env() } },
-          (err, stdout) =>
-            resolve({ code: err ? ((err as { code?: number }).code ?? 1) : 0, stdout: stdout ?? '' })
-        )
-        if (stdin !== undefined) {
-          // ssh can die before draining stdin (unreachable host, bad option, instant auth
-          // refusal) — that EPIPE is an async 'error' EVENT on the pipe, not a throw here, and
-          // unhandled it kills the main process (issue #382's class). The execFile callback
-          // above already reports the child's exit; log and stand by.
-          child.stdin?.on('error', (e: NodeJS.ErrnoException) => {
-            console.warn(`[ssh-project] ssh stdin write failed (${e.code ?? e})`)
-          })
-          child.stdin?.end(stdin)
-        }
-      }),
+      sshChildGate.run(args, () =>
+        new Promise<{ code: number; stdout: string }>((resolve) => {
+          // 16 MB ceiling: remote transcript reads pull up to REMOTE_TRANSCRIPT_CAP (5 MB) via
+          // RemoteFile; the default 1 MB maxBuffer would kill the child and silently break the
+          // remote context meter / subagent transcript / content search for large transcripts.
+          // (cf. pty-manager tmux capture 50 MB, git-service 20–50 MB.) Just a ceiling, safe for
+          // the small Phase-1/2a control commands too.
+          // The agent env rides along here too: `childArgs` uses `ControlMaster=auto`, so with the
+          // master down the first child ssh authenticates for real, and the only place the unlocked
+          // key lives is the app-private agent.
+          const child = execFile(
+            ssh,
+            args,
+            { timeout: 15000, maxBuffer: 16 * 1024 * 1024, env: { ...process.env, ...appSshAgent.env() } },
+            (err, stdout) =>
+              resolve({ code: err ? ((err as { code?: number }).code ?? 1) : 0, stdout: stdout ?? '' })
+          )
+          if (stdin !== undefined) {
+            // ssh can die before draining stdin (unreachable host, bad option, instant auth
+            // refusal) — that EPIPE is an async 'error' EVENT on the pipe, not a throw here, and
+            // unhandled it kills the main process (issue #382's class). The execFile callback
+            // above already reports the child's exit; log and stand by.
+            child.stdin?.on('error', (e: NodeJS.ErrnoException) => {
+              console.warn(`[ssh-project] ssh stdin write failed (${e.code ?? e})`)
+            })
+            child.stdin?.end(stdin)
+          }
+        })
+      ),
     runScp: (args) =>
       new Promise((resolve) => {
         // Same reason as `run`: scp re-authenticates when the master socket is gone.

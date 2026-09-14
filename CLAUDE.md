@@ -970,6 +970,29 @@ session.
 - The xterm container is `nodrag nowheel`; a transparent **hover-guard** overlay sits on top
   until you dwell `settings.panHoverDelay` (so quick drag = move node, scroll = pan). After
   the dwell the guard is removed and xterm takes input. The header stays draggable.
+- **Where the wheel stops being the terminal's is decided by HIT TEST, per packet** — `Canvas.tsx`
+  answers `overNativeScrollable` with `target?.closest('.nowheel')`, and React Flow's own
+  `panOnScroll` walks the same class (`noWheelClassName`). Two consequences, and issue #767 reported
+  the second as the first. **(a) Inside the body the wheel is already the terminal's, band
+  included.** `.term-node__xterm` carries `nowheel` AND is `position: absolute; inset: 0` over a
+  body with no padding and no border, so the visible inset band (the host's own `4px 2px 6px 6px`)
+  and a co-attach letterbox band are part of the HOST's hit area — MEASURED with `elementFromPoint`
+  under headless Chromium against the verbatim rules, and now pinned as a three-link CSS invariant
+  by `canvas/terminal-wheel-boundary.test.ts`. The styles.css line the report reads ("insets the
+  xterm by a few px") is about PAINT — the band shows the body's `--term-bg` because the host paints
+  none — and paint is not hit testing. An overlay laid over a LIVE terminal therefore owes
+  `pointer-events: none` (`.term-node__stalecwd`, joining `.term-node__upload` and
+  `.term-copy-pill`); an overlay that REPLACES a dead view (`.term-node__offscreen`,
+  `.term-node__closed`) deliberately keeps the canvas wheel — there is nothing underneath to
+  scroll, so panning is the useful answer. **(b) The boundary that actually moves is TEMPORAL, not
+  spatial**: while it is up, `.term-hover-guard` covers the whole body and is NOT `nowheel`, so for
+  the first `panHoverDelay` after the pointer enters — and again after it leaves — a wheel over
+  terminal TEXT pans the canvas. That is the guard's own contract ("quick drag = move node, scroll
+  = pan canvas") and the reason those incidents cannot be reproduced on demand. Hoisting `nowheel`
+  to `.term-node__body` would swallow the guard with it (a second consumer, React Flow's, reads the
+  class the same way and no per-element opt-out can reach it); hoisting it to the whole NODE would
+  additionally take wheel-zoom-to-cursor away over every node, which is exactly where a
+  `wheelZoom` user aims.
 - A `ResizeObserver` drives `FitAddon.fit()` + `transport.resize`. Canvas zoom is a CSS
   transform, so it does *not* change `clientWidth` — cols/rows stay stable across zoom.
   `scale-fix.ts` patches xterm's mouse coords so text selection stays aligned when zoomed.

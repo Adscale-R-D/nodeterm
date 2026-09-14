@@ -102,6 +102,19 @@ lane unaffected.
   PR; copy that really is macOS-specific (the ptmx-limit banner, the notch step) is exempt by name
   with its reason. Comments are not scanned.
 
+- **An overlay you lay over a live terminal steals its wheel — give it `pointer-events: none`.**
+  Wheel routing is a per-packet hit test on `closest('.nowheel')` (ours in `Canvas.tsx`, and React
+  Flow's own `panOnScroll` independently), so the element under the pointer decides, not the node.
+  `.term-node__xterm` carries the class and covers the whole body, so a banner drawn ON a running
+  terminal takes those pixels out of the terminal's wheel area and hands them to the canvas — the
+  user scrolls and the canvas slides instead. `.term-node__upload` and `.term-copy-pill` were
+  already `pointer-events: none` for this; `.term-node__stalecwd` was not (issue #767), and
+  `canvas/terminal-wheel-boundary.test.ts` now fails on the next one. An overlay that REPLACES a
+  dead view keeps the canvas wheel on purpose — there is nothing underneath to scroll. Same rule
+  one layer up: do not "fix" a routing question by moving `nowheel` outward, because a second
+  consumer reads the class and no per-element opt-out can reach it. Deep version: CLAUDE.md §
+  Terminal node lifecycle.
+
 - **The node colour palette is ONE list, and it is also the control boundary.**
   `src/shared/node-colors.ts` is what every picker draws and what `nodeterm color --color C`
   validates against — so a colour the UI offers and a colour the CLI accepts cannot drift apart.

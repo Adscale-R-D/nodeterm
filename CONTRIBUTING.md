@@ -167,6 +167,17 @@ lane unaffected.
   on POSIX a backslash is legal filename text — do not treat both separators as interchangeable
   unless the owning filesystem is known to be Windows.
 
+- **Anything tmux does for us on POSIX, the session host owes on Windows.** The two delivery paths
+  are not symmetric and the missing half fails in the direction that LOOKS like success: `sendText`
+  rides `tmux paste-buffer -p` on POSIX, which frames the payload from the pane's real
+  bracketed-paste state and submits with a separate `send-keys Enter`; the session host answered the
+  same call with one raw `text + '\r'`, so a paste-aware composer swallowed the Enter as pasted
+  content and an injected prompt sat there unsubmitted (issue #686). Before adding a delivery, a
+  probe or a pane query, check what the tmux leg does with it and write the host's equivalent in the
+  same change. The host can usually answer more precisely than tmux, because its headless emulator
+  sees the pane app's own bytes — see CLAUDE.md's "We have our own VT emulator" for the one place
+  that reasoning is inverted.
+
 - **Normalize BOTH sides of a path comparison, through one function.** A marker normalized where
   it is built and matched raw where it is used is a no-op on the machine you wrote it on and a
   silent defect on Windows. That is issue #558: the managed-hook marker was folded to `/` while

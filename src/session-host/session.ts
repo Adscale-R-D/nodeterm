@@ -265,6 +265,17 @@ export class HostSession {
     return this.term.serialize(scrollback)
   }
 
+  /**
+   * Has the app in this pane requested bracketed paste? Behind `outputTail` for the same reason
+   * `serialize` is: xterm applies writes asynchronously, so a mode set by output we have already
+   * observed is not in `modes` yet. Reading it early answers "no" for the turn that just enabled
+   * it — which is exactly the injected-prompt delivery this gates (see send-keys-delivery.ts).
+   */
+  async bracketedPasteRequested(): Promise<boolean> {
+    await this.outputTail
+    return this.term.bracketedPasteRequested()
+  }
+
   /** Stage an attach's explicit flow state and per-socket geometry before the warm screen barrier.
    * The returned commit is the only operation that activates live delivery. */
   async prepareAttachment(

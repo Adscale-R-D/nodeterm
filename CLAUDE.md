@@ -889,6 +889,20 @@ pane running `sleep 30`. It never toggled across pane switches, window switches,
 co-attach. A constant is not a signal — so `term.modes.bracketedPasteMode` cannot stand in for the
 pane's state, however tempting the symmetry with `mouseTrackingMode` looks.
 
+**That paragraph is about a tmux CLIENT, and the SESSION HOST is the opposite case** (issue #686).
+On Windows there is no tmux, so nothing sits between the pane's app and the host's headless
+emulator: a `?2004h` it sees was written by the app itself, which is exactly the fact
+`paste-buffer -p` asks tmux for. `HostSession.bracketedPasteRequested()` reads it (behind
+`outputTail`, like `serialize` — xterm applies writes asynchronously, so an early read answers "no"
+for the turn that just enabled it) and `sendKeysWrites` (`session-host/send-keys-delivery.ts`)
+mirrors the tmux plan: `sanitizePasteText` ALWAYS, the frame only when the app asked, and the Enter
+as its own write AFTER the close marker — never inside the framed burst, which is the shape #453
+measured as mangled. Unframed it stays one write, byte-identical to the pre-fix path. Before this
+the host answered `sendKeys` with a single raw `text + '\r'`, so an injected prompt landed in a
+paste-aware composer (Codex, Claude) and was never submitted. **NOT verified on a device**: whether
+ConPTY re-emits an app's `?2004h` into the pty stream the host reads. If it does not, the mode is
+always false and every write is the old one — no fix, never a regression.
+
 **The actual fix is older than the problem: `paste-buffer -p`.** From tmux's own man page — *"If
 `-p` is specified, paste bracket control codes are inserted around the buffer **if the application
 has requested bracketed paste mode**."* Introduced 2012-03-03, shipped in **tmux 1.7**, so it is

@@ -782,8 +782,17 @@ unreachable there by construction; a Linux host is expected to have its own. Und
 
 tmux only survives an **app** restart — a **machine reboot kills the tmux server**, so every
 `nt-<nodeId>` session is gone. To bridge that, `create()` returns `PtyCreateResult` with a
-`fresh` flag: it runs `tmux has-session` *before* spawning, so `fresh=false` means a warm
-reattach (tmux redraws) and `fresh=true` means a cold start (first open OR post-reboot). On a
+`fresh` flag: it asks the tmux server whether the session already exists *before* spawning, so
+`fresh=false` means a warm reattach (tmux redraws) and `fresh=true` means a cold start (first open
+OR post-reboot). Locally that ask is one `tmux has-session` per node; **on an SSH project it is ONE
+`tmux list-sessions` per host per burst** (`core/remote-ssh/remote-session-index.ts`), because a
+project switch mounts every node in the same tick and N probe channels on top of N pty channels
+overrun a stock host's `MaxSessions 10`. The measurement and the failure chain it closes are in
+that module's header; the two rules a refactor must not undo are **(1)** only tmux's own exit 1 is
+evidence of absence — every other outcome answers "exists", because a transport failure read as
+"cold" replays a snapshot and types `claude --resume …` into a LIVE agent pane — and **(2)** a
+session this process just spawned is recorded (`markPresent`) and a remote kill invalidates the
+cached list, so nothing inside the cache window can be told it is cold when it is not. On a
 cold start the renderer (`TerminalNode.tsx`) reconstructs state instead of relying on the dead
 session (you can't keep a live OS process across a reboot):
 - **Scrollback replay** — `core/scrollback-store.ts` keeps a byte-capped (`256 KB`) snapshot of

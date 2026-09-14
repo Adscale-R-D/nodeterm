@@ -3788,6 +3788,69 @@ the Settings section and ShortcutsPanel start disagreeing about what a chord mea
 - **Theme**: macOS dark palette as CSS tokens in `styles.css` `:root` (`--accent` = systemBlue,
   label/separator opacities, SF font stack). Canvas background is black with dot grid.
 
+## Idle energy: an animation is a frame loop, not a decoration
+
+**A running CSS animation obliges the compositor to produce a frame every vsync — on a ProMotion
+display 120 of them a second — for as long as it runs, and each of those frames re-rasters and
+re-composites the whole window.** That cost is paid once for the WINDOW, not once per animation, and
+it does not care whether anybody is looking: an unfocused window that is still visible (a second
+monitor, half behind an editor) is not `document.hidden` by any definition Chromium uses, so it
+keeps producing frames at full display rate.
+
+MEASURED on the Server Edition, 40 terminal nodes on one canvas, headless Chrome, 25 s idle windows,
+total CPU across every Chrome process (`/proc/<pid>/stat`):
+
+| state | CPU |
+|---|---|
+| idle, nothing animating | **1.5 %** |
+| **one** visible node with the `working` glow | **33 %** |
+| five | 66 % |
+| twenty | 101 % |
+| twenty, but all panned OFF screen | 2.2 % |
+| twenty, under an opaque full-screen overlay | 12.8 % |
+| twenty, `animation-play-state: paused` | **1.6 %** |
+| twenty, `animation: none` + a static opacity | 1.9 % |
+| first-run mobile-launch card open (5 animations, no node glows) | 97 % |
+
+Four things to take from that table, because each one contradicts a reasonable guess:
+
+- **The step is at the FIRST animation, not the twentieth.** What costs is that frames are produced
+  at all. So a gate that covers most of the app's animations buys nothing — one that keeps running
+  holds the frame loop open, while everything the gate DOES cover still looks correctly frozen. That
+  is why `--nt-anim-state` is applied to EVERY `infinite` animation in `styles.css` and enforced by
+  scan (`styles.animation-gate.test.ts`) rather than applied to the worst few by hand.
+- **Offscreen nodes are already free** (2.2 %): Chromium skips raster and compositing for layers
+  fully outside the viewport. There is nothing to fix there, and a viewport-gated animation would be
+  work with no measurable return. A canvas of 119 nodes costs what its VISIBLE animated nodes cost.
+- **`paused` is as cheap as `none`** (1.6 % vs 1.9 %), so the gate freezes each animation where it
+  stands instead of snapping it to a resting frame — nothing MOVES at the moment focus is lost, and
+  refocusing resumes rather than restarts.
+- **The renderer's MAIN thread is idle throughout.** Over the 25 s window with one node pulsing,
+  `Performance.getMetrics` reported 0.15 s of `TaskDuration`, 1 layout and 51 style recalcs, while
+  the renderer PROCESS burned 14.8 % and the GPU process 17.9 %. This is compositor and raster work,
+  invisible to every JS-level profiler and to a timer census.
+
+**What the numbers are NOT.** Headless Chrome here rasters in software (SwiftShader), so the
+absolute percentages are inflated relative to a real GPU and none of them is a prediction about
+macOS. What the A/B establishes is the MECHANISM and its direction; the magnitude on a given machine
+has to be measured there (`powermetrics --samplers gpu_power,tasks`, and Activity Monitor's Energy
+Impact, which weights GPU use and wakeups heavily).
+
+**Timers are not the problem, and the census that said so is worth not repeating.** Over the same
+idle window the renderer fired **56 timer callbacks in 30 s** (~1.9/s: 40 per-node liveness polls at
+1/30 Hz, the 2 s terminal-focus mirror, the 30 s host-RAM read) and **zero** `requestAnimationFrame`
+callbacks — the default renderer path has no self-perpetuating rAF loop (glyphgrid's parks after 30
+idle frames and is opt-in; the dino game's is focus-gated). Before adding a timer gate for energy
+reasons, measure: at these frequencies a JS wakeup is nothing beside one frame of compositing.
+
+The gate itself: `renderer/lib/windowActivity.ts` sets `data-nt-window="idle"` on the document
+element when the window loses focus or the page hides, `:root[data-nt-window='idle']` flips
+`--nt-anim-state` to `paused`, and the three per-node glows take a static-lit rule instead of the
+shared pause — `nt-unread-glow` rests at `opacity: 0`, so pausing it is a coin flip on whether the
+glow that says "this agent finished while you were away" is still on screen when you come back to
+look for it. `hud.css` is deliberately excluded: the notch HUD's window is never focused, so the
+shared gate would freeze it permanently rather than while nobody is looking.
+
 ## Remote access (phone relay) — free, not Pro
 
 - Phone relay remote access ("Reach this Mac from anywhere") is a **Core (free) feature** as of

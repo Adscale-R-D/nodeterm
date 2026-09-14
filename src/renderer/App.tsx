@@ -17,6 +17,7 @@ import { resolveTerminalRenderer } from '../shared/webgl'
 import { resolveTerminalTheme } from './terminal/themes'
 import { resolveUiScale } from '../shared/ui-scale'
 import { useAppTheme } from './state/useAppTheme'
+import { installWindowActivityOnDocument } from './lib/windowActivity'
 
 export default function App() {
   // Apply the terminal-rendering setting to the two GPU coordinators, live. 'auto' is
@@ -43,6 +44,14 @@ export default function App() {
     const { background } = resolveTerminalTheme(terminalTheme).theme
     if (background) document.documentElement.style.setProperty('--term-bg', background)
   }, [terminalTheme])
+
+  // Hold every infinite CSS animation still while nobody is looking at this window (the gate is
+  // `--nt-anim-state` / `[data-nt-window]` in styles.css, where the measurements live). Installed
+  // here rather than in Canvas because the surfaces that animate outside the canvas — the
+  // onboarding scenes, the settings spinners, the sessions sidebar — are mounted here too, and a
+  // gate that covers most of the animations buys nothing: one that keeps running keeps the
+  // compositor producing frames, which is the entire cost.
+  useEffect(() => installWindowActivityOnDocument(), [])
 
   // Publish the resolved appearance as `data-theme` on <html> — what the light palette in
   // styles.css keys off. Absent, or 'dark', leaves every token at its original value, so this one

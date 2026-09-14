@@ -543,6 +543,17 @@ tmux without carrying `TMUX_TMPDIR` into it, which is the one way left to escape
 `src/core/tmux-socket-isolation.guard.test.ts` holds the short allowlist of suites that name a
 production socket on purpose; adding a third is a review conversation, not a checkbox.
 
+**An `infinite` CSS animation is a frame loop, and it runs whether or not anyone is looking.** A
+running animation makes the compositor produce a frame every vsync — 120/s on a ProMotion display —
+and re-raster the window each time; measured on a 40-terminal canvas, ONE visible pulsing node took
+idle CPU from 1.5 % to 33 %, and twenty took it to 101 %. The cost is paid once for the window, so
+the step is at the FIRST animation, not the twentieth. Two consequences when you add one: give it
+`animation-play-state: var(--nt-anim-state);` right after the shorthand so it joins the idle-window
+gate (`src/renderer/styles.animation-gate.test.ts` fails if you forget, because one ungated
+animation takes the whole win back), and prefer a static state to a pulse wherever the pulse is not
+carrying information the user needs at a glance. The full measurement table and the reasoning are
+in CLAUDE.md § Idle energy.
+
 ## Pull requests
 
 - Branch from `main`. CI runs `quality`, `CodeQL` and `Dependency review`; all three are required.

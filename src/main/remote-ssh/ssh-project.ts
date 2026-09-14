@@ -1272,7 +1272,7 @@ export class SshProjectManager {
    * Called on project delete BEFORE disconnect, so the remote `nt-<id>` sessions are killed
    * regardless of whether the nodes were mounted (only the active project's nodes are). `nodeIds`
    * are raw node ids; we map each to its `nt-<id>` session name (the same name `spawnSession` /
-   * `remoteTmuxHasSessionArgs` use). Best-effort per id, a missing session is ignored.
+   * `remoteListSessionsArgs` reports). Best-effort per id, a missing session is ignored.
    *
    * `everySocket` widens the kill to EVERY tmux socket on the host instead of just the
    * `nodeterm-rmt` one an SSH project spawns on, and it is **opt-in for one caller**. The

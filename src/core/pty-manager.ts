@@ -22,7 +22,8 @@ import { hookServer, PERM_WAIT_SECS_DEFAULT } from './agents/hook-server'
 import {
   probeSaysAbsent,
   remoteHookEnvArgs,
-  remoteTmuxHasSessionArgs,
+  remoteListSessionsArgs,
+  parseRemoteSessionNames,
   remoteTmuxKillArgs,
   localKillSockets,
   localTmuxKillArgs,
@@ -41,6 +42,8 @@ import {
   type RemoteEndPlan,
   type RemoteNodeOwnerResolver
 } from './remote-end'
+import { RemoteSessionIndex } from './remote-ssh/remote-session-index'
+import type { SshConnection } from '../shared/ssh'
 import { recordPendingRemoteKill, type PendingRemoteKill } from './pending-remote-kills'
 import { probeAgentSockToPin } from './remote-ssh/agent-probe'
 import { parsePaneCursor } from './pane-cursor'
@@ -2339,22 +2342,39 @@ export class PtyManager {
   /** Does the node's remote tmux session exist (over the project's ControlMaster)? Async so the
    *  network round-trip never blocks the main event loop. A probe that FAILED for transport
    *  reasons answers "exists": only tmux's own exit 1 is evidence of absence (probeSaysAbsent) —
-   *  a dead/reconnecting master read as "cold" typed a resume command into a live agent session. */
+   *  a dead/reconnecting master read as "cold" typed a resume command into a live agent session.
+   *
+   *  ONE `list-sessions` per host per burst, not one `has-session` per node: a project switch
+   *  mounts every node in the same tick, and N probe channels on top of N pty channels overruns a
+   *  stock host's `MaxSessions`, which costs each excess child a full TCP+auth login. The whole
+   *  measurement is in `remote-session-index.ts`. The verdict contract is identical either way. */
   private async remoteSessionExists(
     sshRemote: NonNullable<PtyCreateOptions['sshRemote']>,
     sessionId: string
   ): Promise<boolean> {
-    const ssh = findSsh()
-    if (!ssh) return true // can't probe → not evidence of absence; warm attach types nothing
-    try {
-      await runAsync(ssh, remoteTmuxHasSessionArgs(sshRemote.conn, sshRemote.controlPath, sessionId), {
-        timeout: PROBE_TIMEOUT_MS
-      })
-      return true
-    } catch (e) {
-      return !probeSaysAbsent(e)
-    }
+    return this.remoteSessions.exists(sshRemote.controlPath, sessionId, sshRemote.conn)
   }
+
+  /** One coalesced remote `tmux list-sessions` per ControlMaster (see remote-session-index.ts).
+   *  `list` carries the SAME classification the per-node probe had: tmux's own exit 1 ("no server
+   *  running") is the only evidence of absence; ssh 255 / 127 / a timeout answer `unknown`, which
+   *  the index renders as "exists" — a warm attach, which types nothing into the pane. */
+  private remoteSessions = new RemoteSessionIndex<SshConnection>({
+    list: async (controlPath, conn) => {
+      const ssh = findSsh()
+      // No ssh binary to probe with: not evidence of absence.
+      if (!ssh) return { kind: 'unknown' }
+      try {
+        const { stdout } = await runAsync(ssh, remoteListSessionsArgs(conn, controlPath), {
+          timeout: PROBE_TIMEOUT_MS
+        })
+        return { kind: 'names', names: parseRemoteSessionNames(stdout) }
+      } catch (e) {
+        // `list-sessions` exits 1 with "no server running" — the host genuinely holds no session.
+        return probeSaysAbsent(e) ? { kind: 'names', names: [] } : { kind: 'unknown' }
+      }
+    }
+  })
 
   /** Find the live session registered under a node id (persistKey), if any. */
   private sessionByPersistKey(persistKey: string): Session | undefined {
@@ -2989,6 +3009,10 @@ export class PtyManager {
           '[pty] remote session env skipped (no remote home or no uploader) — agent will launch without gateway/custom env'
         )
       }
+      // `new-session -A` is about to make this session exist on the host. Record it, so a second
+      // look inside the index's cache window (a respawn, a co-attach) cannot be told it is cold —
+      // which is what makes the renderer replay a snapshot and type a resume line into a live pane.
+      this.remoteSessions.markPresent(options.sshRemote.controlPath, sessionName(options.persistKey))
       args = remoteTmuxPtyArgs(
         options.sshRemote.conn,
         options.sshRemote.controlPath,
@@ -4760,6 +4784,9 @@ export class PtyManager {
       await owe(plan.reason)
       return
     }
+    // The host's session set is about to change under the cached list; drop it rather than let a
+    // recreate inside the window read as warm.
+    this.remoteSessions.invalidate(plan.controlPath)
     try {
       await this.confirmedProcessRun(
         plan.ssh,

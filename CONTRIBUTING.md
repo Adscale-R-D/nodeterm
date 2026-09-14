@@ -500,6 +500,27 @@ yourself and apply it with `setViewport` (`renderer/lib/nodeFocus.ts`, `canvas/f
 lands now and against the canvas you meant. `fitAll` is the one deliberate exception: an explicit
 user gesture on a settled canvas.
 
+**A context menu is two levels deep, and the third level is discarded in silence.**
+`ContextMenu` renders a submenu's children with
+`if (child.type === 'colors' || child.type === 'submenu') return null` — no error, no warning,
+nothing on screen. That matters most where you cannot see it: Claude's and Codex's **account
+pickers are themselves submenus**, so moving one of those rows into another submenu deletes the
+account picker for exactly the users who have managed accounts, and looks perfect to everyone
+else. If you group rows in an add menu, get the decision from `isPinnedAgentEntry`
+(`renderer/lib/addMenuSpec`) rather than judging by eye — and never spell an agent id there: which
+rows stay at the top is derived from the row's own shape plus `ACCOUNT_CAPABLE_AGENT_IDS`, so a new
+agent is handled the day it is added. The cap is measured in
+`components/ContextMenu.submenu-depth.test.tsx`; if you teach the component a third level, that
+test tells you which pin to revisit.
+
+**Adding a node kind means touching the add menus once, not four times.**
+`renderer/lib/addMenuSpec` owns which kinds are addable and how they are grouped, for the canvas
+pane right-click, the sessions-sidebar "+" and the Dock. `ADD_ITEM_GROUP` is a total `Record` over
+the kind union, so a new kind is a **compile error** until you route it. The kanban column's
+"+ New session" is deliberately not a consumer — it can only offer kinds that become a card — and
+`addMenuSpec.surfaces.test.ts` pins that split so "make them all consistent" stays a decision
+rather than a reflex.
+
 **A setting read at mount reads the DEFAULT, not the user's.** `useSettings` starts on
 `DEFAULT_SETTINGS` and hydrates from disk asynchronously, while `<Canvas />` is mounted before that
 lands. A `useState(() => settings.foo ? ...)` initializer therefore reads the shipped default and

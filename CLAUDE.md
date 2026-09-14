@@ -3213,6 +3213,47 @@ the Settings section and ShortcutsPanel start disagreeing about what a chord mea
   be hidden, whatever settings.json says. The group-frame menu's colors strip answers to the same
   `colors` id; builders run through `tidySeparators` so a hidden row leaves no dangling rule.
 - **Add menu** = bottom dock (`Dock.tsx`) `+`, mirrored by the pane menu and command palette.
+  `lib/addMenuSpec` is the one source for WHICH kinds are addable, and since 2026-09 also for how
+  the two `ContextMenu` surfaces GROUP them: `New terminal` · `New remote…` · the account-capable
+  agents · `New agent ▸` · `New view ▸` · `Files ▸` · `Orchestrate ▸`, then the canvas actions. It
+  replaced a flat 18-row list, on the rationale that ⌘K already makes every one of these
+  searchable and the keybinding registry already carries a remappable command per agent and per
+  node kind (`node.new*`) — so this menu does not have to be EXHAUSTIVE, it has to be FAST.
+  Four rules hold it together, and the first is the one that is easy to get wrong:
+  - **The submenu depth cap is STRUCTURAL.** `ContextMenu` renders a submenu's children with
+    `if (child.type === 'colors' || child.type === 'submenu') return null` — a third level is
+    dropped with no error and nothing on screen. Claude's and Codex's **account pickers are already
+    level-two submenus**, so nesting either row behind `New agent ▸` would silently delete the
+    account picker for exactly the users who have managed accounts. MEASURED, not assumed, in
+    `components/ContextMenu.submenu-depth.test.tsx`; teach the component a third level and that
+    test goes red so the pin can be reconsidered deliberately.
+  - **Which agent rows stay at the first level is DERIVED, never a spelled-out agent id**
+    (`isPinnedAgentEntry`): a row that IS a submenu (structural, per above) **or** whose agent is in
+    `ACCOUNT_CAPABLE_AGENT_IDS` (`shared/agents/account-binding.ts` — the same list `boundAccountId`
+    reads, so a third agent gaining managed accounts cannot light up one and not the other). The
+    second half exists because rule one alone would move Codex in and out of the submenu as the
+    user adds or removes accounts, and a menu that rearranges itself is a menu nobody can learn.
+    A new builtin agent joins `New agent ▸` by itself; one that gains accounts is promoted by itself.
+  - **`ADD_ITEM_GROUP` is a total `Record` over the kind union on purpose** — a new `AddItem` kind
+    is a compile error until somebody routes it, instead of silently landing in one bucket forever.
+    `remote` stays top-level because it is not an agent: burying the one SSH-session entry point
+    under a menu named "New agent" puts it where nobody would look.
+  - **Grouping is a rearrangement, never a filter, and a nested row keeps its REASON.** The rows
+    still come from `contentAddItemsToMenuItems`, so `New worktree…` is greyed with
+    `WORKTREE_SSH_HINT` inside `Orchestrate ▸` exactly as it was at the top level (the cap drops
+    nested submenus, never a leaf's `disabled`/`hint`). Tests pin that nothing becomes unreachable.
+  **Per surface**: the pane right-click and the sessions-sidebar project-header "+" share the
+  grouped tree (`buildGroupedAddMenu`); the **group-frame** menu shares the agent half
+  (`agentEntriesToMenuItems`) and keeps its own three content rows; the **Dock stays FLAT** (its
+  popup is opened deliberately, it already omits terminal + remote, and its agent flyouts are
+  bespoke JSX — grouping it means a second submenu implementation for crowding nobody reported);
+  the **kanban column "+ New session" is NOT a consumer of the spec and never was** — its
+  `KanbanCreateChoice` is a closed union of the kinds that become a CARD, so feeding it this list
+  would offer kinds the board can never show. `addMenuSpec.surfaces.test.ts` pins all four.
+  None of the add rows are in `ui-visibility`'s hide inventory (it covers the NODE menu and the
+  terminal header), so grouping does not interact with hiding today; a future hideable add row
+  would need the group's own row to disappear when it empties, which `buildGroupedAddMenu` already
+  does — it emits no submenu for an empty bucket.
 - **Edges** are all one React Flow type, `floating` (`canvas/FloatingEdge.tsx` over the pure
   `lib/floatingEdge.ts`): every family — ropes, context bridges, note links, subagent/loop card
   edges, trigger edges — is drawn between the midpoints of the two nodes' facing sides instead of

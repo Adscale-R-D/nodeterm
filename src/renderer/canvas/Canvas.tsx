@@ -165,7 +165,9 @@ import {
 import { planServerChange } from '../lib/serverChange'
 import {
   CONTENT_ADD_ITEMS,
-  contentAddItemsToMenuItems,
+  agentEntriesToMenuItems,
+  buildGroupedAddMenu,
+  type AgentAddEntry,
   type AddHandlers
 } from '../lib/addMenuSpec'
 import { planSetProjectFolder } from '../lib/setProjectFolder'
@@ -8492,10 +8494,15 @@ export function Canvas() {
     session.source
   ])
 
-  /** "New <agent>" creation entries shared by the pane and group context menus.
-   *  `at` is the flow position to create at; with `groupId` the node is parented into that group. */
-  const agentCreationItems = useCallback(
-    (at?: { x: number; y: number }, groupId?: string): MenuItem[] => {
+  /** "New <agent>" creation entries shared by the pane, sidebar and group context menus.
+   *  `at` is the flow position to create at; with `groupId` the node is parented into that group.
+   *
+   *  Each row is TAGGED with its agent id ({@link AgentAddEntry}) because the grouped menu has to
+   *  decide which rows may be nested behind "New agent ▸" and which must stay at the first level —
+   *  a decision `isPinnedAgentEntry` makes from the id and the row's own shape, never from a
+   *  hardcoded agent name here. */
+  const agentCreationEntries = useCallback(
+    (at?: { x: number; y: number }, groupId?: string): AgentAddEntry[] => {
       const disabled = useSettings.getState().settings.disabledAgents
       // Read the active project LIVE from the store (not the closure value) so a menu built right
       // after a `switchProject` — e.g. the sessions-sidebar "+" opening this menu on a non-active
@@ -8532,93 +8539,99 @@ export function Canvas() {
         undefined,
         useSystemCodexAccount.getState().email
       )
-      return [
-        ...BUILTIN_AGENT_IDS.filter((aid) => !disabled.includes(aid)).map((aid): MenuItem => {
-          // Claude gets an account picker submenu when ≥1 account exists. The System row is an
-          // EXPLICIT pick (`null`), never "no pick": before that distinction, clicking the row
-          // labelled with the user's system email launched the PROJECT DEFAULT managed account
-          // (#419). Other agents stay flat (accounts are Claude-only).
-          if (aid === 'claude' && (accounts.length > 0 || accountsHint)) {
-            return {
-              type: 'submenu',
-              label: `New ${AGENT_CONFIG[aid].label}`,
-              icon: <AgentIcon agentId={aid} />,
-              children: [
-                {
-                  label: withDefaultMark(systemLabel),
-                  icon: <AgentIcon agentId="claude" />,
-                  onClick: () => addAgentNode('claude', at, groupId, null)
-                },
-                ...accounts.map(
-                  (a): MenuItem => ({
-                    label: withDefaultMark(a.label, a.id),
-                    icon: <AgentIcon agentId="claude" />,
-                    onClick: () => addAgentNode('claude', at, groupId, a.id)
-                  })
-                ),
-                ...(accountsHint
-                  ? [
-                      {
-                        label: 'No accounts on this host yet',
-                        onClick: () => {},
-                        disabled: true,
-                        hint: accountsHint
-                      } satisfies MenuItem
-                    ]
-                  : [])
-              ]
-            }
-          }
-          // Codex gets its own account picker submenu when ≥1 managed account lives on this
-          // project's machine (S6 §3.4). Every managed row is gated through `codexAccountSelectable`
-          // — a missing/hostile/unconnected account renders DISABLED, so the fail-closed refusal is
-          // enforced before the click, and again in `addAgentNode` (the UI is not the boundary).
-          if (aid === 'codex' && codexAccountsHere.length > 0) {
-            return {
-              type: 'submenu',
-              label: `New ${AGENT_CONFIG[aid].label}`,
-              icon: <AgentIcon agentId={aid} />,
-              children: [
-                {
-                  label: codexSystemLabel,
-                  icon: <AgentIcon agentId="codex" />,
-                  onClick: () => addAgentNode('codex', at, groupId)
-                },
-                ...codexAccountsHere.map((a): MenuItem => {
-                  const sel = codexAccountSelectable(
-                    a.id,
-                    codexAccountsHere,
-                    connectedProjectIdForHost
-                  )
-                  return {
-                    label: a.label,
-                    icon: <AgentIcon agentId="codex" />,
-                    disabled: !sel.ok,
-                    hint: sel.ok
-                      ? undefined
-                      : sel.reason === 'no-connection'
-                        ? 'This account lives on a host that is not connected — connect its SSH project first.'
-                        : 'This account is no longer available.',
-                    onClick: () => addAgentNode('codex', at, groupId, a.id)
-                  }
-                })
-              ]
-            }
-          }
+      const itemForBuiltin = (aid: (typeof BUILTIN_AGENT_IDS)[number]): MenuItem => {
+        // Claude gets an account picker submenu when ≥1 account exists. The System row is an
+        // EXPLICIT pick (`null`), never "no pick": before that distinction, clicking the row
+        // labelled with the user's system email launched the PROJECT DEFAULT managed account
+        // (#419). Other agents stay flat (accounts are Claude-only).
+        if (aid === 'claude' && (accounts.length > 0 || accountsHint)) {
           return {
+            type: 'submenu',
             label: `New ${AGENT_CONFIG[aid].label}`,
             icon: <AgentIcon agentId={aid} />,
-            onClick: () => addAgentNode(aid, at, groupId)
+            children: [
+              {
+                label: withDefaultMark(systemLabel),
+                icon: <AgentIcon agentId="claude" />,
+                onClick: () => addAgentNode('claude', at, groupId, null)
+              },
+              ...accounts.map(
+                (a): MenuItem => ({
+                  label: withDefaultMark(a.label, a.id),
+                  icon: <AgentIcon agentId="claude" />,
+                  onClick: () => addAgentNode('claude', at, groupId, a.id)
+                })
+              ),
+              ...(accountsHint
+                ? [
+                    {
+                      label: 'No accounts on this host yet',
+                      onClick: () => {},
+                      disabled: true,
+                      hint: accountsHint
+                    } satisfies MenuItem
+                  ]
+                : [])
+            ]
           }
-        }),
+        }
+        // Codex gets its own account picker submenu when ≥1 managed account lives on this
+        // project's machine (S6 §3.4). Every managed row is gated through `codexAccountSelectable`
+        // — a missing/hostile/unconnected account renders DISABLED, so the fail-closed refusal is
+        // enforced before the click, and again in `addAgentNode` (the UI is not the boundary).
+        if (aid === 'codex' && codexAccountsHere.length > 0) {
+          return {
+            type: 'submenu',
+            label: `New ${AGENT_CONFIG[aid].label}`,
+            icon: <AgentIcon agentId={aid} />,
+            children: [
+              {
+                label: codexSystemLabel,
+                icon: <AgentIcon agentId="codex" />,
+                onClick: () => addAgentNode('codex', at, groupId)
+              },
+              ...codexAccountsHere.map((a): MenuItem => {
+                const sel = codexAccountSelectable(
+                  a.id,
+                  codexAccountsHere,
+                  connectedProjectIdForHost
+                )
+                return {
+                  label: a.label,
+                  icon: <AgentIcon agentId="codex" />,
+                  disabled: !sel.ok,
+                  hint: sel.ok
+                    ? undefined
+                    : sel.reason === 'no-connection'
+                      ? 'This account lives on a host that is not connected — connect its SSH project first.'
+                      : 'This account is no longer available.',
+                  onClick: () => addAgentNode('codex', at, groupId, a.id)
+                }
+              })
+            ]
+          }
+        }
+        return {
+          label: `New ${AGENT_CONFIG[aid].label}`,
+          icon: <AgentIcon agentId={aid} />,
+          onClick: () => addAgentNode(aid, at, groupId)
+        }
+      }
+      return [
+        ...BUILTIN_AGENT_IDS.filter((aid) => !disabled.includes(aid)).map(
+          (aid): AgentAddEntry => ({ agentId: aid, item: itemForBuiltin(aid) })
+        ),
         ...useSettings
           .getState()
           .settings.customAgents.filter((c) => !disabled.includes(c.id))
           .map(
-            (c): MenuItem => ({
-              label: `New ${c.label}`,
-              icon: <AgentIcon agentId={c.id} />,
-              onClick: () => addAgentNode(c.id, at, groupId)
+            (c): AgentAddEntry => ({
+              agentId: c.id,
+              item: {
+                label: `New ${c.label}`,
+                icon: <AgentIcon agentId={c.id} />,
+                onClick: () => addAgentNode(c.id, at, groupId)
+              }
             })
           )
       ]
@@ -8671,7 +8684,11 @@ export function Canvas() {
           icon: <IconTerminal />,
           onClick: () => addTerminal(at, undefined, groupId)
         },
-        ...agentCreationItems(at, groupId),
+        // Same agent grouping as the pane menu (`New agent ▸` behind the account-capable rows), so
+        // one canvas does not show two different shapes for the same list. This menu's three
+        // content rows are hand-written and deliberately left alone — a frame offers the kinds
+        // that make sense INSIDE a frame, which is not the pane's full list.
+        ...agentEntriesToMenuItems(agentCreationEntries(at, groupId)),
         { label: 'New sticky note', icon: <IconNote />, onClick: () => addSticky(at, groupId) },
         // Inside a worktree-bound frame this roots the manager at the WORKTREE, not the project —
         // `cwdForNewNodeIn` is what makes a frame per branch also mean a file tree per branch.
@@ -8710,7 +8727,7 @@ export function Canvas() {
       openWorktreeDialog,
       isSshProject,
       addTerminal,
-      agentCreationItems,
+      agentCreationEntries,
       addSticky,
       addToExistingGroup,
       groupSelection
@@ -8758,7 +8775,7 @@ export function Canvas() {
   // CONTENT items from (see lib/addMenuSpec.ts). Built once here so the pane menu, the sidebar
   // project-header "+", and any other ContextMenu-based surface pass the same handlers and can no
   // longer drift on which kinds are addable. Agent entries are layered on by each surface from
-  // `agentCreationItems` (already shared) — the spec owns the content list only.
+  // `agentCreationEntries` (already shared) — the spec owns the content list only.
   const addCtx = useMemo(
     () => ({
       hasCwd: !!(useProjects.getState().getProject(activeProjectId)?.ssh?.remoteCwd ??
@@ -8802,13 +8819,15 @@ export function Canvas() {
       e.preventDefault()
       const at = screenToFlowPosition({ x: e.clientX, y: e.clientY })
       const screenPos = { x: e.clientX, y: e.clientY }
-      // Split the canonical content list around the agent block: the pane menu shows terminal,
-      // THEN agents, THEN the rest (remote, browser, …, worktree). The spec is still the single
-      // source for WHICH kinds appear and in what order — only the agent interleaving is local.
-      const [terminalItem, ...restContent] = contentAddItemsToMenuItems(
+      // GROUPED (see lib/addMenuSpec): terminal + remote, the account-capable agents, then
+      // `New agent ▸` / `New view ▸` / `Files ▸` / `Orchestrate ▸`. The spec is still the single
+      // source for WHICH kinds appear, in what order, and with which disabled reason — this
+      // surface only chooses to render the grouped tree rather than the flat list.
+      const items = buildGroupedAddMenu(
         CONTENT_ADD_ITEMS,
         addHandlers,
         addCtx,
+        agentCreationEntries(at),
         at,
         screenPos
       )
@@ -8816,9 +8835,7 @@ export function Canvas() {
         x: e.clientX,
         y: e.clientY,
         items: [
-          terminalItem,
-          ...agentCreationItems(at),
-          ...restContent,
+          ...items,
           { type: 'separator' },
           // Canvas actions.
           { label: 'Select all', icon: <IconSelectAll />, onClick: selectAll },
@@ -8848,7 +8865,7 @@ export function Canvas() {
     },
     [
       screenToFlowPosition,
-      agentCreationItems,
+      agentCreationEntries,
       addHandlers,
       addCtx,
       selectAll,
@@ -12350,20 +12367,22 @@ export function Canvas() {
       // project LIVE (`useProjects.getState()`) at click time, guarded by `canCreateOnCanvas`.
       if (projectId !== activeProjectId) switchProject(projectId)
       const pos = e ? { x: e.clientX, y: e.clientY } : { x: 80, y: 120 }
-      const [terminalItem, ...restContent] = contentAddItemsToMenuItems(
-        CONTENT_ADD_ITEMS,
-        addHandlers,
-        addCtx,
-        undefined,
-        pos
-      )
       setMenu({
         x: pos.x,
         y: pos.y,
-        items: [terminalItem, ...agentCreationItems(), ...restContent]
+        // The SAME grouped tree the pane right-click builds — this surface exists to mirror that
+        // menu, so it must not be the one place that still renders the flat 18-row list.
+        items: buildGroupedAddMenu(
+          CONTENT_ADD_ITEMS,
+          addHandlers,
+          addCtx,
+          agentCreationEntries(),
+          undefined,
+          pos
+        )
       })
     },
-    [activeProjectId, switchProject, addHandlers, addCtx, agentCreationItems]
+    [activeProjectId, switchProject, addHandlers, addCtx, agentCreationEntries]
   )
 
   // Sidebar drag-to-group: reparent a session into a canvas group (groupId) or out (null).

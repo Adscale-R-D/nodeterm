@@ -30,6 +30,7 @@ import {
   type ListSessionsResult
 } from './protocol'
 import { HostSession } from './session'
+import { sendKeysWrites } from './send-keys-delivery'
 import { paneCommand as readPaneCommand } from './process-tree'
 import { terminateWindowsProcessTree } from './windows-process-tree'
 import { publishSessionHostState } from './state-file'
@@ -804,7 +805,13 @@ async function main(): Promise<void> {
       case 'sendKeys': {
         const s = sessions.get(req.name)
         if (!s || s.exited) return { ok: false, error: 'no such session' }
-        s.proc.write(req.text + (req.enter ? '\r' : ''))
+        // Framed from the pane's REAL bracketed-paste state, with the Enter as its own write —
+        // the session host's equivalent of tmux's `paste-buffer -p` + `send-keys Enter`. See
+        // send-keys-delivery.ts; the mode read crosses the emulator tail, so re-check liveness
+        // after it rather than writing into a session that exited meanwhile.
+        const bracketed = await s.bracketedPasteRequested()
+        if (s.exited || sessions.get(req.name) !== s) return { ok: false, error: 'no such session' }
+        for (const chunk of sendKeysWrites(req.text, req.enter, bracketed)) s.proc.write(chunk)
         return { ok: true }
       }
       case 'paneCommand': {

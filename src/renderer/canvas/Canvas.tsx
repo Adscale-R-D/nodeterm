@@ -7914,7 +7914,7 @@ export function Canvas() {
           lastNodeId: useTerminalFocus.getState().lastNodeId,
           activeElement: document.activeElement as unknown as ContextElement | null,
           openDialogs: openDialogCount(),
-          boardOpen: isKanbanOpen(activeProjectId),
+          boardOpen: isGlobalKanbanOpen() || isKanbanOpen(activeProjectId),
           settingsOpen: settingsOpenRef.current,
           liveIds
         })

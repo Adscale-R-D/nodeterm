@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest'
+import { readFileSync } from 'fs'
+import { join } from 'path'
 import { nodeToRefocus, type FocusRestoreState } from './focusRestore'
 import { XTERM_INPUT_CLASS } from './keyContext'
 
@@ -19,6 +21,14 @@ const state = (over: Partial<FocusRestoreState> = {}): FocusRestoreState => ({
 })
 
 describe('nodeToRefocus', () => {
+  // The predicate cannot see which boards exist; the canvas decides what `boardOpen` means. The
+  // Omni Kanban covers the canvas exactly like a per-project board, so leaving it out restored
+  // keyboard focus into a terminal hidden under the global board.
+  it('receives both project and global kanban visibility from the canvas', () => {
+    const source = readFileSync(join(process.cwd(), 'src/renderer/canvas/Canvas.tsx'), 'utf8')
+    expect(source).toContain('boardOpen: isGlobalKanbanOpen() || isKanbanOpen(activeProjectId)')
+  })
+
   it('restores the last focused terminal when nothing else owns the keyboard', () => {
     expect(nodeToRefocus(state())).toBe('term-1')
   })

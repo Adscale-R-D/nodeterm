@@ -907,6 +907,64 @@ Two additive changes, and the rules that keep them safe:
     attempt in flight. `closeProject` is non-destructive, so a closed tab is the user saying "not
     now".
 
+### When a freshness verdict was a GUESS: the late cold-start check
+
+The cold-restore section above states the rule that makes the remote freshness read safe: only
+tmux's own exit 1 is evidence of absence, and every other outcome answers "exists", because a
+transport failure read as "cold" types `claude --resume …` into a LIVE agent pane. That rule is
+right and does not change. What it costs, and what this closes, is the other side of the fold.
+
+**THE INCIDENT (measured on the reporting host, 2026-09-15).** The host's `nodeterm-rmt` tmux
+server died, so every remote session was gone; ten minutes later a 108-node SSH project was opened
+and 107 sessions had to be created in one mount burst. sshd logged **757 `Accepted publickey` full
+logins in seven minutes** — on a healthy ControlMaster that number is ~0, because everything
+multiplexes over one connection. Under that pressure the freshness read times out, the fold answers
+"exists", `tmux new-session -A` CREATES an empty session, `fresh:false` skips cold restore, and the
+node sits at a bare shell with the user's conversation stranded on disk:
+
+    15:29 burst,  22 sessions: 18 claude /  4 bash  ->  82% resumed
+    15:39 burst, 107 sessions: 41 claude / 66 bash  ->  38% resumed
+
+Load-dependent, i.e. a race. Three changes, and the order matters — the first saves the
+conversation, the other two stop the burst that strands it:
+
+- **A second opinion, never a different fold.** `create()` now reports `freshUnverified` when
+  `fresh:false` came from an `unknown` verdict rather than a read. The renderer re-asks ONCE, after
+  the attach has landed and the burst is over, and tmux settles it authoritatively:
+  `#{session_created}` survives a `new-session -A` attach, so a session created within seconds of
+  our own attach is one WE made (`PtyApi.sessionAge` → `remoteSessionAgeArgs`, which prints the
+  stamp AND the host's `date +%s` on one line so the host's clock skew never enters the number).
+  Every rule in `renderer/terminal/cold-self-heal.ts` is a refusal: never for a verdict that was
+  READ (that would spend a round trip per warm node on every switch), never for an unknown age,
+  never past the window, and never unless a SHELL still owns the pane — the same gate the
+  hibernation wake and the resume-miss watcher keep. The scrollback replay is deliberately NOT
+  re-run: by then tmux has painted the live pane, and writing a snapshot over it splices two points
+  in time (the warm-attach seeding rule). The agent relaunch is what matters and is what runs.
+- **The per-node token write is coalesced, not gated** — the brief that prompted this said
+  `ensureRemoteNodeToken` bypassed the `SshChildGate`, and that was measurably wrong: main wires
+  `RemoteHooks` with the gated runner, so it queues like everything else. The real cost was that it
+  is one round trip PER SPAWN for work the connect path already did (`materialiseNodeTokens` writes
+  every node's token), competing for a budget of 6 for the whole burst. It now memoizes per
+  (control path, node) for the app run — seeded by the connect — and coalesces a burst into ONE
+  remote write.
+- **Remote pty spawns are paced** (`core/remote-ssh/pty-spawn-gate.ts`, cap 4 per ControlMaster).
+  A pty deliberately never went through the `SshChildGate` — "a terminal is never queued for a
+  screen the user is looking at" — which is right for a handful of terminals and wrong for a
+  canvas. The one thing that makes pacing acceptable is that a slot is held only until the session
+  starts painting: released on the pty's FIRST OUTPUT (one round trip for a warm attach) and
+  unconditionally after `REMOTE_PTY_SPAWN_SETTLE_MS`, because a gate that can hang is worse than no
+  gate. A node that ends up waiting SAYS so (`SLOW_REMOTE_SPAWN_NOTICE_MS`), for the same reason the
+  `[connecting…]` line exists. Measured in the lab (real sshd, `MaxSessions 10`, 50 ms RTT, one warm
+  master, 107 attaches):
+
+  | | full logins | panes painted | wall |
+  |---|---|---|---|
+  | ungated | 72 / 77 | 102 and 96 of 107 | 2.1 / 2.3 s |
+  | gated at 4 | **1** / **1** | **107 / 107** | 3.2 / 4.0 s |
+
+  Wall time is the price and it is the right trade: ungated, five to eleven panes never painted at
+  all inside a 20 s budget — the same shape `remote-session-index.ts` reports for its own burst.
+
 ### We have our own VT emulator — check it before asking tmux
 
 xterm.js is not just a renderer. It parses the pane's output stream, so it **tracks DECSET modes

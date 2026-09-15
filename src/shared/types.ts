@@ -182,6 +182,24 @@ export interface PaneCursor {
 export interface PtyCreateResult {
   sessionId: string
   fresh: boolean
+  /**
+   * `fresh` is FALSE, but the freshness read never completed — so "a session already exists" was a
+   * fold, not an answer (`RemoteSessionIndex`: only tmux's own exit 1 is evidence of absence, and
+   * every other outcome answers "exists" because typing `claude --resume …` into a live agent pane
+   * is the worse failure). SSH nodes only; a local `has-session` does not have this failure mode.
+   *
+   * Under a mount burst that overruns the host's `MaxSessions`, that fold is wrong often enough to
+   * matter: `tmux new-session -A` then CREATES an empty session, `fresh:false` skips cold restore,
+   * and the node sits at a bare shell with the user's conversation stranded on disk. MEASURED on
+   * the reporting host: of 107 sessions created in one switch, 66 ended at a bare shell — against
+   * 4 of 22 in a smaller burst minutes earlier, i.e. load-dependent, i.e. a race.
+   *
+   * The renderer re-asks ONCE after the attach has landed (tmux's own `#{session_created}` settles
+   * it; see `PtyApi.sessionAge`) and runs the cold-restore relaunch if the session turns out to be
+   * one we just made. Absent = the verdict was read, or this is not a remote node ⇒ nothing to
+   * re-ask.
+   */
+  freshUnverified?: boolean
   /** Set when the node's `accountId` had no config dir at spawn, so the session fell back to the
    *  system account. The renderer flags the account chip (folder-missing warning) when true. */
   accountFallback?: boolean
@@ -941,6 +959,16 @@ export interface PtyApi {
   generateGroupName(memberKeys: string[], cwd: string): Promise<GitResult>
   /** Capture a terminal session's output as text. `full` grabs the entire scrollback. */
   capture(persistKey: string, full?: boolean): Promise<string>
+  /**
+   * Seconds since this node's tmux session was created, measured on the machine that holds it, or
+   * `null` when that cannot be told (no session, no tmux, an unreadable host, a garbled answer).
+   *
+   * The late cold-start check behind `PtyCreateResult.freshUnverified`: `#{session_created}`
+   * survives a `new-session -A` attach, so a session created within seconds of our own attach is
+   * one we just made — i.e. the node was cold after all. `null` is never an age; the caller acts
+   * only on a small number.
+   */
+  sessionAge(persistKey: string): Promise<number | null>
   /**
    * Has the host behind `sshRemote.controlPath` POSITIVELY listed this node's remote tmux session?
    *

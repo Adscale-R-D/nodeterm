@@ -23,6 +23,9 @@ export const IPC = {
    *  Gates the early-attach path (attach as soon as the master answers `-O check`, before the
    *  connect's remote setup chain finishes); desktop-only, like SSH projects themselves. */
   ptyRemoteSessionConfirmed: 'pty:remote-session-confirmed',
+  /** Renderer → core: seconds since this node's tmux session was created, measured on the machine
+   *  that holds it (`PtyApi.sessionAge`). The late cold-start check behind `freshUnverified`. */
+  ptySessionAge: 'pty:session-age',
   ptyReadScrollback: 'pty:read-scrollback',
   ptySendText: 'pty:send-text',
   ptyTmuxStatus: 'pty:tmux-status',

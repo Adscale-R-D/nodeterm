@@ -53,6 +53,7 @@ import { hookServer } from '../../core/agents/hook-server'
 import {
   nodeIdsForCanvas,
   remoteNodeTokenMinter,
+  seedRemoteNodeTokens,
   setRemoteNodeTokenWriter
 } from '../../core/agents/node-token-service'
 import { setRemoteSessionEnvWriter } from '../../core/remote-ssh/session-env'
@@ -1521,6 +1522,10 @@ export class SshProjectManager {
       const ids = this.r.nodeIdsForProject?.(projectId) ?? []
       if (!ids.length) return
       await this.remoteHooks.writeNodeTokens(conn, controlPath, remoteHome, ids, mint)
+      // Tell the SPAWN path what this host now has, so a switch to this project does not re-ask for
+      // one round trip per node it already wrote (see `ensureRemoteNodeToken`). After the write, so
+      // a connect that never got that far claims nothing.
+      seedRemoteNodeTokens(controlPath, ids)
     } catch {
       /* fail-open: an identity file must never be able to fail a connect */
     }
@@ -1566,14 +1571,17 @@ export class SshProjectManager {
     }
   }
 
-  async writeNodeTokenForNode(controlPath: string, nodeId: string): Promise<void> {
+  async writeNodeTokenForNode(controlPath: string, nodeIds: readonly string[]): Promise<void> {
     try {
+      if (!nodeIds.length) return
       for (const c of this.conns.values()) {
         if (c.controlPath !== controlPath) continue
         if (!c.remoteHome || !c.hookEndpointPath) return
         const mint = this.r.nodeTokenMinter?.()
         if (!mint) return
-        await this.remoteHooks.writeNodeTokens(c.conn, c.controlPath, c.remoteHome, [nodeId], mint)
+        // A LIST, because the spawn path coalesces a mount burst into one call (see
+        // `ensureRemoteNodeToken`). `writeNodeTokens` already de-duplicates and gates each id.
+        await this.remoteHooks.writeNodeTokens(c.conn, c.controlPath, c.remoteHome, nodeIds, mint)
         return
       }
     } catch {
@@ -2582,8 +2590,8 @@ export function initSshProject(
   })
   // The spawn-path leg of the remote materialiser: `pty-manager` (core) reaches the ControlMaster
   // through this registration, because the runner that owns it lives here, in main.
-  setRemoteNodeTokenWriter((controlPath, nodeId) => {
-    void mgr.writeNodeTokenForNode(controlPath, nodeId)
+  setRemoteNodeTokenWriter((controlPath, nodeIds) => {
+    void mgr.writeNodeTokenForNode(controlPath, nodeIds)
   })
   // Same seam, same shape: the pty spawn path stages a remote session's env file (gateway/custom
   // values, argv-free) through the manager that owns the ssh runner. See core/remote-ssh/session-env.ts.

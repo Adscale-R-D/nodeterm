@@ -32,6 +32,8 @@ import {
   remotePasteDelivery,
   remoteCapturePaneArgs,
   remotePaneCommandArgs,
+  remoteSessionAgeArgs,
+  parseSessionAge,
   remotePaneOwnerCombinedArgs,
   remotePaneProcessArgs,
   remoteTerminateForegroundArgs,
@@ -42,7 +44,8 @@ import {
   type RemoteEndPlan,
   type RemoteNodeOwnerResolver
 } from './remote-end'
-import { RemoteSessionIndex } from './remote-ssh/remote-session-index'
+import { RemoteSessionIndex, type SessionVerdict } from './remote-ssh/remote-session-index'
+import { remotePtySpawnGate, type SpawnSlot } from './remote-ssh/pty-spawn-gate'
 import type { SshConnection } from '../shared/ssh'
 import { recordPendingRemoteKill, type PendingRemoteKill } from './pending-remote-kills'
 import { probeAgentSockToPin } from './remote-ssh/agent-probe'
@@ -585,6 +588,30 @@ function flowTicket(sub: SubKey | null, owner: FlowOwner): string {
  *  record for a client is comparable with the effective size we compute from all of them. */
 function normalizeSize(cols: number, rows: number): PtySize {
   return effectiveSize([{ cols, rows }]) as PtySize // one entry in ⇒ never null out
+}
+
+/**
+ * Hand a remote spawn's gate slot back the moment its pty produces its first byte — the cheapest
+ * signal that the ssh channel is up and the host has answered.
+ *
+ * Releases IMMEDIATELY when there is no session to listen to (a refusal, a discarded spawn), and
+ * the slot's own settle deadline covers a pty that never speaks. `onData` is an extra listener on
+ * the same pty the session already reads; it disposes itself on the first chunk.
+ */
+function releaseSpawnSlotOnOutput(session: Session | undefined, release: SpawnSlot): void {
+  if (!session) {
+    release()
+    return
+  }
+  try {
+    const sub = session.proc.onData(() => {
+      sub.dispose()
+      release()
+    })
+  } catch {
+    // A pty that cannot be listened to is one we cannot pace against; do not hold the queue for it.
+    release()
+  }
 }
 
 interface Session {
@@ -2156,11 +2183,17 @@ export class PtyManager {
     // (a cheap name-only `has-session` probe, decided before spawning anything) the session-host
     // backend's attach-or-create IS the probe — see the `spawned?.sessionHost` branch below, which
     // overwrites both `fresh` and `screen` from that same round trip once `spawnSession` returns.
+    // For an SSH node the freshness answer is TRI-STATE, and the third value is the point: a read
+    // that could not complete answers `unknown`, which folds to "exists" (never type a resume into
+    // a live agent pane) — but that fold is a GUESS, and under a mount burst that saturates the
+    // host's `MaxSessions` it is the WRONG guess often enough to strand a conversation. See
+    // `freshUnverified`; the renderer re-asks once, after the attach, when this is set.
+    const remoteVerdict = options.sshRemote
+      ? await this.remoteSessionVerdict(options.sshRemote, sessionName(options.persistKey as string))
+      : undefined
+    const freshUnverified = remoteVerdict === 'unknown'
     let fresh = options.sshRemote
-      ? !(await this.remoteSessionExists(
-          options.sshRemote,
-          sessionName(options.persistKey as string)
-        ))
+      ? remoteVerdict === 'absent'
       : warmWindowsBackend
         ? false
         : tmuxBacked
@@ -2208,14 +2241,27 @@ export class PtyManager {
         }
       }
     }
-    const sessionId = this.spawnSession(
-      options,
-      clientId,
-      undefined,
-      warmWindowsBackend,
-      projectOverrides
-    )
+    // PACE THE REMOTE SPAWNS (see remote-ssh/pty-spawn-gate.ts). A project switch mounts every node
+    // in one tick, and a remote terminal is an ssh client on the project's ONE multiplexed
+    // connection — past the host's `MaxSessions` each excess one performs a full login, and the
+    // pressure that creates is what makes the freshness read time out and strand a conversation.
+    // The slot is released on the session's first output, so a warm attach holds it for one round
+    // trip. Local spawns are not gated: there is no connection to overrun.
+    const spawnSlot =
+      options.sshRemote && options.persistKey
+        ? await remotePtySpawnGate.acquire(options.sshRemote.controlPath)
+        : null
+    let sessionId: string
+    try {
+      sessionId = this.spawnSession(options, clientId, undefined, warmWindowsBackend, projectOverrides)
+    } catch (err) {
+      // A spawn that never happened must not hold a slot until the settle deadline — the next node
+      // in the queue is waiting on it.
+      spawnSlot?.()
+      throw err
+    }
     const spawned = this.sessions.get(sessionId)
+    if (spawnSlot) releaseSpawnSlotOnOutput(spawned, spawnSlot)
     // PANE OWNERSHIP (agent messaging, PR #237 fix round 2): record the OWNING project of a pane
     // this process just GENUINELY spawned. Gated on `fresh` — an attach/co-attach to a session
     // someone else spawned (incl. an app-restart re-attach) leaves the pane UNPROVEN, so a second
@@ -2290,6 +2336,9 @@ export class PtyManager {
       sessionId,
       fresh,
       persistent,
+      // Only when the fold actually happened: a verdict we READ needs no second opinion, and
+      // setting this on a confident `fresh:false` would spend a round trip per warm node.
+      ...(freshUnverified && !fresh ? { freshUnverified: true as const } : {}),
       ...(accountFallback ? { accountFallback } : {}),
       ...(staleCwd ? { staleCwd: true as const } : {}),
       ...(screen ? { screen } : {})
@@ -2353,6 +2402,15 @@ export class PtyManager {
     sessionId: string
   ): Promise<boolean> {
     return this.remoteSessions.exists(sshRemote.controlPath, sessionId, sshRemote.conn)
+  }
+
+  /** The tri-state behind `remoteSessionExists`, for the one caller that must act on the
+   *  difference between "the host says it is not there" and "we could not read the host". */
+  private async remoteSessionVerdict(
+    sshRemote: NonNullable<PtyCreateOptions['sshRemote']>,
+    sessionId: string
+  ): Promise<SessionVerdict> {
+    return this.remoteSessions.verdict(sshRemote.controlPath, sessionId, sshRemote.conn)
   }
 
   /**
@@ -4138,6 +4196,57 @@ export class PtyManager {
         '#{pane_current_command}'
       ])
       return stdout.trim() || null
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * How many SECONDS ago was this node's tmux session created — on the machine that holds it?
+   *
+   * The late cold-start check (`PtyCreateResult.freshUnverified`). When the freshness read could
+   * not complete, `fresh:false` was a guess, and `tmux new-session -A` may have CREATED the very
+   * session we then treated as a warm reattach. tmux itself can settle that after the fact:
+   * `#{session_created}` survives an `-A` attach, so a session created within seconds of our own
+   * attach is one WE made, i.e. the node was cold.
+   *
+   * Remote answers are computed ENTIRELY on the host (`remoteSessionAgeArgs`) so the host's clock
+   * skew never enters the number; local ones compare tmux's stamp against this machine's own clock,
+   * which is the same clock.
+   *
+   * `null` is "we could not tell" for every reason there is — no live session, no tmux, the
+   * session-host backend (which has no creation stamp to offer), an unreadable host, a garbled
+   * line. Never an age, and never a throw: the caller ACTS on a small number, so every uncertainty
+   * has to come back as the value that means "do nothing".
+   */
+  async sessionAgeSeconds(persistKey: string): Promise<number | null> {
+    const target = sessionName(persistKey)
+    const live = this.liveSessionForPersistKey(persistKey)
+    const sshRemote = live?.sshRemote
+    if (sshRemote) {
+      const ssh = findSsh()
+      if (!ssh) return null
+      try {
+        const { stdout } = await runAsync(
+          ssh,
+          remoteSessionAgeArgs(sshRemote.conn, sshRemote.controlPath, target),
+          { timeout: PROBE_TIMEOUT_MS }
+        )
+        return parseSessionAge(stdout)
+      } catch {
+        return null
+      }
+    }
+    // The session-host backend keeps no creation stamp, and a plain shell has no session at all.
+    if (live?.sessionHost || !this.tmuxPath) return null
+    try {
+      const { stdout } = await runAsync(
+        this.tmuxPath,
+        ['-L', TMUX_SOCKET, 'display-message', '-p', '-t', `=${target}:`, '#{session_created}'],
+        { timeout: PROBE_TIMEOUT_MS }
+      )
+      // One clock here, so the host half of the remote line is ours to supply.
+      return parseSessionAge(`${stdout.trim()} ${Math.floor(Date.now() / 1000)}`)
     } catch {
       return null
     }

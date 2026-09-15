@@ -295,6 +295,9 @@ export async function startServer(
   platform.handle(IPC.ptyCapture, (persistKey: string, full?: boolean) =>
     ptyManager.captureSession(persistKey, full)
   )
+  // The late cold-start check (PtyCreateResult.freshUnverified). Pure core, and this shell runs on
+  // the machine whose tmux it reads, so the answer is as good as the desktop's local one.
+  platform.handle(IPC.ptySessionAge, (persistKey: string) => ptyManager.sessionAgeSeconds(persistKey))
 
   // fs + git + commit handlers (shared with desktop core services). The ticket store is shared
   // between the RPC side (which mints) and the HTTP side (which redeems) — one instance, so a

@@ -90,6 +90,8 @@ const api: NodeTerminalApi = {
     generateGroupName: (memberKeys, cwd) =>
       ipcRenderer.invoke(IPC.ptyGenerateGroupName, memberKeys, cwd),
     capture: (persistKey, full) => ipcRenderer.invoke(IPC.ptyCapture, persistKey, full),
+    remoteSessionConfirmed: (persistKey, sshRemote) =>
+      ipcRenderer.invoke(IPC.ptyRemoteSessionConfirmed, persistKey, sshRemote),
     readScrollback: (persistKey) => ipcRenderer.invoke(IPC.ptyReadScrollback, persistKey),
     sendText: (persistKey, text, opts) =>
       ipcRenderer.invoke(IPC.ptySendText, persistKey, text, opts?.enter),

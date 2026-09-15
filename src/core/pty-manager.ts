@@ -2355,6 +2355,36 @@ export class PtyManager {
     return this.remoteSessions.exists(sshRemote.controlPath, sessionId, sshRemote.conn)
   }
 
+  /**
+   * Was this node's remote tmux session POSITIVELY listed on the host? The strict half of the
+   * probe above, for the renderer's early-attach gate.
+   *
+   * `exists()` folds an unreadable host into "exists" because its caller is about to decide
+   * whether to type a resume command into a pane. This caller decides the opposite question —
+   * may a terminal attach over a ControlMaster whose connect-time setup (remote tmux.conf, the
+   * hook endpoint, the account env) has NOT finished yet — and there only a session that already
+   * exists is safe: `new-session -A` on a live session merely attaches, so `-f` and the tmux `-e`
+   * pairs (both creation-time only) are genuinely not needed. A session that is absent, or that we
+   * simply could not read, must wait for the full `connected` instead, or the create would make a
+   * session with no config and no hook env — which silently costs the node its agent-status badges.
+   *
+   * So: `true` ONLY for `present`; `absent` and `unknown` both answer false, and the caller waits.
+   * Shares the one coalesced `tmux list-sessions` per host with `create()`, so a warm switch pays
+   * no extra round trip (see remote-session-index.ts).
+   */
+  async remoteSessionConfirmed(
+    persistKey: string,
+    sshRemote: { controlPath: string; conn: SshConnection }
+  ): Promise<boolean> {
+    return (
+      (await this.remoteSessions.verdict(
+        sshRemote.controlPath,
+        sessionName(persistKey),
+        sshRemote.conn
+      )) === 'present'
+    )
+  }
+
   /** One coalesced remote `tmux list-sessions` per ControlMaster (see remote-session-index.ts).
    *  `list` carries the SAME classification the per-node probe had: tmux's own exit 1 ("no server
    *  running") is the only evidence of absence; ssh 255 / 127 / a timeout answer `unknown`, which

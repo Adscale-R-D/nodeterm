@@ -11,6 +11,20 @@ import type { SshConnection } from '@shared/ssh'
 
 const conn: SshConnection = { host: 'h', user: 'u' }
 
+/**
+ * The status PHASES a connect went through, with consecutive duplicates collapsed.
+ *
+ * A successful connect now emits `connecting` TWICE: once when the attempt starts, and once more
+ * the moment `ssh -O check` answers, carrying `masterControlPath` — the additive early signal that
+ * lets a terminal whose remote tmux session already exists attach without waiting out the remote
+ * setup chain (see SshProjectStatusEvent.masterControlPath). The phase sequence is what these
+ * assertions are about, so fold the repeat away rather than pinning an event count that says
+ * nothing. The early signal has its own tests in ssh-project.prewarm.test.ts.
+ */
+function phases(statuses: readonly string[]): string[] {
+  return statuses.filter((s, i) => s !== statuses[i - 1])
+}
+
 function makeMgr() {
   const statuses: string[] = []
   // spawnMaster: returns a fake child that "stays up"; run: resolves stdout for one-shot ssh.
@@ -34,7 +48,7 @@ describe('SshProjectManager', () => {
     const { controlPath } = await mgr.connect('p1', conn)
     expect(controlPath).toBe(controlPathFor('p1'))
     // (A later `connected` event can carry the async claude-CLI probe's answer, see below.)
-    expect(statuses.slice(0, 2)).toEqual(['connecting', 'connected'])
+    expect(phases(statuses).slice(0, 2)).toEqual(['connecting', 'connected'])
   })
 
   it('connect is idempotent, second call reuses the live master', async () => {
@@ -557,7 +571,7 @@ describe('SshProjectManager', () => {
       onStatus: (e) => events.push(e.status)
     })
     const res = await mgr.connect('p1', conn) // resolves while the probe is still hanging
-    expect(events).toEqual(['connecting', 'connected'])
+    expect(phases(events)).toEqual(['connecting', 'connected'])
     expect(res.claudeAutoPermissionMode).toBeUndefined() // unknown ⇒ bare command (fail-open)
     releaseProbe?.()
   })
@@ -1093,7 +1107,7 @@ describe('SshProjectManager', () => {
       expect(rmSpy).toHaveBeenCalledWith(controlPathFor('p1'), { force: true })
       expect(spawnMaster).toHaveBeenCalledTimes(1)
       expect(controlPath).toBe(controlPathFor('p1'))
-      expect(statuses.slice(0, 2)).toEqual(['connecting', 'connected'])
+      expect(phases(statuses).slice(0, 2)).toEqual(['connecting', 'connected'])
     })
 
     it('adopts a LIVE orphan master (whose hook tunnel verifies) instead of spawning a second one', async () => {
@@ -1120,7 +1134,7 @@ describe('SshProjectManager', () => {
       await mgr.connect('p1', conn)
       expect(spawnMaster).not.toHaveBeenCalled() // reused, not respawned
       expect(rmSpy).not.toHaveBeenCalled() // a live socket is never unlinked
-      expect(statuses.slice(0, 2)).toEqual(['connecting', 'connected'])
+      expect(phases(statuses).slice(0, 2)).toEqual(['connecting', 'connected'])
     })
 
     it('rebuilds a FRESH master when the adopted orphan cannot re-establish the hook tunnel', async () => {
@@ -1168,7 +1182,7 @@ describe('SshProjectManager', () => {
       expect(seq).toEqual(['agent', 'spawn']) // agent up BEFORE the rebuilt master, on this site too
       // The retried setup over the fresh master verified → the remote endpoint file is advertised.
       expect(info.hookEndpointPath).toBe('/home/u/.nodeterm/hook-endpoint-p1.env')
-      expect(statuses.slice(0, 2)).toEqual(['connecting', 'connected'])
+      expect(phases(statuses).slice(0, 2)).toEqual(['connecting', 'connected'])
     })
 
     it('the orphan-rebuild wait runs on connect-loop terms, not a fixed 5s inner loop', async () => {

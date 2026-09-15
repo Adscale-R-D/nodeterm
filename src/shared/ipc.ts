@@ -17,6 +17,12 @@ export const IPC = {
   ptyGenerateName: 'pty:generate-name',
   ptyGenerateGroupName: 'pty:generate-group-name',
   ptyCapture: 'pty:capture',
+  /** Renderer → core: has the host behind this ControlMaster POSITIVELY listed the node's remote
+   *  tmux session? The strict half of the coalesced `tmux list-sessions` read behind
+   *  `PtyManager.remoteSessionConfirmed` — an unreadable host answers false, not "assume warm".
+   *  Gates the early-attach path (attach as soon as the master answers `-O check`, before the
+   *  connect's remote setup chain finishes); desktop-only, like SSH projects themselves. */
+  ptyRemoteSessionConfirmed: 'pty:remote-session-confirmed',
   ptyReadScrollback: 'pty:read-scrollback',
   ptySendText: 'pty:send-text',
   ptyTmuxStatus: 'pty:tmux-status',

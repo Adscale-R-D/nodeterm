@@ -77,13 +77,27 @@ describe('an offscreen release keeps a tmux-backed session READY (source pins)',
 
 describe('an ARMED node does not cold-start its agent under the hold (source pins)', () => {
   it('the cold-restore relaunch is gated on there being no pendingLaunch', () => {
-    // A first open is `fresh` by definition, so without this every `--after` / `verify` node
+    // A first open is a cold start by definition, so without this every `--after` / `verify` node
     // launched a bare CLI on mount — and Canvas's held launch then arrived as TEXT typed into
     // the session the hold existed to prevent.
-    // Matched inside the condition rather than as one literal line: the branch also carries the
-    // `paused` gate (shouldColdResume), and the two guards are independent refusals that must
-    // both survive a reformat.
-    expect(src).toMatch(/fresh &&\s*\n?\s*agentId &&\s*\n?\s*canResume\(agentId\) &&\s*\n?\s*!data\.pendingLaunch/)
+    //
+    // The four refusals now live in ONE predicate (`canColdRestore`) because the late cold-start
+    // check asks the same question before spending two probe round trips — so this pins the
+    // predicate's contents rather than the branch's old inline shape. `!data.pendingLaunch` and
+    // `shouldColdResume` are independent refusals and must both survive a reformat.
+    expect(src).toMatch(
+      /const canColdRestore =\s*\n?\s*!!agentId && canResume\(agentId\) && !data\.pendingLaunch && shouldColdResume\(pausedNow\)/
+    )
+    // …and the relaunch branch is the one that reads it.
+    expect(src).toContain('} else if (coldStart && canColdRestore) {')
+  })
+
+  it('the LATE cold-start check refuses the same node an armed hold would', () => {
+    // Same reason, one layer earlier: an armed node must not even pay the probe, and it must
+    // certainly not be handed a relaunch behind the hold's back.
+    expect(src).toMatch(
+      /if \(!fresh && freshUnverified && !data\.initialCommand && canColdRestore\) \{/
+    )
   })
 })
 

@@ -1453,6 +1453,10 @@ app.whenReady().then(async () => {
       ptyManager.remoteSessionConfirmed(persistKey, sshRemote)
   )
 
+  // The late cold-start check (PtyCreateResult.freshUnverified). Registered in core's shared pty
+  // block below on the server side too — this one is here beside its sibling.
+  corePlatform.handle(IPC.ptySessionAge, (persistKey: string) => ptyManager.sessionAgeSeconds(persistKey))
+
   // Gemini's title read needs the transcript path its own context tail already tracks (nothing
   // scans for it). That tail is created ~600 lines below with the rest of the hook plumbing, while
   // this deps object is consumed by the ptyReadSessionName handler just under here and by the

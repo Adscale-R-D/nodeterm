@@ -247,6 +247,11 @@ export function buildRealApi(
     // ControlMaster to attach early over. `false` = "never attach early" = the pre-feature wait,
     // which is exactly right for a shell that cannot produce the question.
     remoteSessionConfirmed: () => Promise.resolve(false),
+    // REAL, unlike `remoteSessionConfirmed` above: the server runs on the machine whose tmux it is
+    // reading, so the local leg of this probe is exactly right there. Fail-open to `null` = "could
+    // not tell", the same answer every other failure path gives.
+    sessionAge: (persistKey) =>
+      client.request(IPC.ptySessionAge, persistKey).catch(() => null) as Promise<number | null>,
     readScrollback: (persistKey) =>
       client.request(IPC.ptyReadScrollback, persistKey) as Promise<string>,
     sendText: (persistKey, text, opts) =>

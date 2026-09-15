@@ -147,6 +147,7 @@ import {
   LIVENESS_QUERY_MS
 } from '../terminal/agent-liveness'
 import { shouldAutoWake, shouldColdResume } from '../terminal/hibernation-policy'
+import { coldSelfHealVerdict } from '../terminal/cold-self-heal'
 import { WakeInputBuffer } from '../terminal/wake-input-buffer'
 import { FindBar } from '../components/FindBar'
 import { IconChat, IconChevronDown, IconChevronRight, IconClose, IconEye, IconEyeOff, IconGrid, IconMic, IconMoveTo, IconPlay, IconReload, IconSearch, IconSparkle } from '../components/icons'
@@ -230,6 +231,13 @@ const isMac = isMacPlatform()
  *  authenticating, a passphrase prompt, a distant host), not for the unreachable one — the
  *  overlay it falls back to is cheap and self-healing, so waiting longer buys nothing. */
 export const SSH_REMOTE_WAIT_MS = 20000
+
+/** How long a REMOTE spawn may take before the node says out loud that it is waiting.
+ *
+ *  Longer than a healthy attach by a wide margin — 18 parallel warm attaches at 50 ms RTT painted
+ *  in a median of 0.16 s — so a normal switch never prints it, and short enough that a node held
+ *  behind the spawn queue (or a contended master) is not blank for seconds with nothing to read. */
+export const SLOW_REMOTE_SPAWN_NOTICE_MS = 1500
 
 /**
  * Which connection scope a remote node in the ACTIVE project runs over: the project's own id when
@@ -3008,6 +3016,20 @@ export function TerminalNode({
       setCo(termKey, { offline: false })
       sentCols = term.cols
       sentRows = term.rows
+      // A remote spawn can now WAIT, and a terminal that waits in silence reads as broken — the
+      // same reason the "[connecting…]" line above exists. Core paces remote spawns per
+      // ControlMaster (pty-spawn-gate.ts), so on a project switch the later nodes of a big canvas
+      // sit in a queue for a moment; a slow host or a contended master does the same thing without
+      // any queue. The wording claims only what is true from here: we are waiting for the host,
+      // whichever of those it is. Cleared the instant the create resolves (or the node tears down).
+      const slowSpawn =
+        sshRemoteTmux && ssh
+          ? setTimeout(() => {
+              if (!disposed) term.write(`[90m[waiting for ${ssh.user}@${ssh.host}…][0m
+`)
+            }, SLOW_REMOTE_SPAWN_NOTICE_MS)
+          : undefined
+      if (slowSpawn !== undefined) cleanups.push(() => clearTimeout(slowSpawn))
       transport
         .create({
           cols: term.cols,
@@ -3037,6 +3059,7 @@ export function TerminalNode({
         async ({
           sessionId: sid,
           fresh,
+          freshUnverified,
           accountFallback: fellBack,
           staleCwd,
           closed,
@@ -3046,6 +3069,8 @@ export function TerminalNode({
           persistent,
           unavailable
         }) => {
+        // The spawn answered: whatever it says, we are no longer waiting on the host.
+        clearTimeout(slowSpawn)
         // REFUSED: `requireRemote` and core could not spawn remotely (the master died inside our
         // round-trip, or `ssh` is missing). Nothing was spawned — land in the same offline state
         // the near-side guard above produces, retry included.
@@ -3370,25 +3395,68 @@ export function TerminalNode({
         // node is armed is Canvas's question, it can change after the spawn resolves, and the
         // subscribers filter by id anyway.
         whenShellSettled(() => setSessionReady(id, true))
+        // Paused (see agentStatus.paused) is the ONE exception to the "a cold start always resumes"
+        // rule below: it exists precisely to survive a cold restart, so it must NOT be dropped, and
+        // the auto-resume branch must be skipped — only an explicit Resume (which reuses the same
+        // command-building path through the registered hibernate/wake pair) may relaunch it. Read
+        // HERE because the late cold-start check below is gated on it too: a paused node has
+        // nothing to relaunch, so it must not pay two probe round trips to find that out.
+        const pausedNow = !!useAgentStatus.getState().byId[id]?.paused
+        // LATE COLD-START DETECTION (see terminal/cold-self-heal.ts). `freshUnverified` says the
+        // create's `fresh:false` came from a freshness read that never completed, so "a session
+        // already exists" was a fold and not an answer — and `new-session -A` may have made the
+        // session we are now attached to. tmux can settle it after the fact, so ask ONCE, here,
+        // where the attach has landed: a session created within seconds of it is one WE created.
+        //
+        // Deliberately gated on there being something to DO with the answer: no `initialCommand`
+        // (that branch wins anyway and must not be delayed by two round trips), an agent we can
+        // resume, not armed, not paused. A plain terminal has no conversation to lose, and paying
+        // a probe to tell it so would be the channel pressure this whole area exists to reduce.
+        const canColdRestore =
+          !!agentId && canResume(agentId) && !data.pendingLaunch && shouldColdResume(pausedNow)
+        let coldStart = fresh
+        if (!fresh && freshUnverified && !data.initialCommand && canColdRestore) {
+          // After the shell has settled, not at this instant: the attach is a network round trip
+          // and the session may not exist yet when the create promise resolves. This is the same
+          // settle the held-launch and initialCommand writers use, so by the time it fires the
+          // pane is alive and a shell has printed its prompt.
+          await new Promise<void>((resolve) => {
+            whenShellSettled(resolve)
+            // …and settle on a TEARDOWN too. `whenShellSettled`'s own cleanup marks itself done
+            // WITHOUT running the callback, so without this an unmount mid-wait would leave this
+            // continuation parked on a promise nothing can ever resolve — holding the xterm and
+            // every closure in it for the life of the app. `cleanups` does not run for a PARK
+            // (same array, same session), so the healthy re-adoption path is untouched.
+            cleanups.push(resolve)
+          })
+          if (onDisposed()) return
+          const [ageSeconds, paneCommand] = await Promise.all([
+            api.pty.sessionAge(id).catch(() => null),
+            api.pty.paneCommand(id).catch(() => null)
+          ])
+          if (onDisposed()) return
+          coldStart =
+            coldSelfHealVerdict({
+              fresh,
+              freshUnverified: true,
+              ageSeconds,
+              paneCommand,
+              isShell: isShellCommand
+            }) === 'cold'
+        }
         // Hibernation × cold restore. `hibernated` is PERSISTED, so it can outlive the very thing
         // it describes:
-        //  - `fresh` (the tmux session is GONE — a reboot, a reaped server, a first open): the CLI
-        //    it refers to died with the session. The node is not hibernated, it is simply gone, so
-        //    the flag is dropped and the ORDINARY cold-restore auto-resume below brings the
-        //    conversation back exactly as it does for any other node. Leaving the flag set would
-        //    park a SLEEPING chip over a dead pane and hand the resume to the wake path, which
-        //    (rightly) refuses a pane it cannot see a shell in.
-        //  - warm attach (`!fresh`): the shell we exited to is still sitting in the pane, by
-        //    design. Nothing auto-resumes here — the branch below is `fresh`-only — and the wake
-        //    path owns the relaunch. That is the whole feature.
-        if (fresh && useAgentStatus.getState().byId[id]?.hibernated) {
+        //  - a COLD start (the tmux session is GONE — a reboot, a reaped server, a first open, or
+        //    the late detection above): the CLI it refers to died with the session. The node is not
+        //    hibernated, it is simply gone, so the flag is dropped and the ORDINARY cold-restore
+        //    auto-resume below brings the conversation back exactly as it does for any other node.
+        //    Leaving it set would park a SLEEPING chip over a dead pane and hand the resume to the
+        //    wake path, which (rightly) refuses a pane it cannot see a shell in.
+        //  - a real warm attach: the shell we exited to is still sitting in the pane, by design.
+        //    Nothing auto-resumes here and the wake path owns the relaunch. That is the feature.
+        if (coldStart && useAgentStatus.getState().byId[id]?.hibernated) {
           useAgentStatus.getState().setHibernated(id, false)
         }
-        // Paused (see agentStatus.paused) is the ONE exception to the "fresh always resumes" rule
-        // above: it exists precisely to survive a cold restart, so it must NOT be dropped here, and
-        // the auto-resume branch below must be skipped — only an explicit Resume (which reuses the
-        // same command-building path through the registered hibernate/wake pair) may relaunch it.
-        const pausedNow = !!useAgentStatus.getState().byId[id]?.paused
         // The clear-env strip is one-shot: once this spawn has applied it, clear the flag so a later
         // ordinary Restart re-applies the gateway. (The recycle action re-sets it for its own spawn.)
         if (data.clearEnv) {
@@ -3399,13 +3467,7 @@ export function TerminalNode({
         if (data.initialCommand) {
           writeWhenShellReady(data.initialCommand)
           updateNodeData(id, { initialCommand: undefined })
-        } else if (
-          fresh &&
-          agentId &&
-          canResume(agentId) &&
-          !data.pendingLaunch &&
-          shouldColdResume(pausedNow)
-        ) {
+        } else if (coldStart && canColdRestore) {
           // Cold restart of an agent node: the live agent is gone, so re-launch it. Resume the
           // prior conversation by its session id when we have one; otherwise start the agent
           // fresh. Plain terminals get nothing here — just the restored shell.
@@ -3585,6 +3647,8 @@ export function TerminalNode({
         }
       })
       .catch((err: unknown) => {
+        // Same reason as the fulfilled path: we are no longer waiting on the host.
+        clearTimeout(slowSpawn)
         // THE missing handler, and the answer to "some terminals are black" (2026-08-06).
         //
         // A rejected create means core started NOTHING: no session to tear down, no data gate to

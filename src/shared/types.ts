@@ -941,6 +941,22 @@ export interface PtyApi {
   generateGroupName(memberKeys: string[], cwd: string): Promise<GitResult>
   /** Capture a terminal session's output as text. `full` grabs the entire scrollback. */
   capture(persistKey: string, full?: boolean): Promise<string>
+  /**
+   * Has the host behind `sshRemote.controlPath` POSITIVELY listed this node's remote tmux session?
+   *
+   * The early-attach gate: a remote terminal may run over a ControlMaster whose connect-time setup
+   * has not finished only when its session already exists (`new-session -A` then merely attaches,
+   * and the remote tmux `-f` config and the `-e` hook/account env are read at session CREATION
+   * only). Absent AND unreadable both answer `false` — the node then waits for the full connect,
+   * because creating a session without that env silently costs it its agent-status badges.
+   *
+   * Desktop-only, like SSH projects; the Server Edition bridge answers `false` (never attach
+   * early), which is the pre-feature behavior.
+   */
+  remoteSessionConfirmed(
+    persistKey: string,
+    sshRemote: { controlPath: string; conn: import('./ssh').SshConnection }
+  ): Promise<boolean>
   /** Read the persisted scrollback snapshot for a node (for cold-restart replay). '' if none. */
   readScrollback(persistKey: string): Promise<string>
   /** Send literal text into a session, by default followed by Enter (e.g. a slash command).
@@ -1922,6 +1938,25 @@ export interface SshProjectStatusEvent {
   projectId: string
   status: SshProjectStatus
   error?: string
+  /**
+   * The ControlMaster socket path, published the MOMENT `ssh -O check` answers — i.e. while the
+   * status is still `connecting`, before the connect's remote setup chain (hook tunnel + per-agent
+   * hook installs, `$HOME`, the remote tmux.conf write, the Codex runtime staging) has run.
+   *
+   * ADDITIVE, and deliberately not a new status value: `connected` keeps its exact meaning (the
+   * whole chain finished), and everything hanging off it — git routing, the remote claude probe,
+   * the tunnel resync, the connection banner — is untouched. This field only lets a terminal whose
+   * remote tmux session ALREADY EXISTS stop waiting: `new-session -A` then merely attaches, and
+   * the remote `-f` config and the tmux `-e` pairs are read at session CREATION only. A node whose
+   * session does not exist (or could not be read) must still wait for `connected`, or it would
+   * create a session with no hook env and lose its agent-status badges — see
+   * `PtyApi.remoteSessionConfirmed`.
+   *
+   * Never emitted for an ADOPTED live-orphan master: that one can still be torn down and rebuilt
+   * inside the same connect (the stale reverse-forward cure), which would kill a terminal that had
+   * already attached over it.
+   */
+  masterControlPath?: string
   claudeAutoPermissionMode?: boolean
   /** The remote `claude --version` output the probe read, riding the same `connected` event as
    *  `claudeAutoPermissionMode`. `null` = the probe ran but found no claude (distinguishable from

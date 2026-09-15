@@ -13042,6 +13042,14 @@ export function Canvas() {
       // Feed the auto-reconnect coordinator: ANY successful connect (its own loop, the
       // active-project effect on a tab switch) respawns that project's dropped terminals.
       if (e.status === 'connected') sshReconnectorRef.current?.onConnected(e.projectId)
+      // The ControlMaster answered `-O check`, published BEFORE the connect's remote setup chain
+      // (see SshProjectStatusEvent.masterControlPath). A terminal whose remote tmux session already
+      // exists may attach over it right away instead of waiting out the chain; a cold one still
+      // waits for `connected`, which is what carries the creation-time tmux `-f`/`-e` facts. Kept
+      // OUT of `byProject` on purpose — that map means "connected" to a dozen other readers.
+      if (e.masterControlPath) {
+        useSshConn.getState().setEarlyControlPath(e.projectId, e.masterControlPath)
+      }
       // The remote claude probe runs AFTER connect (its login shell is slow) and pushes its answer
       // on a later `connected` event — record it so this project's next Claude launch can use
       // `--permission-mode auto`. Absent = nothing new to record (keep omitting the flag).
@@ -13056,6 +13064,13 @@ export function Canvas() {
       // reusing the previous host's stale `true`.
       if (e.status === 'disconnected' || e.status === 'reconnecting') {
         useSshConn.getState().invalidateAutoPermissionMode(e.projectId)
+      }
+      // The master is gone (or never came up): the early path must not outlive it, or the next
+      // node to mount would attach over a socket nothing is listening on. `error` is included —
+      // the early signal fires before the setup chain, which is exactly where a connect can still
+      // fail. The full `byProject` entry is left alone; only `connect`'s own result writes that.
+      if (e.status === 'disconnected' || e.status === 'reconnecting' || e.status === 'error') {
+        useSshConn.getState().clearEarlyControlPath(e.projectId)
       }
     })
   }, [])

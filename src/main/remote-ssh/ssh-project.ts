@@ -528,7 +528,17 @@ export class SshProjectManager {
    * down under it. Waiting on a passphrase prompt widens that window to minutes, which turns the
    * race from unlikely into routine, so the coalescing has to live here rather than in callers.
    */
-  connect(projectId: string, conn: SshConnection, remoteCwd?: string): Promise<ConnectResult> {
+  connect(
+    projectId: string,
+    conn: SshConnection,
+    remoteCwd?: string,
+    /** INTERNAL (never reachable over IPC): `quiet` marks this attempt as the background pre-warm,
+     *  which emits no status events. Any loud connect — including one that coalesces onto a
+     *  pre-warm already in flight — lifts the mark for the rest of the attempt. See `quiet`. */
+    opts?: { quiet?: boolean }
+  ): Promise<ConnectResult> {
+    if (opts?.quiet) this.quiet.add(projectId)
+    else this.quiet.delete(projectId)
     const inFlight = this.inFlight.get(projectId)
     if (inFlight) {
       if (sameEndpoint(inFlight.conn, conn)) {
@@ -593,6 +603,53 @@ export class SshProjectManager {
       const { code } = await this.r.run(remoteTmuxKillArgs(c.conn, c.controlPath, session))
       return code === 0 || code === 1
     })
+  }
+
+  /**
+   * Projects whose CURRENT connect attempt was started by the background pre-warm, and which
+   * therefore emit NO status events at all.
+   *
+   * A pre-warm is not a user action: it dials the masters of OPEN SSH projects shortly after boot
+   * so the first switch to one is already warm. The user is by definition not looking at the
+   * project (if they were, the active-project effect would have connected it loudly), so a failure
+   * there must not raise the connection banner — an unreachable server the user never opened is
+   * not an error they can act on. Silence is the whole contract: `connecting`, `connected`,
+   * `disconnected` and `error` are all withheld, and the renderer learns everything it needs from
+   * the reuse branch of the connect it issues when the project actually becomes active.
+   *
+   * The mark is LIFTED the moment a real (loud) `connect` arrives for the same project, including
+   * one that coalesces onto the pre-warm's own in-flight attempt — from that point the user IS
+   * looking, and the rest of that attempt's events surface normally.
+   */
+  private quiet = new Set<string>()
+
+  /** Emit a status event unless this project's attempt is a silent pre-warm (see `quiet`). */
+  private emitStatus(e: SshProjectStatusEvent): void {
+    if (this.quiet.has(e.projectId)) return
+    this.r.onStatus(e)
+  }
+
+  /**
+   * Establish a project's ControlMaster in the BACKGROUND, silently.
+   *
+   * Without this the master for an SSH project is only dialed when the user first switches to it,
+   * so the first visit of every app run pays the cold establish (measured 0.44 s at 50 ms RTT)
+   * plus the whole connect-time setup chain before a single terminal can attach. Pre-warming turns
+   * that first switch into the reuse branch, which returns in one `-O check`.
+   *
+   * Never starts a second attempt for a project that already has a master or an attempt in flight
+   * — a pre-warm must never be the thing that competes with the user's own connect.
+   */
+  async prewarm(projectId: string, conn: SshConnection, remoteCwd?: string): Promise<void> {
+    if (this.isBusy(projectId)) return
+    try {
+      await this.connect(projectId, conn, remoteCwd, { quiet: true })
+    } catch {
+      // Silent by design: this is a pre-warm, not a user action. The project's own connect (on the
+      // switch that actually opens it) reports its own failure, with its own ssh error.
+    } finally {
+      this.quiet.delete(projectId)
+    }
   }
 
   private async connectOnce(
@@ -660,7 +717,7 @@ export class SshProjectManager {
           remoteClaudeVersion: existing.remoteClaudeVersion
         }
       }
-      this.r.onStatus({ projectId, status: 'reconnecting' })
+      this.emitStatus({ projectId, status: 'reconnecting' })
       // `-O exit` first, kill() second: kill() is a no-op against a master that already daemonized
       // (ControlPersist), and the leftover-socket unlink below would otherwise pull the socket out
       // from under a still-live daemon that keeps its TCP session and remote reverse forward for
@@ -678,7 +735,7 @@ export class SshProjectManager {
     } catch {
       // ignore, keeps the manager unit-testable
     }
-    this.r.onStatus({ projectId, status: 'connecting' })
+    this.emitStatus({ projectId, status: 'connecting' })
     // A master socket FILE can outlive its process (app crash, `kill -9`, host sleep/resume, a
     // plain `kill()` on quit doesn't always let ssh unlink it). ssh's `ControlMaster=auto` REFUSES
     // to bind over an existing socket file ("ControlSocket … already exists, disabling
@@ -754,6 +811,29 @@ export class SshProjectManager {
     for (;;) {
       const { code } = await this.r.run(checkMasterArgs(conn, controlPath))
       if (code === 0) {
+        // THE TRANSPORT IS USABLE NOW — say so, before the setup chain below.
+        //
+        // Everything from here to `connected` is remote SETUP (the reverse hook tunnel and ~23
+        // serialized per-agent hook installs, `printf $HOME`, the remote tmux.conf write +
+        // source-file, the Codex runtime staging). Measured on a real sshd at 50 ms RTT that chain
+        // is ~3.5 s, while 18 remote terminals attaching in parallel over a warm master paint in a
+        // median of 0.16 s. Publishing the control path only at the END therefore left every
+        // terminal of a switched-to project sitting in `resolveSshRemote`'s 20 s wait, printing
+        // "[connecting to user@host…]" into a blank pane for seconds — for a transport that was
+        // ready the whole time.
+        //
+        // Additive: `connected` still means the whole chain finished, and only a node whose remote
+        // tmux session ALREADY EXISTS may act on this (see SshProjectStatusEvent.masterControlPath
+        // and PtyApi.remoteSessionConfirmed). A cold node still waits, because its session is
+        // CREATED by the attach and `-f` / the tmux `-e` hook+account env are creation-time only.
+        //
+        // Not for an ADOPTED ORPHAN: the tunnel-verification failure path a few lines below may
+        // `-O exit` that master and rebuild it, which would kill any terminal that had attached
+        // over it in the meantime. The rebuild clears `reusedOrphan` and re-enters this loop, so a
+        // rebuilt master does publish here on its next pass.
+        if (!reusedOrphan) {
+          this.emitStatus({ projectId, status: 'connecting', masterControlPath: controlPath })
+        }
         // Master is up. Best-effort remote hook setup (reverse tunnel + endpoint + install);
         // fail-open, a null result just means the remote agents run without hooks.
         const res = await this.remoteHooks.setup(projectId, conn, controlPath, this.r.getHook())
@@ -876,7 +956,7 @@ export class SshProjectManager {
           entry.codexRelayScriptPath = codexRuntime?.relay
           entry.codexRelayRuntimePath = codexRuntime?.runtime
           entry.codexCliPath = codexRuntime?.codex
-          this.r.onStatus({ projectId, status: 'connected' })
+          this.emitStatus({ projectId, status: 'connected' })
           // The tunnel is live again on a master we just established (the reuse branch returned long
           // before this line), so this is exactly the moment the hook events lost while it was down
           // can be reconstructed from the host.
@@ -982,7 +1062,7 @@ export class SshProjectManager {
       : detail
         ? `Could not establish the SSH connection: ${detail}${agentOnlyHint}`
         : `Could not establish the SSH connection.${agentOnlyHint}`
-    this.r.onStatus({ projectId, status: 'error', error: message })
+    this.emitStatus({ projectId, status: 'error', error: message })
     throw new Error(message)
   }
 
@@ -1330,6 +1410,12 @@ export class SshProjectManager {
     return c ? { conn: c.conn, controlPath: c.controlPath, remoteCwd: c.remoteCwd } : undefined
   }
 
+  /** Does this project already have a master, or an attempt in flight? The pre-warm's gate — it
+   *  must never start a second attempt beside the user's own connect (see `prewarm`). */
+  isBusy(projectId: string): boolean {
+    return this.conns.has(projectId) || this.inFlight.has(projectId)
+  }
+
   /**
    * Resolve the `{ conn, controlPath }` ref for the connected project whose remote repo cwd matches
    * `cwd` (Phase 4). Backs the git-remote resolver registry so remote git ops route to the right
@@ -1389,6 +1475,28 @@ export class SshProjectManager {
       if (p !== undefined && String(p) === pid) return `${c.conn.user}@${c.conn.host}`
     }
     return undefined
+  }
+
+  /**
+   * Is this asking master a silent PRE-WARM's?
+   *
+   * The pre-warm dials projects the user is not looking at, so it must not raise the passphrase
+   * dialog either — that is the loudest thing an SSH connect can do, and a modal for a project
+   * nobody opened is worse than the slow first switch the pre-warm exists to remove. The caller
+   * (main's prompt handler) declines instead: that master fails auth, the pre-warm swallows it,
+   * and the user's own connect — which spawns a NEW master with a new pid — prompts normally.
+   *
+   * Asking by PID, not by project, because that is what the askpass helper reports (its `$PPID`,
+   * verified against a real sshd) and it is exact: a master that is not in the map, or whose
+   * project has since gone loud, answers false and prompts.
+   */
+  isQuietMasterPid(pid: string): boolean {
+    if (!pid) return false
+    for (const [projectId, c] of this.conns) {
+      const p = c.master.pid?.()
+      if (p !== undefined && String(p) === pid) return this.quiet.has(projectId)
+    }
+    return false
   }
 
   /** The resolved remote `$HOME` for a connected project, if known. */
@@ -2119,7 +2227,7 @@ export class SshProjectManager {
       const supported = supportsAutoPermissionMode(version)
       entry.claudeAutoPermissionMode = supported
       entry.remoteClaudeVersion = version
-      this.r.onStatus({
+      this.emitStatus({
         projectId,
         status: 'connected',
         claudeAutoPermissionMode: supported,
@@ -2182,7 +2290,7 @@ export class SshProjectManager {
     // caller's opt-out: a teardown INSIDE a live attempt must not discard that attempt's own
     // coalescing entry (see connectOnce's endpoint-change branch).
     if (!opts?.keepInFlight) this.inFlight.delete(projectId)
-    this.r.onStatus({ projectId, status: 'disconnected' })
+    this.emitStatus({ projectId, status: 'disconnected' })
     // Nothing left to keep an unlocked key alive for. Production schedules (not performs) the
     // agent shutdown: the connect dialog's throwaway browse master disconnects a few hundred ms
     // before the real project connects, and forgetting in that gap costs a second prompt.
@@ -2213,7 +2321,7 @@ export class SshProjectManager {
       this.r.runSync?.(exitMasterArgs(c.conn, c.controlPath))
       c.master.kill()
       this.conns.delete(projectId)
-      this.r.onStatus({ projectId, status: 'disconnected' })
+      this.emitStatus({ projectId, status: 'disconnected' })
     }
     // Drop every in-flight connect attempt (see disconnect: a stale attempt must not coalesce a
     // later connect onto a master that was just killed for a now-orphaned attempt).
@@ -2485,7 +2593,12 @@ export function initSshProject(
   // Registered after `mgr` exists so the dialog can name the server: the askpass request carries
   // the asking master's pid, and only the manager can map it back to a connection.
   askpassServer.setPromptHandler((req) =>
-    promptForPassphrase({ ...req, target: mgr.targetForMasterPid(req.caller) })
+    // A silent pre-warm never prompts: declining is what keeps a background dial from putting a
+    // passphrase modal in front of a user who opened nothing. `null` is the same answer a decline
+    // gives, so ssh abandons that key and the pre-warm's master simply fails, quietly.
+    mgr.isQuietMasterPid(req.caller)
+      ? Promise.resolve(null)
+      : promptForPassphrase({ ...req, target: mgr.targetForMasterPid(req.caller) })
   )
   mgr.startWatchdog()
   ipcMain.handle(IPC.sshConnectProject, async (_e, projectId: string, conn: SshConnection, remoteCwd?: string) => {

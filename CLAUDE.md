@@ -855,6 +855,58 @@ session (you can't keep a live OS process across a reboot):
   reads no `CoState`, so a user who only ever opens the session from the board does not see the
   notice; the honest fix is a shared node-notice surface rather than a second copy of the banner.
 
+### SSH connect: the ControlMaster is published BEFORE its setup chain
+
+`connectOnce` (`main/remote-ssh/ssh-project.ts`) used to publish a project's ControlMaster only with
+`status: 'connected'` — i.e. after the reverse hook tunnel, ~23 serialized per-agent hook installs,
+`printf $HOME`, the remote tmux.conf write + `source-file` and the Codex runtime staging had all
+run. MEASURED against a real sshd through a 25 ms one-way delay proxy (50 ms RTT): that chain is
+**3.54 s** on a fully-provisioned host, while **18 remote terminals attaching in parallel over a
+warm master paint in a median of 0.16 s** and are all settled by 0.71 s. So the attach was never the
+bottleneck — every terminal of a switched-to project simply sat in `resolveSshRemote`'s 20 s wait
+printing `[connecting to user@host…]` into a blank pane, for a transport that was ready the whole
+time.
+
+Two additive changes, and the rules that keep them safe:
+
+- **The early signal.** The moment `ssh -O check` answers, `connectOnce` emits
+  `SshProjectStatusEvent.masterControlPath` on a `connecting` event. `connected` keeps its exact
+  meaning (the whole chain finished) and everything hanging off it — git routing, the remote claude
+  probe, the tunnel resync, the connection banner — is untouched. The renderer keeps it in its own
+  map (`useSshConn.earlyByProject`), **never in `byProject`**, which a dozen readers treat as "this
+  project is connected".
+  - **Only a node whose remote tmux session ALREADY EXISTS may act on it**
+    (`PtyApi.remoteSessionConfirmed` → `RemoteSessionIndex.verdict`, the strict `present`-only half
+    of the coalesced `tmux list-sessions` read `create()` already makes, so a warm switch pays no
+    extra round trip). `new-session -A` on a live session merely attaches, and the two things the
+    setup chain provides — the remote tmux config (`-f`) and the hook/account environment (tmux
+    `-e`) — are read at session CREATION only. A node whose session is ABSENT, **or whose host
+    could not be read**, waits for `connected`: creating its session without the hook env costs it
+    its agent-status badges silently, with no later event to repair it. That is why the index now
+    exposes a TRI-STATE (`present | absent | unknown`) — `exists()` folds `unknown` into "exists"
+    for its own caller, and this one needs the opposite fold. Decision logic is the pure
+    `renderer/lib/sshRemoteWait.ts`; a cold node's wait is pinned by its own test.
+  - **Never for an ADOPTED live-orphan master.** The tunnel-verification failure path may `-O exit`
+    that master and rebuild it, which would kill a terminal that had attached over it meanwhile.
+    The rebuild clears `reusedOrphan` and re-enters the loop, so a rebuilt master does publish.
+- **The boot-time pre-warm** (`core/remote-ssh/ssh-prewarm.ts`, planner + runner pure and tested;
+  wired in `main/index.ts`). The master for a project was dialed only when the user first switched
+  to it, so the first visit of every app run paid the cold establish (**0.44 s** measured) plus the
+  whole chain. `SshProjectManager.prewarm` now dials the masters of OPEN SSH projects shortly after
+  boot, **one host at a time** (a burst of fresh masters is what trips a host's `MaxStartups`; the
+  `SshChildGate` caps exec children per control path and does nothing about logins).
+  - **A pre-warm is SILENT — no status event at all.** The user is by definition not looking (if
+    they were, the active-project effect would have connected it loudly), so a failure must not
+    raise the connection banner for a project they never opened. The mark is lifted the moment a
+    real connect arrives for the same project, including one that coalesces onto the pre-warm's own
+    in-flight attempt.
+  - **It never prompts for a passphrase either** (`isQuietMasterPid` → main's prompt handler
+    declines): a modal in front of a user who opened nothing is the loudest thing an SSH connect can
+    do. That master fails auth quietly; the user's own connect spawns a new one and prompts normally.
+  - **CLOSED projects are never dialed**, and neither is a project that already has a master or an
+    attempt in flight. `closeProject` is non-destructive, so a closed tab is the user saying "not
+    now".
+
 ### We have our own VT emulator — check it before asking tmux
 
 xterm.js is not just a renderer. It parses the pane's output stream, so it **tracks DECSET modes

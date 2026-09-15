@@ -114,3 +114,39 @@ describe('RemoteSessionIndex', () => {
     expect(list).toHaveBeenCalledWith('/cm/p1', { host: 'nt-x' })
   })
 })
+
+describe('RemoteSessionIndex.verdict (the strict tri-state behind exists)', () => {
+  it('separates "absent" from "could not read" — the fold exists() cannot express', async () => {
+    const present = new RemoteSessionIndex<null>({
+      list: async (): Promise<SessionListOutcome> => ({ kind: 'names', names: ['nt-a'] })
+    })
+    const unreadable = new RemoteSessionIndex<null>({
+      list: async (): Promise<SessionListOutcome> => ({ kind: 'unknown' })
+    })
+
+    expect(await present.verdict('/cm/p1', 'nt-a', null)).toBe('present')
+    expect(await present.verdict('/cm/p1', 'nt-z', null)).toBe('absent')
+    expect(await unreadable.verdict('/cm/p2', 'nt-a', null)).toBe('unknown')
+    // …while exists() keeps folding an unreadable host into "exists" (never type into a live pane).
+    expect(await unreadable.exists('/cm/p2', 'nt-a', null)).toBe(true)
+  })
+
+  it('a session this process just spawned reads present without a list read', async () => {
+    const list = vi.fn(async (): Promise<SessionListOutcome> => ({ kind: 'names', names: [] }))
+    const idx = new RemoteSessionIndex<null>({ list })
+    idx.markPresent('/cm/p1', 'nt-a')
+    expect(await idx.verdict('/cm/p1', 'nt-a', null)).toBe('present')
+    expect(list).not.toHaveBeenCalled()
+  })
+
+  it('shares ONE list read between exists() and verdict() in a burst', async () => {
+    const list = vi.fn(async (): Promise<SessionListOutcome> => ({ kind: 'names', names: ['nt-a'] }))
+    const idx = new RemoteSessionIndex<null>({ list })
+    const [a, b] = await Promise.all([
+      idx.verdict('/cm/p1', 'nt-a', null),
+      idx.exists('/cm/p1', 'nt-a', null)
+    ])
+    expect([a, b]).toEqual(['present', true])
+    expect(list).toHaveBeenCalledTimes(1)
+  })
+})

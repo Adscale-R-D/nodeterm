@@ -242,6 +242,11 @@ export function buildRealApi(
     generateGroupName: () => Promise.resolve(AI_NAMING_UNAVAILABLE),
     capture: (persistKey, full) =>
       client.request(IPC.ptyCapture, persistKey, full).catch(() => '') as Promise<string>,
+    // Documented degrade, not a stub with a hole in it: SSH PROJECTS are desktop-only (the whole
+    // `sshProject` surface is `U(...)`-stubbed here), so no browser session ever holds a remote
+    // ControlMaster to attach early over. `false` = "never attach early" = the pre-feature wait,
+    // which is exactly right for a shell that cannot produce the question.
+    remoteSessionConfirmed: () => Promise.resolve(false),
     readScrollback: (persistKey) =>
       client.request(IPC.ptyReadScrollback, persistKey) as Promise<string>,
     sendText: (persistKey, text, opts) =>

@@ -35,6 +35,19 @@ export const REMOTE_SESSION_INDEX_TTL_MS = 1000
 /** What one `tmux list-sessions` read established. `unknown` is a failed READ, never absence. */
 export type SessionListOutcome = { kind: 'names'; names: string[] } | { kind: 'unknown' }
 
+/**
+ * What we know about ONE session, kept tri-state on purpose.
+ *
+ * `exists()` folds `unknown` into "exists" because its caller is about to type into a pane and a
+ * failed read must never be mistaken for a cold session. A second caller — the early-attach gate
+ * (`SshProjectManager` publishes the ControlMaster before its setup chain finishes) — needs the
+ * OPPOSITE fold: it may only skip the wait when the host POSITIVELY listed the session, because
+ * attaching early to a session that does not exist creates it without the tmux `-f` config and the
+ * creation-time `-e` hook env. Both folds are honest; neither may be derived from the other's
+ * boolean, so the verdict is exposed as it is actually known.
+ */
+export type SessionVerdict = 'present' | 'absent' | 'unknown'
+
 export interface RemoteSessionIndexDeps<Ctx> {
   /** Run `tmux list-sessions` on the host behind `controlPath` and classify the result. `ctx` is
    *  whatever the caller needs to BUILD that command (the project's `SshConnection`); the index
@@ -67,8 +80,17 @@ export class RemoteSessionIndex<Ctx> {
    * nothing into the pane. Concurrent callers for the same host share ONE list read.
    */
   async exists(controlPath: string, sessionId: string, ctx: Ctx): Promise<boolean> {
+    // A failed read is never evidence of absence.
+    return (await this.verdict(controlPath, sessionId, ctx)) !== 'absent'
+  }
+
+  /**
+   * The tri-state answer behind `exists`. `unknown` is a failed READ (dead master, ssh missing, a
+   * timeout) — callers that would ACT on absence must treat it as "do not know", not as absence.
+   */
+  async verdict(controlPath: string, sessionId: string, ctx: Ctx): Promise<SessionVerdict> {
     const entry = this.fresh(controlPath)
-    if (entry?.spawned.has(sessionId)) return true
+    if (entry?.spawned.has(sessionId)) return 'present'
     if (entry?.outcome) return verdict(entry.outcome, sessionId)
     if (entry?.inflight) return verdict(await entry.inflight, sessionId)
 
@@ -116,7 +138,7 @@ export class RemoteSessionIndex<Ctx> {
   }
 }
 
-function verdict(outcome: SessionListOutcome, sessionId: string): boolean {
-  // A failed read is never evidence of absence.
-  return outcome.kind === 'unknown' ? true : outcome.names.includes(sessionId)
+function verdict(outcome: SessionListOutcome, sessionId: string): SessionVerdict {
+  if (outcome.kind === 'unknown') return 'unknown'
+  return outcome.names.includes(sessionId) ? 'present' : 'absent'
 }

@@ -553,7 +553,7 @@ import {
   CONTROL_REQUEST_TIMEOUT_MS
 } from '@shared/control-confirm'
 import { useControlConfirm } from '../state/controlConfirm'
-import { controlConfirmDecision } from '../state/controlConfirmGate'
+import { controlConfirmDecision, waiveControlConfirmForProject } from '../state/controlConfirmGate'
 import {
   bulkCloseMessage,
   parseCloseTargets,
@@ -682,6 +682,17 @@ interface ConfirmState {
    * waiver at click time, where the state is current.
    */
   waiveVerb?: string
+  /**
+   * The project a "always in this project" waiver would be granted for, and its NAME for the
+   * checkbox copy. The CALLER's project, not the active one: canvas control routes by source and
+   * a background agent's `write`/`close` is answered in its own project without the user's tab
+   * moving (@shared/control-off-screen), so the dialog must offer — and grant — a waiver for the
+   * project the call actually acts on. Offering "this project" while meaning the one on screen
+   * would grant a waiver in the wrong repo, which is the exact failure the per-project scope
+   * exists to prevent.
+   */
+  waiveProjectId?: string
+  waiveProjectName?: string
   /**
    * When the request behind this dialog expires (`Date.now()`-scale). Set by the canvas-control
    * dispatch, because main abandons the request after `CONTROL_REQUEST_TIMEOUT_MS` and tells the
@@ -1643,6 +1654,9 @@ export function Canvas() {
   // by the dispatch every time it raises one of those dialogs, so a tick never carries over to the
   // next request.
   const [controlWaive, setControlWaive] = useState(false)
+  /** How far the tick above reaches. `session` is the DEFAULT and the pre-existing behaviour — a
+   *  waiver a dialog grants must stay the bounded one unless the user says otherwise. */
+  const [controlWaiveScope, setControlWaiveScope] = useState<'session' | 'project'>('session')
   /**
    * An agent-requested confirm collects itself when its REQUEST has expired.
    *
@@ -11822,13 +11836,20 @@ export function Canvas() {
             // GLOBAL permission mode is Bypass)? The whole decision is the pure
             // `decideControlConfirm` — see @shared/control-confirm for why the bypass branch needs
             // both a machine-local opt-in AND a mode the user set globally.
-            const writeWaiver = controlConfirmDecision(verb)
+            // `ctlProject?.id`, not the active project: the per-project waiver — and the
+            // permission mode the bypass lock reads — belong to the project this call ACTS ON,
+            // which since @shared/control-off-screen need not be the one on screen.
+            const writeWaiver = controlConfirmDecision(verb, ctlProject?.id)
             if (writeWaiver.via) {
               // A waived destructive action still ANNOUNCES itself, and names the waiver that let
               // it through. Losing the dialog must not mean losing the record.
               setNotice({
                 kind: 'info',
-                text: waivedNotice(`Agent "${srcTitle}" wrote to ${args.node}`, writeWaiver.via)
+                text: waivedNotice(
+                  `Agent "${srcTitle}" wrote to ${args.node}`,
+                  writeWaiver.via,
+                  ctlProject?.name
+                )
               })
               await runWrite()
               return
@@ -11852,11 +11873,14 @@ export function Canvas() {
             }
             // Destructive → confirm. Replies on confirm AND cancel.
             setControlWaive(false)
+            setControlWaiveScope('session')
             setConfirm({
               message: `Agent "${srcTitle}" wants to send to ${args.node}:\n\n${args.text ?? ''}`,
               confirmLabel: 'Send',
               requestedBy: srcTitle,
               waiveVerb: isWaivableVerb(verb) ? verb : undefined,
+              waiveProjectId: ctlProject?.id,
+              waiveProjectName: ctlProject?.name,
               expiresAt: confirmExpiresAt(Date.now()),
               onExpire: () => reply({ ok: false, error: 'expired before the user answered' }),
               onConfirm: async () => {
@@ -11920,7 +11944,7 @@ export function Canvas() {
               })
             }
             // Waived? Same decision table as `write` (@shared/control-confirm).
-            const closeWaiver = controlConfirmDecision(verb)
+            const closeWaiver = controlConfirmDecision(verb, ctlProject?.id)
             if (closeWaiver.via) {
               setNotice({
                 kind: 'info',
@@ -11928,7 +11952,8 @@ export function Canvas() {
                   closeIds.length === 1
                     ? `Agent "${srcTitle}" closed ${closeIds[0]}`
                     : `Agent "${srcTitle}" closed ${closeIds.length} nodes`,
-                  closeWaiver.via
+                  closeWaiver.via,
+                  ctlProject?.name
                 )
               })
               runClose()
@@ -11943,12 +11968,15 @@ export function Canvas() {
             }
             // Destructive → confirm. Replies on confirm AND cancel.
             setControlWaive(false)
+            setControlWaiveScope('session')
             setConfirm({
               message: closeMessage,
               requestedBy: srcTitle,
               confirmLabel: closeLabel,
               danger: true,
               waiveVerb: isWaivableVerb(verb) ? verb : undefined,
+              waiveProjectId: ctlProject?.id,
+              waiveProjectName: ctlProject?.name,
               expiresAt: confirmExpiresAt(Date.now()),
               onExpire: () => reply({ ok: false, error: 'expired before the user answered' }),
               onConfirm: () => {
@@ -14768,24 +14796,48 @@ export function Canvas() {
           // The user did not open this one — an agent did. It appeared under their hands, so it is
           // answered by a click, never by a keystroke aimed somewhere else (components/confirm-key).
           enterConfirms={!confirm.requestedBy}
-          // "Don't ask again" — offered ONLY for a verb the shared table admits, and only ever for
-          // THIS APP RUN. The permanent waiver deliberately lives in Settings → Agents instead: a
-          // dialog that appeared under the user's hands must not be able to switch a destructive
-          // gate off forever on one stray click. Built here rather than stored on `ConfirmState`
-          // because the checkbox is live state and that object is a snapshot.
+          // "Don't ask again" — offered ONLY for a verb the shared table admits, and offered with
+          // a SCOPE, because the app-run-only waiver this used to grant is not what a user who
+          // ticks that box means: it lasts until they quit, and the only durable answer lived in
+          // Settings as a MACHINE-WIDE switch, so the realistic choices were "be asked forever" or
+          // "turn it off everywhere". The narrower durable grant is per project, which is the most
+          // a dialog that appeared under the user's hands may hand out — the machine-wide `always`
+          // stays Settings-only for exactly the reason it always did. Default stays `session`, so
+          // a user who ticks and clicks through gets the old, bounded behaviour.
+          // Built here rather than stored on `ConfirmState` because the checkbox is live state and
+          // that object is a snapshot.
           option={
             confirm.waiveVerb
               ? {
-                  label: "Don't ask again while nodeterm is running",
+                  label: "Don't ask again",
                   checked: controlWaive,
-                  onChange: setControlWaive
+                  onChange: setControlWaive,
+                  scopes: [
+                    { value: 'session', label: 'While nodeterm is running' },
+                    {
+                      value: 'project',
+                      // The project NAME, not "this project": the call may well be acting on a
+                      // canvas the user is not looking at, so "this" would point at the wrong one.
+                      label: confirm.waiveProjectName
+                        ? `Always in "${confirm.waiveProjectName}"`
+                        : 'Always in this project'
+                    }
+                  ],
+                  scope: controlWaiveScope,
+                  onScopeChange: (v) => setControlWaiveScope(v === 'project' ? 'project' : 'session')
                 }
               : undefined
           }
           onConfirm={() => {
             // Granted on CONFIRM only. A denial must never widen anything, whatever is ticked.
             if (confirm.waiveVerb && controlWaive) {
-              useControlConfirm.getState().waiveForSession(confirm.waiveVerb)
+              // The per-project grant can FAIL (no project owns this call), and it must not fail
+              // silently into nothing: fall back to the app-run waiver the user would have got
+              // before, so a tick always buys what the box promised.
+              const scoped =
+                controlWaiveScope === 'project' &&
+                waiveControlConfirmForProject(confirm.waiveVerb, confirm.waiveProjectId)
+              if (!scoped) useControlConfirm.getState().waiveForSession(confirm.waiveVerb)
             }
             confirm.onConfirm()
           }}

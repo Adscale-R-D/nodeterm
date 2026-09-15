@@ -84,8 +84,12 @@ describe('the confirm-gated set and the dispatch that reads it stay in agreement
     it(`${verb} reaches its confirm through the shared waiver decision`, () => {
       expect(isWaivableVerb(verb)).toBe(true)
       const body = dispatchBody(verb)
-      // The DECISION comes from the shared, tested table — never an inline condition here.
-      expect(body).toMatch(/controlConfirmDecision\(verb\)/)
+      // The DECISION comes from the shared, tested table — never an inline condition here, and it
+      // is asked about the CALLER's project (`ctlProject`), not the active one: canvas control
+      // answers a background agent in its own project without moving the user's tab, so reading
+      // the project on screen would weigh the wrong project's waiver and the wrong project's
+      // permission mode.
+      expect(body).toMatch(/controlConfirmDecision\(verb, ctlProject\?\.id\)/)
       // A skip must announce itself. `waivedNotice` is what puts the action on screen when the
       // dialog is gone; without it a waiver makes destructive work silent.
       expect(body).toContain('waivedNotice(')

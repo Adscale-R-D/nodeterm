@@ -15,6 +15,7 @@ import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { CONFIRM_WAIVABLE_VERBS } from '@shared/control-confirm'
 import { useSettings } from '../../../state/settings'
+import { useProjects } from '../../../state/projects'
 import { useControlConfirm } from '../../../state/controlConfirm'
 import { AgentsSection } from './AgentsSection'
 
@@ -170,5 +171,82 @@ describe('destructive canvas-control confirmations in Settings', () => {
     expect(text).toContain('.nodeterm/project.json')
     expect(text).toMatch(/travels to everyone who clones the repo/)
     expect(text).toMatch(/A project that overrides the mode never counts/)
+  })
+
+  it('lists a PER-PROJECT waiver by project NAME, with a way back', () => {
+    // The row the dialog's durable scope owes: it is granted from a dialog that is gone the moment
+    // it is answered, so without this it would be a permanent loosening findable only by
+    // hand-editing settings.json. A project ID names nothing the user recognises, so the row shows
+    // the name.
+    act(() => {
+      useProjects.setState({
+        projects: [
+          { id: 'p1', name: 'web-app', nodes: [] },
+          { id: 'p2', name: 'api', nodes: [] }
+        ]
+      } as never)
+      useSettings.setState((st) => ({
+        settings: {
+          ...st.settings,
+          controlConfirmWaivers: { projects: { p1: ['close'] } }
+        }
+      }))
+    })
+    expect(host.textContent).toContain('Waived in these projects')
+    expect(host.textContent).toContain('web-app')
+    // …and not the other project, which was never waived.
+    expect(host.textContent).not.toMatch(/Ask before an agent closes nodes — api/)
+    const revoke = [...host.querySelectorAll('button')].find(
+      (b) => b.textContent === 'Revoke' && b.closest('div')?.textContent?.includes('web-app')
+    )
+    expect(revoke, 'a Revoke button beside the waiver').toBeTruthy()
+    act(() => revoke!.dispatchEvent(new MouseEvent('click', { bubbles: true })))
+    // Revoking the only verb takes the whole entry with it, so the map does not keep an empty key.
+    expect(useSettings.getState().settings.controlConfirmWaivers).toEqual({})
+    expect(host.textContent).not.toContain('Waived in these projects')
+  })
+
+  it('a waiver whose project is gone is not rendered as an unnamed row, and is pruned on write', () => {
+    // settings.json is forever and project ids are not. A stale entry is worse than clutter: it is
+    // a live security waiver keyed to an id nothing in the UI can name.
+    act(() => {
+      useProjects.setState({ projects: [{ id: 'p1', name: 'web-app', nodes: [] }] } as never)
+      useSettings.setState((st) => ({
+        settings: {
+          ...st.settings,
+          controlConfirmWaivers: { projects: { p1: ['close'], gone: ['write'] } }
+        }
+      }))
+    })
+    expect(host.textContent).toContain('web-app')
+    expect(host.textContent).not.toContain('gone')
+    const revoke = [...host.querySelectorAll('button')].find((b) => b.textContent === 'Revoke')
+    act(() => revoke!.dispatchEvent(new MouseEvent('click', { bubbles: true })))
+    expect(useSettings.getState().settings.controlConfirmWaivers).toEqual({})
+  })
+
+  it('the verb row says WHERE it is waived, rather than counting projects', () => {
+    // "Waived in 3 projects" tells the user a number when what they need is which ones.
+    act(() => {
+      useProjects.setState({ projects: [{ id: 'p1', name: 'web-app', nodes: [] }] } as never)
+      useSettings.setState((st) => ({
+        settings: {
+          ...st.settings,
+          controlConfirmWaivers: { projects: { p1: ['close'] } }
+        }
+      }))
+    })
+    expect(host.textContent).toMatch(/Waived permanently in "web-app"/)
+    // The machine-wide waiver outranks it and says so on its own; the per-project note must not
+    // ALSO claim it, or the user reads two different explanations for one silenced dialog.
+    act(() => {
+      useSettings.setState((st) => ({
+        settings: {
+          ...st.settings,
+          controlConfirmWaivers: { projects: { p1: ['close'] }, always: ['close'] }
+        }
+      }))
+    })
+    expect(host.textContent).not.toMatch(/Waived permanently in "web-app"/)
   })
 })

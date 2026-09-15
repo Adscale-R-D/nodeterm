@@ -7,6 +7,7 @@ import {
   decideControlConfirm,
   expiredDialogNotice,
   isWaivableVerb,
+  pruneControlConfirmWaivers,
   sanitizeControlConfirmWaivers,
   waivedNotice
 } from './control-confirm'
@@ -205,5 +206,152 @@ describe('waivedNotice', () => {
       expect(waivedNotice('did a thing', via)).toContain('Settings → Agents')
       expect(waivedNotice('did a thing', via)).toContain('did a thing')
     }
+  })
+})
+
+describe('the per-project waiver — a "don\'t ask again" that lasts, without going machine-wide', () => {
+  it('skips only inside the project it was granted for', () => {
+    const persisted = { projects: { p1: ['close'] } }
+    expect(decideControlConfirm({ verb: 'close', persisted, projectId: 'p1' })).toEqual({
+      skip: true,
+      via: 'project'
+    })
+    // The whole point of the scope. A user who trusts the orchestrator in one repo has said
+    // nothing at all about the next one.
+    expect(decideControlConfirm({ verb: 'close', persisted, projectId: 'p2' })).toEqual({
+      skip: false,
+      via: null
+    })
+    // …and nothing about another verb in the same project.
+    expect(decideControlConfirm({ verb: 'write', persisted, projectId: 'p1' })).toEqual({
+      skip: false,
+      via: null
+    })
+  })
+
+  it('needs a real project id — an absent one must not match anything', () => {
+    // Fail closed: canvas control can now answer a call whose owning project it could not resolve,
+    // and `undefined` used as a map key would stringify to "undefined" and match a hand-edited
+    // entry of that name.
+    const persisted = { projects: { undefined: ['close'], '': ['close'] } }
+    expect(decideControlConfirm({ verb: 'close', persisted }).skip).toBe(false)
+    expect(decideControlConfirm({ verb: 'close', persisted, projectId: '' }).skip).toBe(false)
+  })
+
+  it('is outranked by the unwaivable table, like every other lever', () => {
+    expect(
+      decideControlConfirm({
+        verb: 'open-project',
+        persisted: { projects: { p1: ['open-project'] } },
+        projectId: 'p1'
+      })
+    ).toEqual({ skip: false, via: null })
+  })
+
+  it('sits between the app-run waiver and the machine-wide one', () => {
+    // Precedence is narrowest-first among the persisted grants, so the notice names the waiver the
+    // user most likely wants back. A session waiver still outranks it: it is the most recent thing
+    // they said.
+    const persisted = { projects: { p1: ['close'] }, always: ['close'] }
+    expect(decideControlConfirm({ verb: 'close', persisted, projectId: 'p1' }).via).toBe('project')
+    expect(
+      decideControlConfirm({
+        verb: 'close',
+        persisted,
+        projectId: 'p1',
+        sessionWaived: new Set(['close'])
+      }).via
+    ).toBe('session')
+    // A project with no entry still falls through to the machine-wide one.
+    expect(decideControlConfirm({ verb: 'close', persisted, projectId: 'p9' }).via).toBe('always')
+  })
+
+  it('a project entry never opens the bypass branch, and vice versa', () => {
+    // They are independent locks; neither may stand in for the other.
+    expect(
+      decideControlConfirm({
+        verb: 'close',
+        persisted: { projects: { p1: ['close'] } },
+        projectId: 'p2',
+        permissionMode: 'bypassPermissions',
+        permissionModeSource: 'global'
+      }).skip
+    ).toBe(false)
+  })
+})
+
+describe('sanitizeControlConfirmWaivers — the per-project map is hostile input too', () => {
+  it('applies the verb table per project, exactly as it does to `always`', () => {
+    expect(
+      sanitizeControlConfirmWaivers({
+        projects: { p1: ['close', 'open-project', 'nonsense', 'close'] }
+      })
+    ).toEqual({ projects: { p1: ['close'] } })
+  })
+
+  it('drops an entry that would waive nothing, key and all', () => {
+    // An entry waiving nothing is indistinguishable from no entry to every reader, and keeping it
+    // would put a row in Settings offering to revoke a waiver that does not exist.
+    expect(sanitizeControlConfirmWaivers({ projects: { p1: [], p2: ['open-project'] } })).toEqual({})
+  })
+
+  it('degrades a non-object `projects` to nothing rather than throwing', () => {
+    for (const bad of [null, 'close', 42, ['close'], true]) {
+      expect(sanitizeControlConfirmWaivers({ projects: bad })).toEqual({})
+    }
+    expect(sanitizeControlConfirmWaivers({ projects: { '': ['close'] } })).toEqual({})
+  })
+
+  it('keeps the other keys intact', () => {
+    expect(
+      sanitizeControlConfirmWaivers({
+        always: ['write'],
+        projects: { p1: ['close'] },
+        bypassMode: true
+      })
+    ).toEqual({ always: ['write'], projects: { p1: ['close'] }, bypassMode: true })
+  })
+})
+
+describe('pruneControlConfirmWaivers — settings.json is forever, project ids are not', () => {
+  it('drops entries whose project is gone', () => {
+    const w = { projects: { alive: ['close'], dead: ['write'] }, always: ['write'] }
+    expect(pruneControlConfirmWaivers(w, new Set(['alive']))).toEqual({
+      projects: { alive: ['close'] },
+      always: ['write']
+    })
+  })
+
+  it('removes the key entirely when nothing survives', () => {
+    const pruned = pruneControlConfirmWaivers({ projects: { dead: ['close'] } }, new Set())
+    expect(pruned).toEqual({})
+    expect('projects' in pruned).toBe(false)
+  })
+
+  it('returns the SAME object when nothing would change, so a no-op never dirties settings', () => {
+    const w = { projects: { alive: ['close'] } }
+    expect(pruneControlConfirmWaivers(w, new Set(['alive']))).toBe(w)
+    const none = { always: ['close'] }
+    expect(pruneControlConfirmWaivers(none, new Set())).toBe(none)
+  })
+})
+
+describe('waivedNotice names the per-project waiver by project', () => {
+  it('names the project, because "this project" may not be the one on screen', () => {
+    // Canvas control answers a background agent in its OWN project without moving the user's tab,
+    // so a notice saying "this project" would point at whatever they happen to be looking at.
+    expect(waivedNotice('Agent "A" closed n-1', 'project', 'web-app')).toContain('"web-app"')
+    expect(waivedNotice('Agent "A" closed n-1', 'project', 'web-app')).toContain('Settings \u2192 Agents')
+  })
+
+  it('still says something true when the project name is unknown', () => {
+    expect(waivedNotice('x', 'project')).toContain('that project')
+    expect(waivedNotice('x', 'project')).not.toContain('undefined')
+  })
+
+  it('the other three are unchanged', () => {
+    expect(waivedNotice('x', 'session')).toContain('this app run')
+    expect(waivedNotice('x', 'always')).toContain('permanently')
+    expect(waivedNotice('x', 'bypass')).toContain('Bypass')
   })
 })

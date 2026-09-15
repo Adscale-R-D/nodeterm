@@ -5489,6 +5489,24 @@ body,
   cursor: pointer;
 }
 
+/* The "how far" radios under a confirm's opt-in (canvas control's "Don't ask again"). Indented
+   under the checkbox they qualify, so the pair reads as one control rather than two questions. */
+.confirm__scopes {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: -8px 0 14px 22px;
+}
+
+.confirm__scope {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  color: rgba(var(--tint-rgb), 0.55);
+  cursor: pointer;
+}
+
 .confirm__input {
   width: 100%;
   box-sizing: border-box;

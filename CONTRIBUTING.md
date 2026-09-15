@@ -143,6 +143,22 @@ lane unaffected.
   because reading an unset setting as a deliberate choice is reading consent into silence. Anything
   machine-local goes in `settings.json`; nothing that grants a capability goes in `project.json`.
 
+- **Nothing an agent asks for may take the user's screen.** Canvas control routes by SOURCE: the
+  request names the agent's own node, and the dispatch has to find the canvas that owns it. For
+  years "that canvas is not on screen" was answered by switching the project tab — so a background
+  agent's `close` moved a user who was typing in another project, applied that project's saved
+  viewport, and took their camera and typing focus for a call they did not make. Every verb now has
+  a decided off-screen behaviour (`src/shared/control-off-screen.ts`) and none of them is "travel":
+  it is answered against the owning project's serialized nodes, or REFUSED with a reason the agent
+  can act on. If you add a verb, give it an entry — a refusal beats a hijack, and a verb with no
+  entry falls into the generic refusal, which is fail-closed but is nobody's decision. Two traps
+  the old shape hid: a verb body that resolves `--node` against the live `nodesRef.current` while
+  answering for another project silently acts on whatever the human is looking at (use
+  `ctlNodes()`), and reading `activeProjectId` inside a verb has the same bug (use `ctlProject`).
+  The guard is `test/acceptance/control-verb-disposition.test.ts`, which walks main's verb table
+  against the renderer's dispositions — deliberately cross-layer, because that is the only way
+  "every verb" is checked rather than remembered.
+
 - **A dialog raised on someone else's behalf must know that request's lifetime.** Main abandons a
   canvas-control request after 120 s and tells the renderer nothing, so an unanswered dialog sat
   there forever AND held the one-confirm-at-a-time guard, which refused every later destructive

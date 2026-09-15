@@ -19,6 +19,10 @@ import { STRICT_CONTROL_VERBS } from '../core/agents/node-identity-policy'
 import { BROWSER_ACTION_KEYS } from '../core/browser-verb'
 import { BROWSER_RETRYABLE, BROWSER_OUTCOME_LABEL } from '../core/browser-outcomes'
 import { BROWSER_CAPABILITY_OFF_MESSAGE } from './browser-drive'
+import {
+  offScreenDisposition,
+  controlVerbSetsForTests
+} from '../shared/control-off-screen'
 
 describe('parseControlRequest', () => {
   it('accepts known verbs', () => {
@@ -785,5 +789,56 @@ describe('the --project clause tells the truth about travel (review #363 I-1 + M
       // THE STALE CLAIM the split exists to prevent: a display verb reported as queued.
       expect(clause, `${name}: not queued`).toMatch(/nothing (here )?is (ever )?\`?queued/i)
     }
+  })
+
+  it('both bodies render the OFF-SCREEN table, and render it from the table', () => {
+    // CLAUDE.md's rule for this subsystem: derive, never re-type — "a doc line with no such test
+    // is a plan, not a fact". The two sides of the table have OPPOSITE consequences for a caller
+    // (act, or ask the human and stop), so a verb documented on the wrong side is worse than one
+    // documented nowhere: an orchestrator would report as done a `close` that never happened.
+    const sets = controlVerbSetsForTests()
+    const answered = [
+      ...sets.storeAnswered,
+      ...sets.coldOpenable,
+      ...sets.offCanvas,
+      ...sets.storedNode
+    ]
+    for (const [name, body] of bodies) {
+      expect(body, `${name}: the promise`).toMatch(/NO VERB EVER SWITCHES THE USER'S VIEW/)
+      const start = body.indexOf("NO VERB EVER SWITCHES THE USER'S VIEW")
+      const end = body.indexOf('Messaging outcomes', start)
+      expect(end, `${name}: the messaging block after it`).toBeGreaterThan(start)
+      const clause = body.slice(start, end)
+      for (const v of answered) {
+        expect(clause, `${name}: ${v} is answered off screen`).toContain(v)
+        expect(offScreenDisposition(v).kind, v).not.toBe('refuse')
+      }
+      // Every refused verb is named AND carries its own reason — a bare list would tell an agent
+      // that `branch` and `arrange` fail for the same cause, and they do not.
+      for (const v of ['group', 'ungroup', 'move', 'arrange', 'align', 'verify', 'spawn-team', 'branch', 'open-worktree', 'close-worktree', 'browser']) {
+        const d = offScreenDisposition(v)
+        expect(d.kind, v).toBe('refuse')
+        if (d.kind !== 'refuse') continue
+        expect(clause, `${name}: ${v}'s reason`).toContain(`${v}: ${d.why}`)
+      }
+      // What the caller must DO about a refusal. Without this an agent retries on a timer against
+      // a project the user may not open for hours.
+      expect(clause, `${name}: what to do`).toMatch(/Ask the user to open it/)
+      expect(clause, `${name}: do not retry on a timer`).toMatch(/do not\s+retry it on a timer/)
+      expect(clause, `${name}: do not report done`).toMatch(/do not report the action as done/)
+    }
+  })
+
+  it('the off-screen table never claims a verb is BOTH answered and refused', () => {
+    // The rendering reads two sources; a verb added to a set without being removed from
+    // OFF_SCREEN_REFUSALS would appear on both sides of the same paragraph.
+    const sets = controlVerbSetsForTests()
+    const answered = new Set([
+      ...sets.storeAnswered,
+      ...sets.coldOpenable,
+      ...sets.offCanvas,
+      ...sets.storedNode
+    ])
+    for (const v of answered) expect(offScreenDisposition(v).kind, v).not.toBe('refuse')
   })
 })

@@ -360,7 +360,19 @@ export async function resolveSshRemote(
   // hook/account env and the `-f` config. That is exactly why a node whose session already exists
   // may attach over the master before any of them exist; see `waitForSshRemote` for the full rule.
   const outcome = await waitForSshRemote({
-    getFull: () => useSshConn.getState().byProject[projectId],
+    // Narrowed to the four fields a spawn takes. `SshConnInfo` also carries the Codex runtime paths
+    // and the claude-probe answer, and spreading the whole entry would put them on the wire in
+    // every `pty.create` — a payload change nothing reads, for no reason.
+    getFull: () => {
+      const info = useSshConn.getState().byProject[projectId]
+      if (!info) return undefined
+      return {
+        controlPath: info.controlPath,
+        hookEndpointPath: info.hookEndpointPath,
+        tmuxConfPath: info.tmuxConfPath,
+        remoteHome: info.remoteHome
+      }
+    },
     getEarly: () => useSshConn.getState().getEarlyControlPath(projectId),
     subscribe: (cb) => useSshConn.subscribe(cb),
     confirmSession: early

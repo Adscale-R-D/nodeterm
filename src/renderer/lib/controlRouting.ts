@@ -70,150 +70,21 @@ export function routeControlSource(
 }
 
 /**
- * Verbs that are answered from the SERIALIZED store instead of the live canvas.
- *
- * `list` reads names only, and it is the verb an agent calls most — answering it out of the store
- * keeps a background agent's polling from yanking the user's view to another project tab on every
- * call.
- *
- * `send`/`reply` are here for a stronger reason than politeness, and it is worth being precise
- * about WHICH travel this prevents: routing here is by SOURCE
- * (`routeControlSource(projects, activeId, sourceNodeId)`), so what the declaration stops is a trip
- * to the SENDER's project — which an off-canvas orchestrator would otherwise trigger on every
- * message it sent, hijacking the human's view on a background agent's say-so and clearing that
- * node's unread badge via `setActive` on the way (G5). A delivery goes to a tmux PANE, not to a
- * canvas, so it needs no live canvas at either end.
- *
- * The other half — never travelling to the TARGET's project — is not this function's doing. It
- * comes from `resolveDeliveryScope` (`src/core/agents/agent-message-scope.ts`) taking the
- * serialized store and having no live-node parameter at all, so there is nothing to travel toward.
- *
- * LIVE AS OF PR 5: Canvas.tsx's dispatch handles `send`/`reply` BEFORE its source-routing
- * machinery, so neither `routeControlSource` nor any travel runs for them — the declaration here
- * and that early-exit are the same decision stated once each, and `controlRouting.test.ts` pins
- * this half.
+ * The off-screen verb table lives in `@shared/control-off-screen` because CORE renders the
+ * agent-facing help from it and core cannot import the renderer. Re-exported here so every
+ * renderer caller keeps one import for "how does canvas control route".
  */
-/*
- * `sticky` is store-answered for the send/reply reason, not the list reason: its headline use is
- * a SCHEDULED agent rewriting one note every few minutes, and routing is by SOURCE — so a live
- * requirement would yank the human's view to the sync agent's project on every run (G5), which is
- * exactly the behaviour that gets the sync loop turned off. The write lands in the owning
- * project's serialized nodes (`applyNodeMutation`, the same path peer mutations take) when that
- * project is not the active one; the live canvas handles it when it is.
- */
-/*
- * `open-project` (issue #338) is store-answered for the G5 reason in its sharpest form: its
- * headline caller is a background orchestrator registering one repo after another, and routing is
- * by SOURCE — a live requirement would yank the human's view to the CALLER's project on every
- * registration (and clear its unread badge via `setActive` on the way). The verb acts on the
- * projects STORE through the non-activating `registerProject`, and its consent dialog is
- * app-global (`ConfirmState` overlays the window), so no live canvas is needed at either end.
- * Canvas.tsx handles it BEFORE the source-routing machinery — this declaration and that
- * early-exit are the same decision stated once each (spec §2.3, P6), pinned by
- * `controlRouting.test.ts`.
- */
-const STORE_ANSWERED_VERBS: ReadonlySet<string> = new Set([
-  'list',
-  'send',
-  'reply',
-  'sticky',
-  'open-project'
-])
-
-/**
- * Does this verb have to run against the LIVE canvas? Everything that creates, moves, writes to or
- * closes a node does.
- */
-export function needsLiveCanvas(verb: string): boolean {
-  return !STORE_ANSWERED_VERBS.has(verb)
-}
-
-/**
- * Verbs that CREATE a session and can therefore be answered by writing into the owning project's
- * SERIALIZED nodes instead of activating its tab.
- *
- * The relationship to `STORE_ANSWERED_VERBS` is the whole point, and the two sets are disjoint
- * (pinned in `controlRouting.test.ts`):
- *
- *   - `STORE_ANSWERED_VERBS` — "no canvas is needed at either end". `list` reads names, `send`/
- *     `reply` deliver into a tmux PANE, `sticky` rewrites a note, `open-project` acts on the
- *     projects store. `needsLiveCanvas` is false for them and they never route at all.
- *   - `COLD_OPENABLE_VERBS` — "a canvas IS needed, but the serialized one will do". The node these
- *     verbs create is INERT until its project is next shown: the launch command moves into
- *     `pendingLaunch` (`armForColdOpen`), the node is upserted through `applyNodeMutation`, and the
- *     project's own mount path spawns the PTY and fires the armed launch. `needsLiveCanvas` stays
- *     TRUE for them — they do need a canvas — which is exactly why this is a second, narrower set
- *     rather than four more entries in the first one.
- *
- * WHY (the bug): routing is by SOURCE, so `open-claude` from an agent in a project the user is not
- * looking at travelled the user's view to that project — the camera jumped, the tab switched and
- * the target project's saved viewport was applied, all on a background agent's say-so. That is the
- * same G5 hijack `send`/`reply`/`sticky` are declared here to avoid; the difference is only that an
- * open needs somewhere to put the node, and a project's serialized nodes are somewhere.
- *
- * Deliberately NOT here: every verb that acts on nodes that already exist (`write`, `close`,
- * `group`, `move`, `arrange`, `align`, `verify`, `spawn-team`, `open-worktree`). They read live
- * canvas state — measured node sizes, worktree staleness, the React Flow edge arrays — that the
- * serialized copy does not carry, so they keep travelling. The verbs that create a node with no
- * session behind it are the third set below.
- */
-const COLD_OPENABLE_VERBS: ReadonlySet<string> = new Set([
-  'open-terminal',
-  'open-claude',
-  'open-agent'
-])
-
-export function canColdOpen(verb: string): boolean {
-  return COLD_OPENABLE_VERBS.has(verb)
-}
-
-/**
- * Verbs that create a DISPLAY node — one with no session behind it — and can therefore run against
- * the owning project's serialized nodes without that canvas being on screen.
- *
- * The third set, and the reason it is not folded into `COLD_OPENABLE_VERBS`: a cold open has a
- * launch to defer, so it moves the composed command into `pendingLaunch` and tells the caller the
- * session is QUEUED. These four have nothing to defer. A web page, a video, an image and a browser
- * node are inert wherever they sit; writing one into a project's serialized nodes is the whole
- * effect, and it is complete the moment `writeDisk` returns. One set with two contracts inside it
- * is how a caller ends up told a picture is queued.
- *
- * WHY they were still travelling after the cold-open fix: an agent that renders its output as a
- * node — a report as `show-web`, a screenshot as `show-image` — is the commonest reason a
- * background session touches the canvas at all, and every one of those calls yanked the human out
- * of the project they were typing in. Same G5 objection, same answer as the two sets above.
- *
- * Deliberately NOT here: `browser`, which NAVIGATES an existing node and needs a mounted
- * `<webview>` guest to do it. `open-browser` merely places the node; the guest is created when
- * that project is next shown, exactly as a cold-opened terminal's PTY is.
- *
- * None of the four takes `--group`, which is why this set owes no worktree question. A verb
- * joining it that does would: `cwdForNewNodeIn` subtracts the worktree store's `staleGroupIds`,
- * which is epoch-scoped to the ACTIVE project, so off canvas that subtraction cannot be made.
- */
-const OFF_CANVAS_VERBS: ReadonlySet<string> = new Set([
-  'show-image',
-  'show-video',
-  'show-web',
-  'open-browser'
-])
-
-export function answersOffCanvas(verb: string): boolean {
-  return OFF_CANVAS_VERBS.has(verb)
-}
-
-/** Test-only view of the three sets, so their disjointness can be asserted rather than eyeballed. */
-export function controlVerbSetsForTests(): {
-  storeAnswered: string[]
-  coldOpenable: string[]
-  offCanvas: string[]
-} {
-  return {
-    storeAnswered: [...STORE_ANSWERED_VERBS],
-    coldOpenable: [...COLD_OPENABLE_VERBS],
-    offCanvas: [...OFF_CANVAS_VERBS]
-  }
-}
+export {
+  needsLiveCanvas,
+  canColdOpen,
+  answersOffCanvas,
+  answersFromStoredNodes,
+  offScreenDisposition,
+  offScreenRefusal,
+  offScreenGuidanceLines,
+  controlVerbSetsForTests,
+  type OffScreenDisposition
+} from '@shared/control-off-screen'
 
 /**
  * The capability half of the guard: may a session in this node drive the canvas?

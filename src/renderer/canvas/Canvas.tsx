@@ -260,6 +260,8 @@ import {
   needsLiveCanvas,
   canColdOpen,
   answersOffCanvas,
+  answersFromStoredNodes,
+  offScreenRefusal,
   sourceIsControlCapable,
   storedNodeListing,
   answerBrowserResolve,
@@ -6051,11 +6053,18 @@ export function Canvas() {
     return () => setWorktreeActionHandler(null)
   }, [onWorktreeAction])
 
-  // Same reason as worktreeControlRef below: the agent-control handler needs the CURRENT
-  // travelToProject (defined far below, after the project actions it composes).
-  const travelToProjectRef = useRef<(projectId: string) => void>(() => {})
-  /** Latest `travelToNode`, for the agent-control handler's off-canvas notice — same reason as
-   *  travelToProjectRef: that effect mounts ONCE, so it cannot close over the callback. */
+  /**
+   * Latest `closeStoredNodes`, for the agent-control handler's off-canvas `close` — same reason as
+   * worktreeControlRef below: that effect mounts ONCE, so it cannot close over the callback.
+   *
+   * There is deliberately NO `travelToProjectRef` beside it, and there must not be one again: the
+   * agent-control dispatch may not activate a project tab. It held one until the off-screen verbs
+   * were classified (`lib/controlRouting`); a background agent's `close` on a project the human
+   * was not looking at switched their tab and applied that project's saved viewport.
+   */
+  const closeStoredNodesRef = useRef<(projectId: string, ids: readonly string[]) => void>(() => {})
+  /** Latest `travelToNode`, for the agent-control handler's off-canvas notice. Travel to a NODE is
+   *  the user's own click on the notice's "Go there" button, not something a verb does. */
   const travelToNodeRef = useRef<(nodeId: string) => void>(() => {})
 
   // Latest worktree callbacks for the agent-control handler. That effect mounts ONCE (empty
@@ -9400,17 +9409,28 @@ export function Canvas() {
   // two-and-a-half things ONLY the renderer knows: which project owns the source node, whether that
   // source is a control-capable agent, and whether the per-project browser-control capability is on
   // RIGHT NOW (read live via projectCapabilityGrantedFor). We answer over the SAME source routing
-  // every verb uses — travelling to the owning project so its <webview> guest is live for main to
-  // drive — and we NEVER run a CDP command. Main makes the security decision (owner + capability +
-  // the CDP allowlist) and does the driving itself (browser-drive.ts / browser-actions.ts).
+  // every verb uses, and we NEVER run a CDP command. Main makes the security decision (owner +
+  // capability + the CDP allowlist) and does the driving itself (browser-drive.ts /
+  // browser-actions.ts).
   useEffect(() => {
     return api.onBrowserControlResolve(({ requestId, sourceNodeId, browserNodeId }) => {
       const { projects, activeProjectId } = useProjects.getState()
       const route = routeControlSource(projects, activeProjectId, sourceNodeId)
-      // Bring the owning project's canvas up so main can find the live guest (needsLiveCanvas is true
-      // for `browser`). A closed/blocked/unknown owner just yields the refusal below.
-      if (route.kind === 'switch' || route.kind === 'reopen') travelToProjectRef.current(route.projectId)
       const owner = projects.find((p) => p.nodes.some((n) => n.id === sourceNodeId))
+      // This used to travel to the owning project so main would find a live <webview> guest to
+      // drive. That was the same screen hijack the dispatch's verbs had, in its loudest form — a
+      // background agent taking the human's tab in order to script a browser they cannot see. It
+      // is a REFUSAL now: `browser` navigates an existing guest and there is no serialized
+      // counterpart for a mounted webview (`open-browser`, which merely places the node, is in
+      // OFF_CANVAS_VERBS and is unaffected). See `OFF_SCREEN_REFUSALS` in lib/controlRouting.
+      if (route.kind === 'switch' || route.kind === 'reopen') {
+        api.sendBrowserControlResolveResult({
+          requestId,
+          ok: false,
+          refusal: offScreenRefusal('browser', owner?.name)
+        })
+        return
+      }
       // `browserNodeId` is passed so the answer can carry the browser node's title for the cookie
       // trace; the security decision main makes never reads it.
       const answer = answerBrowserResolve(owner as unknown as BrowserResolveProject | undefined, sourceNodeId, browserNodeId)
@@ -9427,10 +9447,14 @@ export function Canvas() {
   // main never hangs to its 120s timeout.
   useEffect(() => {
     return api.onAgentControl(async ({ requestId, sourceNodeId, verb, args }) => {
-      // Set by the OFF-CANVAS branch below (`answersOffCanvas`): the verb runs against the owning
-      // project's SERIALIZED nodes because that project is not on screen. It stays undefined on
-      // every other path, which is what makes the on-screen behaviour byte-identical.
-      let offCanvas: { project: Project; closed: boolean; created: string[] } | undefined
+      // Set by the OFF-CANVAS branch below (`answersOffCanvas` / `answersFromStoredNodes`): the
+      // verb runs against the owning project's SERIALIZED nodes because that project is not on
+      // screen. It stays undefined on every other path, which is what makes the on-screen
+      // behaviour byte-identical — `ctlNodes()` and friends below are the one-name-for-two-sources
+      // seam, and on screen they are the live array verbatim.
+      let offCanvas:
+        | { project: Project; closed: boolean; created: string[]; nodes: CanvasNode[] }
+        | undefined
       const reply = (r: { ok: boolean; message?: string; result?: unknown; error?: string }) => {
         // Say WHERE it went, once, in both voices. The verb bodies already say WHAT they made, so
         // none of them has to know about routing: the clause is appended here and the human strip
@@ -10192,18 +10216,23 @@ export function Canvas() {
             return
           }
           // ── OFF CANVAS ──────────────────────────────────────────────────────────────────
-          // A DISPLAY verb (`show-image` / `show-video` / `show-web` / `open-browser`) whose own
-          // project is not on screen. Same objection as the cold open above and the same answer,
-          // one set wider: an agent that renders its output as a node is the commonest reason a
-          // background session touches the canvas at all, and every one of those calls used to
-          // yank the human out of the project they were typing in.
+          // A DISPLAY verb (`show-image` / `show-video` / `show-web` / `open-browser`) or a verb
+          // that acts on nodes which ALREADY EXIST (`write` / `close` / `rename` / `color` /
+          // `link` / `board` / `assign`), whose own project is not on screen. Same objection as
+          // the cold open above and the same answer, two sets wider: an agent that renders its
+          // output as a node, or tidies up after itself, is the commonest reason a background
+          // session touches the canvas at all, and every one of those calls used to yank the human
+          // out of the project they were typing in.
           //
-          // The difference from the cold open is that there is nothing to defer. These four make
-          // an INERT node — a page, a video, an image, a browser — which is complete the moment it
-          // is written, so the verb body runs unchanged and only the three things it touches on
-          // the canvas are staged: the node counter, the placement source, and the append.
-          // See `answersOffCanvas` in lib/controlRouting for why `browser` is not in the set.
-          if (answersOffCanvas(verb)) {
+          // The difference from the cold open is that there is nothing to defer. A display verb
+          // makes an INERT node — a page, a video, an image, a browser — complete the moment it is
+          // written; a stored-node verb reaches a tmux pane, a store writer or the board file,
+          // none of which needs React Flow. So the verb bodies run unchanged and only the canvas
+          // touches are staged: the node array they read (`ctlNodes`), the counter, the placement
+          // source, the append, and the edge/kanban writes.
+          // See `answersOffCanvas` / `answersFromStoredNodes` in lib/controlRouting for the sets,
+          // and `OFF_SCREEN_REFUSALS` for why the structural verbs are in neither.
+          if (answersOffCanvas(verb) || answersFromStoredNodes(verb)) {
             const ocStore = useProjects.getState()
             const owner = ocStore.getProject(route.projectId)
             const ocSrc = owner?.nodes.find((n) => n.id === sourceNodeId)
@@ -10213,22 +10242,31 @@ export function Canvas() {
               reply({ ok: false, error: 'source node is not a control-capable agent' })
               return
             }
-            offCanvas = { project: owner, closed: route.kind === 'reopen', created: [] }
-            // The body below reads the source for its title, cwd and placement geometry. Hydrate
-            // the ONE stored node rather than hand-rolling a partial: `nodeStatesToFlow` is what
-            // the project load itself uses, so the shape cannot drift from a live node's. It has
-            // no `measured` (nothing rendered it), which `placeBelow` already falls back for.
-            src = nodeStatesToFlow([ocSrc])[0] as CanvasNode
+            // The bodies below read the source for its title, cwd and placement geometry, and the
+            // stored-node verbs additionally resolve OTHER node ids. Hydrate the project's WHOLE
+            // node array rather than hand-rolling partials: `nodeStatesToFlow` is what the project
+            // load itself uses, so the shape cannot drift from a live node's, and the parent chain
+            // a display verb's placement walks is present. The array has no `measured` (nothing
+            // rendered it), which `placeBelow` already falls back for — and which is exactly why
+            // the five structural verbs refuse instead of joining this branch.
+            const ocNodes = nodeStatesToFlow(owner.nodes) as CanvasNode[]
+            offCanvas = { project: owner, closed: route.kind === 'reopen', created: [], nodes: ocNodes }
+            src = ocNodes.find((n) => n.id === sourceNodeId)
           } else {
-            travelToProjectRef.current(route.projectId)
+            // NEVER travel. This is where `travelToProject` used to be called, and it was the
+            // steal: the tab switched and the owning project's SAVED viewport was applied, so the
+            // human's focus, camera and typing context were taken by a call they did not make.
+            // A refusal an agent can act on is strictly better than hijacking someone's screen —
+            // see `offScreenRefusal`, which names the project so the agent can ask for it by name.
+            reply({ ok: false, error: offScreenRefusal(verb, projects.find((p) => p.id === route.projectId)?.name) })
+            return
           }
         }
-        // Wait for the node to show up on the canvas: after a travel, because the active-project
-        // effect hydrates React Flow a tick later; on `active`, because a control call can land
-        // while the BOOT load of the owning project is still in flight — the very moment a
-        // re-adopted agent starts talking again. `unknown`/`blocked` have no canvas to wait for.
-        // An off-canvas answer has its source already and is deliberately NOT waiting for a
-        // canvas: waiting for one is what travelling was for.
+        // Wait for the node to show up on the canvas: on `active`, a control call can land while
+        // the BOOT load of the owning project is still in flight — the very moment a re-adopted
+        // agent starts talking again. `unknown`/`blocked` have no canvas to wait for, and every
+        // `switch`/`reopen` has already returned above (answered off canvas, or refused). This
+        // wait used to cover the travel too; nothing travels any more.
         if (!offCanvas && route.kind !== 'unknown' && route.kind !== 'blocked') {
           src = await waitForCanvasNode(() => nodesRef.current.find((n) => n.id === sourceNodeId))
         }
@@ -10267,6 +10305,27 @@ export function Canvas() {
         })()
       const ctlSsh = ctlProject?.ssh
       const sshFor = (cwd?: string) => nodeSshFor(ctlSsh, cwd)
+      // The node array THIS control call acts on, and the one name every verb body uses for it.
+      // On screen it IS `nodesRef.current` — same object, so the on-screen path is byte-identical.
+      // Off canvas it is the owning project's serialized nodes, hydrated once in the routing
+      // branch above. Reading the live array off canvas would answer a background agent's call
+      // with whatever the human happens to be looking at, which is how `--node <id>` could resolve
+      // against a stranger's project.
+      const ctlNodes = (): CanvasNode[] =>
+        offCanvas ? offCanvas.nodes : (nodesRef.current as CanvasNode[])
+      // `linkEndpointOf` off canvas. Same answer, read out of the hydrated array: the live one
+      // holds another project's nodes, so every id would resolve to null (or, worse, to a
+      // same-named node over there).
+      const ctlLinkEndpointOf = (id: string): LinkEndpoint | null => {
+        if (!offCanvas) return linkEndpointOf(id)
+        const n = offCanvas.nodes.find((x) => x.id === id)
+        if (!n) return null
+        // `nodeStatesToFlow` has already migrated the legacy `tags:['claude']` marker into
+        // `data.agentId`, so the live helper's third fallback is the only one left to mirror.
+        const a =
+          ((n.data.agentId as AgentId | undefined) ?? useAgentStatus.getState().byId[id]?.agentId)
+        return { kind: n.type ?? 'terminal', contextCapable: !!a && canContextLink(a) }
+      }
       // A prompt too long for a typed line goes into a file the pane's own shell reads (#706).
       // See lib/promptSpill.ts for the budget and for why an SSH project is excluded: the file
       // would land on THIS machine while the pane runs on the host. Fails open in every
@@ -10290,7 +10349,10 @@ export function Canvas() {
       const srcH = src.measured?.height ?? (src.height as number) ?? 400
       // src.position is group-relative when the agent sits inside a group frame — resolve the
       // absolute position first so placements land below the agent regardless of grouping.
-      const srcGroup = src.parentId ? nodesRef.current.find((n) => n.id === src.parentId) : undefined
+      // `ctlNodes()`, not the live array: off canvas the parent frame lives in the OWNING
+      // project, and looking it up in the live one resolved either nothing (a group-relative
+      // position then read as absolute) or an unrelated node that happens to share the id.
+      const srcGroup = src.parentId ? ctlNodes().find((n) => n.id === src.parentId) : undefined
       const srcAbs = {
         x: src.position.x + (srcGroup?.position.x ?? 0),
         y: src.position.y + (srcGroup?.position.y ?? 0)
@@ -10329,13 +10391,24 @@ export function Canvas() {
       const bridgeTo = (
         fromId: string,
         targetIds: string[],
-        lookup: (id: string) => LinkEndpoint | null = linkEndpointOf
+        lookup: (id: string) => LinkEndpoint | null = ctlLinkEndpointOf
       ) => {
-        const plan = planBridges(fromId, targetIds, lookup, [...linkEdgesRef.current, ...drawn])
+        // Off canvas the existing edges are the OWNING project's persisted `bridges` — React
+        // Flow's array belongs to whatever the human is looking at, so deduping against it would
+        // let a link be drawn twice (or refuse one that does not exist yet).
+        const existing = offCanvas ? (offCanvas.project.bridges ?? []) : linkEdgesRef.current
+        const plan = planBridges(fromId, targetIds, lookup, [...existing, ...drawn])
         if (plan.edges.length) {
           drawn.push(...plan.edges)
-          setLinkEdges((es) => [...es, ...plan.edges])
-          markDirty()
+          if (offCanvas) {
+            // The same store path the cold open takes for the bridges IT owes. `appendCanvasLinks`
+            // dedupes by id AND by endpoint pair, so a re-link is a no-op rather than a duplicate.
+            useProjects.getState().appendCanvasLinks(offCanvas.project.id, { bridges: plan.edges })
+            void writeDisk()
+          } else {
+            setLinkEdges((es) => [...es, ...plan.edges])
+            markDirty()
+          }
         }
         return plan
       }
@@ -11016,7 +11089,7 @@ export function Canvas() {
               reply({ ok: false, error: 'link requires --to <id,id>' })
               return
             }
-            if (!linkEndpointOf(from)) {
+            if (!ctlLinkEndpointOf(from)) {
               reply({ ok: false, error: `link: --from names no existing node (${from})` })
               return
             }
@@ -11536,7 +11609,7 @@ export function Canvas() {
             // THIRD session, and read back by the phone, push alerts and the board log. Landing it
             // clean at the door is what keeps a control character out of all of them at once.
             const title = oneLine(args.title ?? '')
-            const target = nodesRef.current.find((nd) => nd.id === id)
+            const target = ctlNodes().find((nd) => nd.id === id)
             if (!target) {
               reply({ ok: false, error: `rename: no node with id ${id}` })
               return
@@ -11549,10 +11622,19 @@ export function Canvas() {
             const prevTitle = (target.data.title as string) ?? ''
             // Same semantics as renameSession: an explicit rename takes ownership of the
             // name (titleAuto off) and mirrors it into a rename-capable agent's session.
-            setNodes((ns) =>
-              ns.map((nd) => (nd.id === id ? { ...nd, data: { ...nd.data, title, titleAuto: false } } : nd))
-            )
-            markDirty()
+            if (offCanvas) {
+              // `renameNode` writes title + titleAuto:false straight into the serialized node —
+              // the store's own writer for a project that is not active, with no round-trip
+              // through the serializers. It is the same call the sessions sidebar makes when it
+              // renames a node in another project.
+              useProjects.getState().renameNode(offCanvas.project.id, id, title)
+              void writeDisk()
+            } else {
+              setNodes((ns) =>
+                ns.map((nd) => (nd.id === id ? { ...nd, data: { ...nd.data, title, titleAuto: false } } : nd))
+              )
+              markDirty()
+            }
             const agentId = target.data.agentId as AgentId | undefined
             if (agentId && canRename(agentId) && title) {
               // Gated twice: on the pane's owner (an agent that opens a node and renames it in the
@@ -11578,21 +11660,29 @@ export function Canvas() {
             const ids = [
               ...new Set((args.node ?? '').split(',').map((id) => id.trim()).filter(Boolean))
             ]
-            const live = nodesRef.current
+            const live = ctlNodes()
             const colored = ids.filter((id) => live.some((node) => node.id === id))
             if (!colored.length) {
               reply({ ok: false, error: 'color: none of the given node ids exist' })
               return
             }
             const selected = new Set(colored)
-            setNodes((nodes) =>
-              nodes.map((node) =>
-                selected.has(node.id)
-                  ? { ...node, data: { ...node.data, color } }
-                  : node
+            if (offCanvas) {
+              // `recolorNode` is the store's own per-node writer for a non-active project — one
+              // call per id, no serializer round-trip. Same shape as `rename` above.
+              const rcStore = useProjects.getState()
+              for (const id of colored) rcStore.recolorNode(offCanvas.project.id, id, color)
+              void writeDisk()
+            } else {
+              setNodes((nodes) =>
+                nodes.map((node) =>
+                  selected.has(node.id)
+                    ? { ...node, data: { ...node.data, color } }
+                    : node
+                )
               )
-            )
-            markDirty()
+              markDirty()
+            }
             const skipped = ids.length - colored.length
             const note = skipped ? ` (${skipped} unknown id(s) skipped)` : ''
             reply({
@@ -11784,7 +11874,7 @@ export function Canvas() {
             // untouched, deliberately including its lack of an existence check; see
             // `lib/closeTargets.ts` for that asymmetry and why the bulk form refuses the whole
             // request instead.
-            const targets = parseCloseTargets(args.node, nodesRef.current)
+            const targets = parseCloseTargets(args.node, ctlNodes())
             if (targets.kind === 'error') {
               reply({ ok: false, error: targets.error })
               return
@@ -11796,6 +11886,24 @@ export function Canvas() {
                 : bulkCloseMessage(srcTitle, targets.labels)
             const closeLabel = targets.kind === 'single' ? 'Close' : `Close ${closeIds.length}`
             const runClose = (): void => {
+              if (offCanvas) {
+                // Off canvas the canonical teardown is unavailable: `deleteNodes` reads the live
+                // node array and records its closed-session / reopen-history entries against the
+                // ACTIVE project, which is somebody else's here. `closeStoredNodes` is the
+                // cross-project teardown the sessions sidebar has always used — it still ends the
+                // tmux session (remote included, resolved from the persisted index) and still
+                // frees a closed frame's children. The control ropes are left alone for the same
+                // reason: `setControlEdges` addresses the wrong project's edges.
+                closeStoredNodesRef.current(offCanvas.project.id, closeIds)
+                reply({
+                  ok: true,
+                  message:
+                    closeIds.length === 1
+                      ? `closed ${closeIds[0]}`
+                      : `closed ${closeIds.length} nodes: ${closeIds.join(', ')}`
+                })
+                return
+              }
               // Canonical teardown: deleteNodes() destroys the local tmux session (remote-guarded),
               // drops persisted agentStatus, and reparents any group children. Don't hand-roll it.
               // ONE call for the whole list — its own paths are batched, and N calls would give N
@@ -11852,14 +11960,18 @@ export function Canvas() {
             return
           }
           case 'board': {
-            // Read-only snapshot of the CURRENTLY OPEN project's kanban board: columns + the
-            // session cards filed in each, plus the virtual Ungrouped column. The board's cards
-            // ARE the canvas session nodes (toKanbanSession), derived live — the board file only
-            // stores column assignments, so a session with no/dangling assignment sits Ungrouped.
-            const store = useProjects.getState()
-            const pid = store.activeProjectId
-            const board = store.getProject(pid ?? '')?.kanban
-            const sessions = nodesRef.current
+            // Read-only snapshot of the CALLER'S project's kanban board: columns + the session
+            // cards filed in each, plus the virtual Ungrouped column. The board's cards ARE the
+            // canvas session nodes (toKanbanSession), derived from `ctlNodes()` — the board file
+            // only stores column assignments, so a session with no/dangling assignment sits
+            // Ungrouped.
+            //
+            // `ctlProject`, not `activeProjectId`: off canvas those are two different projects, and
+            // reading the active one would answer a background agent's `board` with whatever the
+            // human happens to be looking at. On screen they are the same project, which is why
+            // the old read was never wrong in practice — the travel had already made it true.
+            const board = ctlProject?.kanban
+            const sessions = ctlNodes()
               .map(toKanbanSession)
               .filter((s): s is KanbanSession => s !== null)
             const titleOf = new Map(sessions.map((s) => [s.id, s.title || 'Untitled']))
@@ -11905,15 +12017,17 @@ export function Canvas() {
             // board's own scope note called out as missing. Board metadata ONLY: assignNode writes
             // an assignment, it never touches the canvas node, its group, or the running session.
             const nodeId = (args.node ?? '').trim()
-            const target = nodesRef.current.find((n) => n.id === nodeId)
+            const target = ctlNodes().find((n) => n.id === nodeId)
             if (!target || toKanbanSession(target) === null) {
               reply({ ok: false, error: `assign: --node names no session card (${nodeId || 'missing'})` })
               return
             }
             const store = useProjects.getState()
-            const pid = store.activeProjectId
+            // The CALLER'S project, not the active one — see `board` above for why the two used to
+            // look interchangeable and are not.
+            const pid = ctlProject?.id
             if (!pid) {
-              reply({ ok: false, error: 'assign: no active project' })
+              reply({ ok: false, error: 'assign: no project owns this session' })
               return
             }
             // Read prev fresh so the board-log diff below has the SAME base the write mutates —
@@ -11939,7 +12053,7 @@ export function Canvas() {
             // board feed reads identically whether a person or an agent moved the card. cardTitle
             // returns '' ONLY for a dead node; a live card with no title maps to 'Untitled'.
             const cardTitle = (id: string): string => {
-              const n = nodesRef.current.find((x) => x.id === id)
+              const n = ctlNodes().find((x) => x.id === id)
               const card = n ? toKanbanSession(n) : null
               return card ? card.title || 'Untitled' : ''
             }
@@ -11967,6 +12081,53 @@ export function Canvas() {
   }, [])
 
   // ---- sessions sidebar actions ----
+  /**
+   * End sessions and drop their nodes from a project that is NOT on screen — the cross-project
+   * teardown, extracted so its two callers cannot drift: the sessions sidebar / session-memory
+   * panel (`closeSession` below) and canvas control's off-canvas `close`.
+   *
+   * It is `deleteNodes` minus the things only a live canvas has. tmux sessions are keyed by node
+   * id, so `transport.destroy` works for a node that was never mounted — including a REMOTE one,
+   * since `runEndSession` resolves the owning SSH host from the persisted index rather than from a
+   * live client (core/remote-end.ts). What is deliberately NOT reproduced: the closed-session
+   * ledger and the ⇧⌘T reopen history, both of which `deleteNodes` records against the ACTIVE
+   * project — recording another project's close there would put the entry on the wrong canvas. The
+   * sidebar's branch has always made that trade; this is the same trade with one copy.
+   *
+   * Known residual, inherited: display ropes (`project.ropes`) that pointed at a removed node stay
+   * in the file. React Flow drops an edge with a missing endpoint on the next load, and
+   * `appendCanvasLinks` is append-only, so pruning them needs a store writer that does not exist
+   * yet. It is decoration, not data.
+   */
+  const closeStoredNodes = useCallback(
+    (projectId: string, ids: readonly string[]) => {
+      const store = useProjects.getState()
+      const nodes = store.getProject(projectId)?.nodes ?? []
+      for (const id of ids) {
+        // A deleted frame's children SURVIVE it (deleteNodes frees them to absolute positions).
+        // `moveNodeToGroup(…, null)` is the serialized twin of that conversion — without it the
+        // children keep a `parentId` pointing at a node that no longer exists.
+        for (const child of nodes) {
+          if (child.parentId === id) store.moveNodeToGroup(projectId, child.id, null)
+        }
+        disposeTerminalOnUnmount(sessionForProject(projectId).id, id) // may be parked from a project switch
+        transport.destroy(id)
+        useAgentStatus.getState().remove(id)
+        // Unmount no longer clears the fan-out (issue #402), so a permanent removal must — the
+        // node unmounted at the project switch with its cards kept in the store.
+        useAgentNodes.getState().clearForParent(id)
+        useAgentNodes.getState().clearLoop(id)
+        // Same teardown symmetry as deleteNodes (review #363 M-1): the attach-consent mirror
+        // dies with the node.
+        clearAttachConsent(id)
+        useWebviewKeepAlive.getState().drop(id)
+        store.removeNode(projectId, id)
+      }
+      void writeDisk()
+    },
+    [writeDisk]
+  )
+
   // Close (end) a session. tmux sessions are keyed by node id, so destroy works for an
   // inactive project's node even though it isn't mounted; then drop it from the store.
   const closeSession = useCallback(
@@ -11985,18 +12146,7 @@ export function Canvas() {
           if (projectId === activeProjectId) {
             deleteNodes([id])
           } else {
-            disposeTerminalOnUnmount(sessionForProject(projectId).id, id) // node may be parked from the project switch
-            transport.destroy(id)
-            useAgentStatus.getState().remove(id)
-            // Unmount no longer clears the fan-out (issue #402), so this cross-project delete
-            // must — the node unmounted at the project switch with its cards kept in the store.
-            useAgentNodes.getState().clearForParent(id)
-            // Same teardown symmetry as deleteNodes (review #363 M-1): the attach-consent
-            // mirror dies with the node.
-            clearAttachConsent(id)
-            useWebviewKeepAlive.getState().drop(id)
-            useProjects.getState().removeNode(projectId, id)
-            void writeDisk()
+            closeStoredNodes(projectId, [id])
           }
           // The session-memory panel's remote leg (see `killSessionById`): the local destroy above
           // cannot reach a HOST's tmux session unless a live client carries `sshRemote`. Runs only
@@ -12006,7 +12156,7 @@ export function Canvas() {
         }
       })
     },
-    [activeProjectId, deleteNodes, writeDisk]
+    [activeProjectId, deleteNodes, closeStoredNodes]
   )
 
   /**
@@ -13417,10 +13567,10 @@ export function Canvas() {
     },
     [reopenProject, switchProject]
   )
-  // Latest project-travel callback for the agent-control handler: that effect mounts ONCE (empty
+  // Latest cross-project teardown for the agent-control handler: that effect mounts ONCE (empty
   // deps), so it cannot close over this callback — same reason as worktreeControlRef.
   useEffect(() => {
-    travelToProjectRef.current = travelToProject
+    closeStoredNodesRef.current = closeStoredNodes
   })
 
   // Jump to the node a peer is focused on. focusNodeById already handles the same-project focus and

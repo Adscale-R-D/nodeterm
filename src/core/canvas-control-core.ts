@@ -12,6 +12,7 @@ import { FANOUT_PER_TURN, PAIR_MIN_INTERVAL_MS } from './agents/agent-message-fl
 import { BROWSER_RETRYABLE, BROWSER_OUTCOME_LABEL } from './browser-outcomes'
 import { BROWSER_KEYS, BROWSER_TIMEOUT_DEFAULT_MS, BROWSER_TIMEOUT_MAX_MS } from './browser-verb'
 import { nodeColorChoices } from '@shared/node-colors'
+import { offScreenGuidanceLines } from '@shared/control-off-screen'
 import { codexThreadIdentityResolverSh } from './codex-thread-identity-sh'
 
 /**
@@ -460,6 +461,8 @@ export function buildCanvasControlInstructions(shimPath: string): string {
     '  never moves the node on the canvas or changes its group. Use it to reflect progress: move a card',
     '  to your "In Progress"/"Done" column as work advances.',
     ...browserVerbDocLines(),
+    '',
+    ...offScreenGuidanceLines(),
     '',
     ...messagingGuidanceLines(),
     '',
@@ -975,6 +978,8 @@ Verbs:
   its group, or touches the running session. Use it to reflect progress: as a station finishes,
   move its card into your "In Progress" / "Done" column so the board tells the real story.
 ${browserVerbDocLines().join('\n')}
+
+${offScreenGuidanceLines().join('\n')}
 
 ${messagingGuidanceLines().join('\n')}
 

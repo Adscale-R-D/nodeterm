@@ -4,6 +4,9 @@ import {
   needsLiveCanvas,
   canColdOpen,
   answersOffCanvas,
+  answersFromStoredNodes,
+  offScreenDisposition,
+  offScreenRefusal,
   controlVerbSetsForTests,
   sourceIsControlCapable,
   storedNodeListing,
@@ -336,5 +339,83 @@ describe('storedNodeListing', () => {
       { id: 'sticky-b-2', kind: 'sticky', title: '' },
       { id: 'term-b-3', kind: 'terminal', title: '' }
     ])
+  })
+})
+
+describe('the off-screen disposition table (the verbs that used to travel)', () => {
+  it('the verbs that act on existing nodes are answered from the store, not by travelling', () => {
+    // The field report: the user was typing in another project, a background agent issued a
+    // `close`, and the app switched their tab. These seven reach a pane, a store writer or the
+    // board file — none of them needs React Flow — so none of them has any business moving a
+    // camera to get there.
+    for (const v of ['write', 'close', 'rename', 'color', 'link', 'board', 'assign']) {
+      expect(answersFromStoredNodes(v), v).toBe(true)
+      expect(offScreenDisposition(v), v).toEqual({ kind: 'stored-node' })
+    }
+  })
+
+  it('the structural verbs refuse, and each says WHY in its own words', () => {
+    // A refusal an agent can act on beats hijacking the human's screen. The reasons are per verb
+    // because the caller's next move differs: an `arrange` can wait for the human, a `branch`
+    // cannot happen at all until that terminal is mounted.
+    const why = (v: string) => {
+      const d = offScreenDisposition(v)
+      expect(d.kind, v).toBe('refuse')
+      return d.kind === 'refuse' ? d.why : ''
+    }
+    expect(why('arrange')).toMatch(/measured/)
+    expect(why('group')).toMatch(/measured/)
+    expect(why('branch')).toMatch(/parks the original/)
+    expect(why('verify')).toMatch(/live canvas/)
+    expect(why('open-worktree')).toMatch(/worktree store/)
+    expect(why('browser')).toMatch(/webview/)
+    // …and no two structural verbs share a copy-pasted sentence that names the wrong mechanism.
+    expect(why('move')).toContain('reparenting')
+    expect(why('align')).toContain('aligning')
+  })
+
+  it('an unknown verb refuses — the fail-closed direction', () => {
+    // Someone adds a verb to main's table and forgets this file. It must not fall through to
+    // anything that could act, and it certainly must not travel.
+    expect(offScreenDisposition('teleport-everything')).toEqual({
+      kind: 'refuse',
+      why: 'it needs the live canvas'
+    })
+  })
+
+  it('the three answering paths keep their own kinds', () => {
+    expect(offScreenDisposition('list')).toEqual({ kind: 'store-answered' })
+    expect(offScreenDisposition('send')).toEqual({ kind: 'store-answered' })
+    expect(offScreenDisposition('notify')).toEqual({ kind: 'store-answered' })
+    expect(offScreenDisposition('open-claude')).toEqual({ kind: 'cold-open' })
+    expect(offScreenDisposition('show-web')).toEqual({ kind: 'off-canvas' })
+    // `open-browser` PLACES a node (off canvas); `browser` DRIVES one (refuses). The pair is the
+    // easiest thing in the table to collapse by accident.
+    expect(offScreenDisposition('open-browser')).toEqual({ kind: 'off-canvas' })
+    expect(offScreenDisposition('browser').kind).toBe('refuse')
+  })
+
+  it('the refusal sentence names the project, the reason and the fact that nothing happened', () => {
+    const msg = offScreenRefusal('group', 'web-app')
+    expect(msg.startsWith('group: project "web-app" is not on screen')).toBe(true)
+    expect(msg).toContain('measured node sizes')
+    expect(msg).toContain('Open that project and run this again')
+    expect(msg).toContain('nothing was changed')
+  })
+
+  it('a verb that is ANSWERED off screen still gets a sane sentence if someone asks for one', () => {
+    // `offScreenRefusal` is only called on the refusing branch, but it must not produce nonsense
+    // (or throw) if a future caller reaches for it on another verb.
+    expect(offScreenRefusal('write', 'web-app')).toContain('write:')
+  })
+
+  it('the four sets are disjoint, so the dispatch order cannot silently decide', () => {
+    const { storeAnswered, coldOpenable, offCanvas, storedNode } = controlVerbSetsForTests()
+    const all = [...storeAnswered, ...coldOpenable, ...offCanvas, ...storedNode]
+    expect(new Set(all).size).toBe(all.length)
+    // …and `needsLiveCanvas` stays TRUE for the three sets that DO need a canvas, which is what
+    // keeps `STORE_ANSWERED_VERBS` the narrow "no canvas at either end" claim it documents.
+    for (const v of [...coldOpenable, ...offCanvas, ...storedNode]) expect(needsLiveCanvas(v), v).toBe(true)
+    for (const v of storeAnswered) expect(needsLiveCanvas(v), v).toBe(false)
   })
 })

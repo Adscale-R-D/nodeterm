@@ -35,6 +35,7 @@ import { chipFor } from '../../../lib/keybindingOverrides'
 import { NODE_IDENTITY_STRICT_DATE } from '@shared/node-identity'
 import {
   CONFIRM_WAIVABLE_VERBS,
+  pruneControlConfirmWaivers,
   sanitizeControlConfirmWaivers
 } from '@shared/control-confirm'
 import { useControlConfirm } from '../../../state/controlConfirm'
@@ -332,6 +333,36 @@ export function AgentsSection({ isActive }: { isActive: boolean }): React.JSX.El
       controlConfirmWaivers: sanitizeControlConfirmWaivers({ ...waivers, bypassMode: on })
     })
   }
+  // Every project the store holds, CLOSED ones included: `closeProject` keeps the project, its
+  // nodes and its running sessions, so a closed project is parked and its waiver is still live.
+  // Subscribed, so revoking one repaints the list.
+  const allProjects = useProjects((s) => s.projects)
+  /**
+   * The per-project waivers, as ROWS the user can read: a project id alone names nothing they
+   * recognise. A waiver whose project is gone is not rendered as an unnamed row — it is pruned on
+   * the next write, exactly as `sidebarCollapsedItems` keys are (`pruneControlConfirmWaivers`).
+   */
+  const projectWaiverRows = Object.entries(waivers.projects ?? {})
+    .map(([id, verbs]) => ({
+      id,
+      name: allProjects.find((p) => p.id === id)?.name,
+      verbs
+    }))
+    .filter((r) => r.name !== undefined)
+    .sort((a, b) => (a.name ?? '').localeCompare(b.name ?? ''))
+  /** Revoke one verb's per-project waiver. Prunes dead projects in the same write — this section
+   *  is the only surface that ever sees the whole map, so it is the natural place to tidy it. */
+  const revokeProjectWaiver = (projectId: string, verb: string): void => {
+    const live = new Set(allProjects.map((p) => p.id))
+    const pruned = pruneControlConfirmWaivers(waivers, live)
+    const rest = (pruned.projects?.[projectId] ?? []).filter((v) => v !== verb)
+    const projects = { ...(pruned.projects ?? {}) }
+    if (rest.length) projects[projectId] = rest
+    else delete projects[projectId]
+    update({
+      controlConfirmWaivers: sanitizeControlConfirmWaivers({ ...pruned, projects })
+    })
+  }
   const activeProjectId = useProjects((s) => s.activeProjectId)
   const activeProject = useProjects((s) => s.projects.find((p) => p.id === activeProjectId))
   const setProjectCapability = useProjects((s) => s.setProjectCapability)
@@ -341,7 +372,6 @@ export function AgentsSection({ isActive }: { isActive: boolean }): React.JSX.El
   // Stop revokes for real in main (detach + drop), and there is deliberately NO global "disable
   // browser control" toggle here: one concept, one switch (the per-project capability below).
   const browserLeaseEntries = useBrowserLease((s) => s.entries)
-  const allProjects = useProjects((s) => s.projects)
   const nodeTitleById = (id: string): string => {
     for (const p of allProjects) {
       const n = p.nodes.find((node) => node.id === id)
@@ -556,6 +586,9 @@ export function AgentsSection({ isActive }: { isActive: boolean }): React.JSX.El
               ({ label: `Ask before an agent runs \`${v}\``, description: '' } as const)
             const sessionWaived = sessionWaivedVerbs.includes(v)
             const always = (waivers.always ?? []).includes(v)
+            // Named per project below rather than counted here: "waived in 3 projects" tells the
+            // user a number when what they need is which ones.
+            const inProjects = projectWaiverRows.filter((r) => r.verbs.includes(v))
             return (
               <FieldRow
                 key={v}
@@ -564,9 +597,13 @@ export function AgentsSection({ isActive }: { isActive: boolean }): React.JSX.El
                 // A live app-run waiver is a STATE, not help text — the warning accent is right,
                 // and it must name how to end it, because the dialog that granted it is gone.
                 note={
-                  sessionWaived && !always
-                    ? 'Waived until nodeterm quits (you ticked "Don\u2019t ask again"). Revoke restores the dialog now.'
-                    : undefined
+                  always
+                    ? undefined
+                    : sessionWaived
+                      ? 'Waived until nodeterm quits (you ticked "Don\u2019t ask again"). Revoke restores the dialog now.'
+                      : inProjects.length
+                        ? `Waived permanently in ${inProjects.map((r) => `"${r.name}"`).join(', ')} \u2014 revoke below.`
+                        : undefined
                 }
                 control={
                   <div className="flex items-center gap-2">
@@ -594,6 +631,35 @@ export function AgentsSection({ isActive }: { isActive: boolean }): React.JSX.El
               />
             )
           })}
+          {projectWaiverRows.length > 0 && (
+            <FieldRow
+              label="Waived in these projects"
+              // The rule this section exists for: every loosening stays visible and revocable. A
+              // per-project waiver is granted from a DIALOG, which is gone the moment it is
+              // answered — so without this row the grant would be permanent, invisible, and
+              // findable only by hand-editing settings.json.
+              description="You ticked \u201cDon\u2019t ask again\u201d and chose one project. These survive restarts, and apply only inside the project named. A project you delete takes its waivers with it."
+              control={
+                <div className="flex flex-col items-end gap-2">
+                  {projectWaiverRows.map((row) =>
+                    row.verbs.map((v) => (
+                      <div key={`${row.id}:${v}`} className="flex items-center gap-2">
+                        <span className="text-[12px] opacity-70">
+                          {CONTROL_CONFIRM_VERB_COPY[v]?.label ?? v} \u2014 {row.name}
+                        </span>
+                        <Button
+                          variant="default"
+                          onClick={() => revokeProjectWaiver(row.id, v)}
+                        >
+                          Revoke
+                        </Button>
+                      </div>
+                    ))
+                  )}
+                </div>
+              }
+            />
+          )}
           <FieldRow
             label="Also skip them while your permission mode is Bypass"
             description="When YOUR global permission mode (above) is Bypass permissions, treat that as covering these dialogs too. A project that overrides the mode never counts \u2014 an override is saved in .nodeterm/project.json and travels to everyone who clones the repo, so a repository you cloned must not be able to switch your confirmations off."

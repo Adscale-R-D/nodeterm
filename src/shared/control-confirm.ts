@@ -74,10 +74,34 @@ export function isWaivableVerb(verb: string): boolean {
  * business in a file a teammate can commit.
  */
 export interface ControlConfirmWaivers {
-  /** Verbs waived PERMANENTLY on this machine. Only ever set from Settings → Agents — the dialog
-   *  itself can grant the app-run waiver and nothing more, because a permanent security waiver
-   *  must not be one stray checkbox click away in a dialog that appeared under the user's hands. */
+  /** Verbs waived PERMANENTLY on this machine, in EVERY project. Only ever set from Settings →
+   *  Agents — the dialog itself may not grant this one, because a permanent MACHINE-WIDE security
+   *  waiver must not be one stray checkbox click away in a dialog that appeared under the user's
+   *  hands. That reasoning is about the SCOPE, not about permanence: see `projects` below. */
   always?: string[]
+  /**
+   * Verbs waived permanently but only inside ONE project — `{ [projectId]: verbs }`.
+   *
+   * The narrower grant that makes the dialog's offer honest. "Don't ask again" that lasts only
+   * until the next restart is not what a user who ticks it means, and the only durable answer used
+   * to be a machine-wide switch buried in Settings — so the realistic choices were "be asked
+   * forever" or "turn it off everywhere". A user who trusts the orchestrator in one repo should be
+   * able to say exactly that, and this is the scope the DIALOG may therefore grant: it is bounded
+   * by a project the user is looking at, revocable from Settings, and it cannot follow them into
+   * the repo where they do not trust it.
+   *
+   * SHAPE follows `settings.sidebarCollapsedItems`, the established per-project machine-local
+   * state, PRUNING INCLUDED (`pruneControlConfirmWaivers`): settings.json is forever and project
+   * ids are not, so without it the file accumulates an entry per project that ever existed, each
+   * one a live security waiver keyed to an id nothing can show the user any more.
+   *
+   * MACHINE-LOCAL, like everything else in this interface. A per-project waiver is emphatically
+   * NOT `.nodeterm/project.json`: that file is git-shared, and a cloned repo must never be able to
+   * turn somebody's confirms off — the same trap `bypassMode` needs two locks for. Keying on the
+   * project ID in `settings.json` is what keeps "in this project" a statement this machine's user
+   * made about this machine.
+   */
+  projects?: Record<string, string[]>
   /**
    * Skip the confirm while the resolved permission mode is `bypassPermissions` — the "I already
    * told this agent to stop asking me" case.
@@ -100,8 +124,10 @@ export interface ControlConfirmWaivers {
 export type PermissionModeSource = 'project' | 'global' | 'default'
 
 /** Why a confirm was skipped — carried into the user-visible notice, so a waived destructive
- *  action still announces itself and names the waiver that let it through. */
-export type ConfirmWaiverVia = 'session' | 'always' | 'bypass'
+ *  action still announces itself and names the waiver that let it through. Losing the dialog must
+ *  not mean losing the record, and "which of my four waivers did this" is the part of the record a
+ *  user needs in order to revoke the right one. */
+export type ConfirmWaiverVia = 'session' | 'project' | 'always' | 'bypass'
 
 export interface ControlConfirmDecision {
   /** True = apply the verb without a dialog. */
@@ -129,14 +155,31 @@ export function decideControlConfirm(input: {
    *  the user granted in a dialog dies with the process, which is what makes it the safe default. */
   sessionWaived?: ReadonlySet<string>
   persisted?: ControlConfirmWaivers
+  /**
+   * The project this request ACTS ON — the caller's own project, which is not necessarily the one
+   * on screen: canvas control routes by source, and a background agent's `write`/`close` is now
+   * answered in its own project without the user's tab moving (@shared/control-off-screen). The
+   * waiver that applies is the one the user granted for THAT project; reading the active project
+   * here would let a waiver granted in the repo they trust cover a call made from the one they do
+   * not. Absent (or unknown) simply means no per-project waiver applies — fail closed.
+   */
+  projectId?: string
   /** The mode a session launched right now would start in, and who chose it. */
   permissionMode?: AgentPermissionMode
   permissionModeSource?: PermissionModeSource
 }): ControlConfirmDecision {
-  const { verb, sessionWaived, persisted, permissionMode, permissionModeSource } = input
+  const { verb, sessionWaived, persisted, projectId, permissionMode, permissionModeSource } = input
   // The gate that outranks every waiver: this verb's confirm is not the user's to waive.
   if (!isWaivableVerb(verb)) return ASK
   if (sessionWaived?.has(verb)) return { skip: true, via: 'session' }
+  // Narrowest persisted grant before the widest: a user with both set has said something true
+  // about this project AND something true about the machine, and naming the narrower one in the
+  // notice points them at the waiver they most likely want back. `projectId` must be a real id —
+  // `undefined` would otherwise index the map with the string "undefined" and match a hand-edited
+  // entry of that name.
+  if (projectId && persisted?.projects?.[projectId]?.includes(verb)) {
+    return { skip: true, via: 'project' }
+  }
   // No second table check here: the `isWaivableVerb(verb)` gate above already refuses a
   // hand-edited `always: ["open-project"]` before this line is reached (proven by the
   // open-project test's `always` case, and by mutating that gate). A duplicate check would be
@@ -165,13 +208,58 @@ export function decideControlConfirm(input: {
  */
 export function sanitizeControlConfirmWaivers(raw: unknown): ControlConfirmWaivers {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {}
-  const o = raw as { always?: unknown; bypassMode?: unknown }
-  const always = Array.isArray(o.always)
-    ? [...new Set(o.always.filter((v): v is string => typeof v === 'string' && isWaivableVerb(v)))]
-    : []
+  const o = raw as { always?: unknown; projects?: unknown; bypassMode?: unknown }
+  const verbs = (v: unknown): string[] =>
+    Array.isArray(v)
+      ? [...new Set(v.filter((x): x is string => typeof x === 'string' && isWaivableVerb(x)))]
+      : []
+  const always = verbs(o.always)
   const out: ControlConfirmWaivers = {}
   if (always.length) out.always = always
+  // Per-project entries get the SAME treatment as `always` — the verb table decides, so a
+  // hand-edited `{"p1":["open-project"]}` is dropped rather than honoured — plus a key check the
+  // flat list does not need. An empty verb list is dropped with its key: an entry that waives
+  // nothing is indistinguishable from no entry to every reader, and keeping it would leave a row
+  // in Settings offering to revoke a waiver that does not exist.
+  if (o.projects && typeof o.projects === 'object' && !Array.isArray(o.projects)) {
+    const projects: Record<string, string[]> = {}
+    for (const [id, list] of Object.entries(o.projects as Record<string, unknown>)) {
+      if (!id) continue
+      const kept = verbs(list)
+      if (kept.length) projects[id] = kept
+    }
+    if (Object.keys(projects).length) out.projects = projects
+  }
   if (o.bypassMode === true) out.bypassMode = true
+  return out
+}
+
+/**
+ * Drop per-project waivers whose project no longer exists — the rule
+ * `pruneCollapsedItems`/`liveCollapseKeys` states for `settings.sidebarCollapsedItems`, applied to
+ * a map whose stale entries are worse than clutter: each one is a live security waiver keyed to an
+ * id nothing in the UI can name any more, and a project id is reused by nothing, so it can only
+ * ever rot.
+ *
+ * `live` is EVERY project the store holds, CLOSED ones included — `closeProject` keeps the project
+ * and its nodes on disk and its sessions running, so a closed project is parked, not gone. Pruning
+ * on the open tabs would silently revoke a waiver the user still has a canvas for.
+ *
+ * Returns the SAME object when nothing would change, so a no-op write never marks settings dirty.
+ */
+export function pruneControlConfirmWaivers(
+  waivers: ControlConfirmWaivers,
+  live: ReadonlySet<string>
+): ControlConfirmWaivers {
+  const projects = waivers.projects
+  if (!projects) return waivers
+  const dead = Object.keys(projects).filter((id) => !live.has(id))
+  if (dead.length === 0) return waivers
+  const kept: Record<string, string[]> = {}
+  for (const [id, verbs] of Object.entries(projects)) if (live.has(id)) kept[id] = verbs
+  const out: ControlConfirmWaivers = { ...waivers }
+  if (Object.keys(kept).length) out.projects = kept
+  else delete out.projects
   return out
 }
 
@@ -190,12 +278,22 @@ export function expiredDialogNotice(requestedBy?: string): string {
 /** The user-visible line a WAIVED destructive action raises (Canvas's info banner). A waiver
  *  makes the dialog go away — it must not make the ACTION go quiet, which is why this exists and
  *  why it names the waiver that let the action through. */
-export function waivedNotice(action: string, via: ConfirmWaiverVia): string {
+export function waivedNotice(
+  action: string,
+  via: ConfirmWaiverVia,
+  /** The project a `project` waiver belongs to. Named in the sentence because the whole point of
+   *  that scope is that it does NOT apply everywhere — a user reading "waived for this project"
+   *  while looking at a different project's canvas (which canvas control now makes routine) would
+   *  read it as covering the one in front of them. */
+  projectName?: string
+): string {
   const because =
     via === 'session'
       ? 'confirm waived for this app run'
-      : via === 'always'
-        ? 'confirm waived permanently'
-        : 'confirm waived while the global permission mode is Bypass'
+      : via === 'project'
+        ? `confirm waived for ${projectName ? `"${projectName}"` : 'that project'}`
+        : via === 'always'
+          ? 'confirm waived permanently'
+          : 'confirm waived while the global permission mode is Bypass'
   return `${action} — ${because} (Settings → Agents).`
 }

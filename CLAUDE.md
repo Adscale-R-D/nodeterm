@@ -2280,15 +2280,38 @@ else, and its context links must keep classifying across restarts).
     with 14 ids the user cannot audit the list themselves. Capped at `CLOSE_BULK_MAX` (50) and the
     dialog spells out at most 12 names then counts the rest — a name the user cannot see is not
     consent.
-  - **"Don't ask again" is bounded by the app's lifetime, and the permanent version is not
-    reachable from the dialog.** The checkbox grants a waiver in the transient
-    `state/controlConfirm.ts` (memory only — not `settings.json`, not `localStorage`), per VERB, so
-    quitting restores the gate; the PERMANENT waiver exists only in Settings → Agents, where the
-    option says "permanently". A dialog that appeared under the user's hands must not be able to
-    switch a destructive gate off forever on one stray click, and a waiver granted by a CANCEL must
-    not exist at all (the grant hangs off `onConfirm`, pinned by `control-destructive.test.ts`).
+  - **"Don't ask again" is bounded by SCOPE, not by permanence** (2026-09, revised). The checkbox
+    offers two reaches and defaults to the narrower: **"while nodeterm is running"** — the
+    transient `state/controlConfirm.ts`, memory only (not `settings.json`, not `localStorage`), per
+    VERB, so quitting restores the gate — or **"always in <project name>"**, persisted in
+    `settings.controlConfirmWaivers.projects` as `{ [projectId]: verbs }`. The machine-WIDE
+    `always` is still reachable only from Settings → Agents, where the option says "permanently":
+    a dialog that appeared under the user's hands must not switch a destructive gate off
+    *everywhere* on one stray click. The per-project scope is what makes the offer honest — an
+    app-run waiver is not what a user who ticks "don't ask again" means, and with only that and a
+    machine-wide switch the real choices were "be asked forever" or "turn it off everywhere".
+    Load-bearing details: (1) the waiver is keyed on the project the call **acts on**
+    (`ctlProject`), not the active one — canvas control answers a background agent in its own
+    project without moving the user's tab (@shared/control-off-screen), so reading the project on
+    screen would grant, or honour, a waiver in the wrong repo; the same argument applies to the
+    permission MODE the bypass lock weighs, which is why `controlConfirmDecision` takes a project
+    id and resolves both from it. (2) It is **machine-local** — never `.nodeterm/project.json`,
+    which is git-shared; the whole trap `bypassMode` needs two locks for. (3) It is **pruned** on
+    every write (`pruneControlConfirmWaivers`, the rule `pruneCollapsedItems` states for
+    `sidebarCollapsedItems`) against EVERY project including CLOSED ones — a closed project is
+    parked, not gone — because settings.json is forever and a stale entry is a live security
+    waiver keyed to an id nothing can name. The id being granted survives that prune because the
+    merge happens after it, not by an exemption inside it; a safeguard no test can turn red is a
+    comment, not a mechanism. (4) Precedence is narrowest-first among the persisted grants
+    (session → project → always → bypass), so the notice names the waiver the user most likely
+    wants back. (5) A waiver granted by a CANCEL must not exist at all (the grant hangs off
+    `onConfirm`, pinned by `control-destructive.test.ts` and
+    `control-confirm-scope.source.test.ts`), and a per-project grant that cannot be made (no
+    project owns the call) falls back to the app-run waiver rather than silently to nothing.
     Waiving is not silence: every waived application raises the info strip through `waivedNotice`,
-    which names the waiver that let it through and points at Settings.
+    which names the waiver that let it through — and, for the project scope, the PROJECT, since
+    "this project" would point at whatever the user happens to be looking at — and every
+    per-project waiver is listed with a Revoke in Settings → Agents.
   - **`bypassPermissions` needs TWO locks, and this is the trap to understand before touching it.**
     The permission mode is persisted to `.nodeterm/project.json`, which is **git-shared** — so
     keying the waiver on the mode alone would let a repository the user CLONED silently disable

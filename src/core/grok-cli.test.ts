@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest'
-import { grokCapsFromRunner, grokCliCapsFrom, UNKNOWN_GROK_CLI_CAPS } from './grok-cli'
+import fs from 'fs'
+import os from 'os'
+import path from 'path'
+import { grokCapsFromRunner, grokCliCapsFrom, probeGrokCliAt, UNKNOWN_GROK_CLI_CAPS } from './grok-cli'
 
 // Verbatim from `grok --help` on 1.0.13 (2026-09-02). The two lines matter for opposite reasons:
 // the first DEFINES the flag, the second only MENTIONS it inside another option's prose.
@@ -88,5 +91,25 @@ describe('grokCapsFromRunner — both subcommands are actually asked', () => {
     // No help means we know nothing about this binary; guessing from a models list alone would be
     // claiming a flag we never saw advertised.
     expect(await grokCapsFromRunner(async () => null)).toEqual(UNKNOWN_GROK_CLI_CAPS)
+  })
+})
+
+describe.skipIf(process.platform !== 'win32')('probeGrokCliAt — Windows npm shim', () => {
+  it('probes through cmd.exe', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nt-grok-shim-'))
+    try {
+      const cmd = path.join(dir, 'grok.cmd')
+      const script = path.join(dir, 'grok.js')
+      fs.writeFileSync(
+        script,
+        "if (process.argv[2] === '--help') console.log('  --session-id <uuid>')\nelse process.exitCode = 92\n"
+      )
+      fs.writeFileSync(cmd, `@echo off\r\n"${process.execPath}" "${script}" %*\r\n`)
+
+      // `models` exits 92 in the fake shim: the help answer survives, the model list is empty.
+      await expect(probeGrokCliAt(cmd)).resolves.toEqual({ sessionIdFlag: true, models: [] })
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
   })
 })

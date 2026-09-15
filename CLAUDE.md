@@ -1721,6 +1721,30 @@ else, and its context links must keep classifying across restarts).
   the validator refuses) settles at one attempt per 15 minutes instead of rewriting every agent's
   hook config every 45 s. A missing spec answers "not alive" rather than "unknown": nothing of ours
   is bound, which is a tunnel that cannot deliver.
+- **The per-agent hook installs run CONCURRENTLY, and the order that still matters is the one above
+  them.** `RemoteHooks.setup()` is the chain `connectOnce` awaits before a project reports
+  `connected`, so every terminal of a switched-to project waits through it. Its shape was: resolve
+  `$HOME`, open + VERIFY the reverse tunnel, write the endpoint file — and then install five agents'
+  hooks strictly one after another, ~16 more remote round trips in a row. MEASURED against a real
+  sshd through a 25 ms one-way delay proxy (50 ms RTT), 5 runs each: **3281 ms serial → 1471 ms
+  concurrent** over the same 22–24 ssh children. The installers are independent by construction —
+  each writes its own script under `<remoteDir>/agent-hooks/` and merges its own agent's config; no
+  two touch the same remote path, and the only shared statement is an idempotent `mkdir -p` — and
+  the `SshChildGate` (cap 6 per ControlMaster) is what makes the fan-out safe against a stock host's
+  `MaxSessions`, which is the whole reason it exists.
+  - **The tunnel and the endpoint file stay strictly BEFORE the fan-out**: that file is what every
+    hook this installs POSTs through, and it is written only once the tunnel has verified end to
+    end. `remote-hooks.test.ts` pins that ordering AND the overlap (a gated fake runner, so
+    concurrency is observed rather than inferred from wall-clock; the overlap test fails on the
+    serial version, checked by mutation).
+  - **`allSettled`, not `all`.** By the fan-out the tunnel is verified and the endpoint written, so
+    one installer failing must cost that agent its hooks and nothing else — not discard a working
+    setup for every other agent, which is what a rejection propagating to `setup`'s outer catch
+    would do (`return null` ⇒ no hooks at all, and post-#735 a repair retried on backoff forever).
+    Every installer catches its own errors today; this is the guard for the next one that forgets.
+  - The claude/gemini loop body became `installJsonAgentRemote`, with the same fail-open try/catch
+    its three siblings already had. Its three steps stay strictly ordered inside: the merge reads
+    the file the write then replaces.
 - **Per-node hook identity** (`src/core/agents/node-auth-*.ts`, `node-token-*.ts`,
   `node-identity-policy.ts` — full write-up in **`docs/node-identity.md`**) — the shared bearer proves
   "a session on this machine", never *which* session, so every node also gets a capability derived

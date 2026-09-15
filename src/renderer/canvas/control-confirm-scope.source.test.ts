@@ -15,6 +15,14 @@ import { readFileSync } from 'node:fs'
  */
 const src = readFileSync(new URL('./Canvas.tsx', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
 
+/** How many times a literal appears. Deliberately NOT a regex: the needles here carry `.` and `?`,
+ *  and hand-escaping a literal into a pattern is the idiom that quietly drops a character nobody
+ *  thought to list (CodeQL's js/incomplete-sanitization caught exactly that here — `\` was missing).
+ *  Counting with `split` asks no escaping question at all. */
+function countOf(haystack: string, needle: string): number {
+  return haystack.split(needle).length - 1
+}
+
 /** The control confirm's dialog element, from its option block to its `onCancel`. */
 function dialogBody(): string {
   const start = src.indexOf('confirm.waiveVerb\n              ? {')
@@ -74,7 +82,7 @@ describe('the "Don’t ask again" scope (source pins)', () => {
     )
     expect(onConfirm).not.toContain('activeProjectId')
     for (const field of ['waiveProjectId: ctlProject?.id', 'waiveProjectName: ctlProject?.name']) {
-      expect(src.match(new RegExp(field.replace(/[.?]/g, '\\$&'), 'g'))?.length, field).toBe(2)
+      expect(countOf(src, field), field).toBe(2)
     }
   })
 
@@ -92,14 +100,17 @@ describe('the "Don’t ask again" scope (source pins)', () => {
   it('the gate is asked about the CALLER’s project, in both destructive cases', () => {
     // The per-project waiver AND the permission mode the bypass lock reads both belong to the
     // project the call acts on. Off canvas that is not the active one.
-    expect(src.match(/controlConfirmDecision\(verb, ctlProject\?\.id\)/g)?.length).toBe(2)
+    expect(countOf(src, 'controlConfirmDecision(verb, ctlProject?.id)')).toBe(2)
     expect(src).not.toMatch(/controlConfirmDecision\(verb\)/)
   })
 
   it('the waived NOTICE names the project, in both cases', () => {
     // Losing the dialog must not mean losing the record, and "which waiver let this through" is
     // the part of the record that lets a user revoke the right one.
-    expect(src.match(/waivedNotice\(/g)?.length).toBe(2)
-    expect(src.match(/ctlProject\?\.name\n\s*\)/g)?.length, 'both notices pass the project name').toBe(2)
+    expect(countOf(src, 'waivedNotice(')).toBe(2)
+    expect(
+      countOf(src, 'ctlProject?.name\n                )'),
+      'both notices pass the project name'
+    ).toBe(2)
   })
 })

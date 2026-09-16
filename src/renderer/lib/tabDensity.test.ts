@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import {
   COMPACT_MIN_TAB_PX,
   ROOMY_MIN_TAB_PX,
@@ -27,17 +29,31 @@ describe('tabDensity', () => {
     expect(tabDensity(168 * 4, 4)).toBe('roomy')
   })
 
-  it('drops the SSH chip first: the field report at 8 tabs in 1340px is compact, not tight', () => {
-    // 1098 / 8 = 137px per tab — enough for caret + 60px of name, not for the chip as well.
+  it('defers the CARET first, so the field report at 8 tabs in 1340px KEEPS its SSH chips', () => {
+    // 1098 / 8 = 137px per tab — enough for the chip + 60px of name, not for the caret as well.
+    // Reported from the running app after the first version shed the chip here instead: the `SSH`
+    // label went missing from every remote tab at the width people actually work at.
     expect(tabDensity(STRIP_1340_MAC, 8)).toBe('compact')
-    expect(tabDensity(ROOMY_MIN_TAB_PX * 8 - 8, 8)).toBe('compact')
+    expect(COMPACT_MIN_TAB_PX).toBe(TAB_BASE_FURNITURE_PX + TAB_SSH_CHIP_PX + TAB_NAME_MIN_PX)
+    expect(STRIP_1340_MAC / 8).toBeGreaterThanOrEqual(COMPACT_MIN_TAB_PX)
   })
 
-  it('hides the inactive caret only when the caret itself would squeeze the name', () => {
-    // 1098 / 12 = 91.5px per tab: below the caret floor, above the bare floor.
+  it('hides the SSH chip only when the chip itself would squeeze the name', () => {
+    // 1098 / 12 = 91.5px per tab: below the chip floor, above the bare floor.
     expect(tabDensity(STRIP_1340_MAC, 12)).toBe('tight')
     expect(tabDensity(COMPACT_MIN_TAB_PX * 12 - 12, 12)).toBe('tight')
     expect(tabDensity(COMPACT_MIN_TAB_PX * 12, 12)).toBe('compact')
+  })
+
+  it('the caret is deferred, never removed — it returns on hover at every level', () => {
+    // A pin on the CSS, because the whole trade rests on it: the caret is one hover away, the
+    // chip (at `tight`) is not on the tab at all. Both selectors must keep the hover escape.
+    const css = readFileSync(join(__dirname, '../styles.css'), 'utf8').replace(/\r\n/g, '\n')
+    for (const level of ['compact', 'tight']) {
+      expect(css).toContain(
+        `.tabbar__tabs[data-density='${level}'] .tab:not(.active):not(:hover):not(.tab--menu-open) .tab__actions`
+      )
+    }
   })
 
   it('never lets the name floor fall below the width of a short word', () => {

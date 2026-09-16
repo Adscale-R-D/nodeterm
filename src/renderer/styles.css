@@ -3568,6 +3568,10 @@ body,
 }
 .ctx-submenu {
   position: absolute;
+  /* Default side. `useSubmenuFlip` measures the open flyout and stamps `data-side` — the rule
+     below opens it leftwards when the row sits too close to the viewport's right edge. The
+     4px is the overlap that keeps the cursor on a hovered surface the whole way across
+     (SUBMENU_OVERLAP_PX). */
   left: calc(100% - 4px);
   top: -6px;
   /* Absolutely positioned inside a ~menu-width row, shrink-to-fit would clamp the flyout to
@@ -3576,6 +3580,10 @@ body,
   max-width: 320px;
   max-height: min(70vh, 520px);
   overflow-y: auto;
+}
+.ctx-submenu[data-side='left'] {
+  left: auto;
+  right: calc(100% - 4px);
 }
 .ctx-submenu .ctx-item {
   /* Keep the label and its default ✓ on one line (labels ellipsize past max-width). */

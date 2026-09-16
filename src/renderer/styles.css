@@ -7911,12 +7911,28 @@ button.group-node__setup:disabled {
 }
 
 .ss-row__body { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 2px; }
-.ss-row__titleline { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.ss-row__titleline {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  /* The title's floor. The sidebar is 300px wide and the row already carries a status dot, a
+     monogram, a session chip, a context pill and two buttons, so the NAME is the only thing that
+     can absorb another chip — and it did: with the account chip present the title measured 45px
+     (4-5 characters) against 128px without it. Everything else in the line yields before the name
+     does. ~10 characters at 12.5px, which is what makes two similarly-named sessions
+     distinguishable. */
+  --ss-title-min: 96px;
+}
 .ss-mark { width: 9px; height: 9px; border-radius: 3px; flex: 0 0 auto; }
-.ss-title { font-size: 12.5px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ss-title { font-size: 12.5px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1 1 auto; min-width: var(--ss-title-min); }
 .ss-title.is-unread { font-weight: 600; }
 .ss-title-input { font-size: 12.5px; background: var(--panel); color: var(--text); border: 1px solid var(--accent); border-radius: 4px; padding: 1px 4px; }
-.ss-chip { font-size: 10px; color: var(--text); opacity: 0.7; background: var(--panel-header); border-radius: 4px; padding: 0 5px; max-width: 9rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 0 0 auto; }
+.ss-chip { font-size: 10px; color: var(--text); opacity: 0.7; background: var(--panel-header); border-radius: 4px; padding: 0 5px; max-width: 9rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 0 1 auto; min-width: 0; }
+/* The shared account chip, sized for THIS row rather than the node header it was built for:
+   the header's 120px cap and `flex-shrink: 0` are what crushed the title here. Same scale as
+   `.ss-chip` beside it, and it yields before the name — its tooltip keeps the full label. */
+.ss-account { margin-left: 0; max-width: 5.5rem; font-size: 10px; padding: 0 5px; flex: 0 1 auto; min-width: 0; }
 .ss-loop { font-size: 9.5px; color: var(--caution); border: 1px solid rgba(255, 214, 10, 0.4); border-radius: 4px; padding: 0 4px; flex: 0 0 auto; }
 .ss-meta { display: flex; align-items: center; gap: 6px; font-size: 10.5px; color: var(--muted); min-width: 0; }
 .ss-meta__cwd { font-family: monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

@@ -148,8 +148,14 @@ export function SessionRow({
               {row.title}
             </span>
           )}
-          {row.session && <span className="ss-chip">{row.session}</span>}
-          <AccountChip chip={accountChip} />
+          {/* `title`, because the chip now yields to the name and can be ellipsised: a truncated
+              chip with no tooltip is the one state where the session name is unrecoverable. */}
+          {row.session && (
+            <span className="ss-chip" title={row.session}>
+              {row.session}
+            </span>
+          )}
+          <AccountChip chip={accountChip} className="ss-account" />
           {row.loop && (
             <span className="ss-loop">
               {row.loop.kind} · {row.loop.count}

@@ -66,9 +66,29 @@
   /* One distance between every floating overlay and the edge it hugs (the dock's, historically):
      the dock, the pill cluster, the minimap, the sidebars and the top-right cluster each used to
      carry their own 14 to 22px, which read as a ragged margin. Top-anchored chrome adds the tab bar's
-     44px on top of it. */
+     height (`--tabbar-h`) on top of it. */
   --float-gap: 22px;
-  --tabbar-h: 44px;
+  /* The tab bar's height. Every dependant reads this token (the kanban overlay's top, the floating
+     panels' offsets, the usage popover's cap) and main derives the macOS traffic-light `y` from the
+     SAME number via `@shared/window-chrome-metrics` (`TABBAR_HEIGHT_PX`), so the bar and the lights
+     cannot drift apart — `styles.tabbar.test.ts` pins this literal to that constant. */
+  --tabbar-h: 36px;
+  /* Chrome-style tab geometry (see the tab bar block). `--tab-inset` is the gap between the bar's
+     top edge and a tab; the hover pill also keeps it at the bottom, the active tab does not.
+     `--tab-flare` is the radius of the active tab's concave bottom corners AND the strip's side
+     padding that keeps them from being clipped. `--tab-w` is the width every tab takes while there
+     is room; past that they all shrink together. */
+  --tab-inset: 4px;
+  --tab-radius: 8px;
+  --tab-flare: 8px;
+  --tab-w: 168px;
+  --tab-fade: 18px;
+  --tab-divider-h: 16px;
+  /* The strip behind the tabs. In dark it is the panel colour (#282828 over a #000 canvas, the
+     active tab reads as a hole). In LIGHT the panel and the canvas are one value apart (#f3efe7 vs
+     #f4efe6) and a canvas-coloured active tab would vanish, so the strip steps back to the deeper
+     surface — Chrome's own light strip is a grey behind a paler active tab. Themed per block. */
+  --tabbar-bg: var(--panel);
 
   /* Outer width of the bottom-left controls column: one button plus the column's 1px border on
      each side. The pill cluster clears the column by reading this, so resizing the buttons cannot
@@ -181,6 +201,9 @@
   /* The canvas sits BELOW every node, so it is the one surface that must be darker than the
      panels — otherwise the nodes dissolve into the field and the layout loses its edges. */
   --canvas-bg: #f4efe6;
+  /* The tab strip steps back one surface so the canvas-coloured active tab comes forward (see the
+     dark block's `--tabbar-bg` note). */
+  --tabbar-bg: var(--surface-deep);
   /* Floating surfaces come UP the ramp (see the elevation note above) without going white. */
   --menu-rgb: 253, 251, 247;
   --popover-rgb: 253, 251, 247;
@@ -230,15 +253,25 @@ body,
   flex-direction: column;
 }
 
-/* ---- Top project tab bar ---- */
+/* ---- Top project tab bar (Chrome-style strip) ----
+   Three states, exactly as a browser draws them:
+   - INACTIVE tabs have no fill. They sit on the strip, told apart only by a 1px divider at each
+     tab's left edge, and that divider is dropped on BOTH sides of a hovered or active tab.
+   - HOVER is a soft rounded pill lighter than the strip, inset from the bar's top and bottom. It
+     is a hover state, not a selection: it connects to nothing.
+   - ACTIVE takes the colour of the surface UNDER the bar (`--canvas-bg`, which the kanban overlay
+     shares) and merges into it: rounded top corners, square bottom, and a concave flare at each
+     bottom corner that curves out into the page. No line between the tab and the canvas.
+   Tabs share ONE width (`--tab-w`) and shrink together as more open; the name fades out under a
+   mask instead of ending in an ellipsis, and the actions stay pinned to the tab's right edge. */
 .tabbar {
   position: relative;
   display: flex;
   align-items: center;
-  gap: 14px;
+  gap: 10px;
   height: var(--tabbar-h);
-  padding: 0 12px;
-  background: var(--panel);
+  padding: 0 10px;
+  background: var(--tabbar-bg);
   /* Above the canvas and the menu backdrop so tabs/inputs stay interactive. */
   z-index: 30;
   flex-shrink: 0;
@@ -249,17 +282,17 @@ body,
 /* Leave room for the macOS traffic lights on the left — ONLY where they are drawn inside the web
    contents (Electron `titleBarStyle: 'hiddenInset'`, darwin desktop). The attribute is stamped by
    `lib/windowChrome.ts` at boot; without it the reservation applied on Windows and Linux too,
-   pushing the logo in by 86px and taking the same 86px off the tab strip (issue #564). */
+   pushing the logo in by 86px and taking the same 86px off the tab strip (issue #564). The lights
+   themselves are centred on the bar by main (`trafficLightY` in `@shared/window-chrome-metrics`),
+   from the same height `--tabbar-h` is pinned to. */
 :root[data-window-chrome='inset'] .tabbar {
   padding-left: 86px;
 }
 
 /* The separator between the bar and the canvas, as a pseudo-element rather than the bar's own
    `border-bottom`: the ACTIVE tab has to break that line to read as a tab whose body IS the
-   canvas. It is z-index:auto, so the active tab's `z-index: 1` paints over the 1px it covers,
-   and the line still runs under every inactive tab and the bar's empty stretch. In light the two
-   surfaces are almost the same value (`--panel` #f3efe7 vs `--canvas-bg` #f4efe6), so this line
-   plus the active tab's own outline is the whole separation there. */
+   canvas. It is z-index:auto, so the active tab's `z-index: 1` paints over the pixels it and its
+   flares cover, and the line still runs under every inactive tab and the bar's empty stretch. */
 .tabbar::after {
   content: '';
   position: absolute;
@@ -283,7 +316,7 @@ body,
 .brand {
   display: flex;
   align-items: center;
-  gap: 9px;
+  gap: 7px;
   white-space: nowrap;
   -webkit-app-region: drag;
 }
@@ -293,7 +326,7 @@ body,
 }
 
 .brand__name {
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 700;
   color: var(--text);
   letter-spacing: 0.2px;
@@ -305,9 +338,9 @@ body,
   display: flex;
   align-items: stretch;
   /* The bar centers its items, so without this the wrapper is only as tall as its content and the
-     tabs stretch to THAT — they have to reach the bar's own top and bottom to read as tabs. */
+     tabs stretch to THAT — they have to reach the bar's own bottom to merge into the canvas. */
   align-self: stretch;
-  gap: 4px;
+  gap: 0;
   flex: 1;
   /* Load-bearing (issue #375): a flex item's min-width defaults to `auto`, which resolves against
      the strip's full content width — so with many tabs the wrapper refuses to shrink and shoves
@@ -315,20 +348,33 @@ body,
   min-width: 0;
 }
 
-/* Browser-style tabs: the strip is the bar's floor, each tab runs its FULL height and the active
-   one is filled with the canvas colour so its body continues into the page below. */
 .tabbar__tabs {
   display: flex;
   align-items: stretch;
-  /* No gap: the active tab's side hairlines ARE the seams, and a strip of bar showing between two
-     tabs reads as a segmented control again — the thing this replaced. */
+  /* No gap: the dividers ARE the seams, and the active tab's flares reach into its neighbours. */
   gap: 0;
   align-self: stretch;
-  padding: 0;
+  /* Room for the active tab's flares, which reach `--tab-flare` past the tab on each side: this
+     is a scroll container and would clip the first and last tab's flare without it. */
+  padding: 0 var(--tab-flare);
+  /* Content-sized until the bar runs out of room, then it shrinks (min-width 0, as a scroller
+     may) and the tabs inside shrink with it — evenly, since they share one flex basis. */
+  flex: 0 1 auto;
+  min-width: 0;
   overflow-x: auto;
   /* Scrollable but without the native scrollbar (foreign-looking in a title-bar tab strip);
      trackpad swipe / wheel still scroll, and the active tab is scrolled into view. */
   scrollbar-width: none;
+  /* One more divider at the strip's end, between the last tab and the +. A background rather than
+     a border so it is the same 16px stroke as the dividers between tabs, and so `:has` below can
+     drop it when the last tab is hovered or active, as every other divider is dropped. */
+  background: linear-gradient(var(--border), var(--border)) right 50% / 1px var(--tab-divider-h)
+    no-repeat;
+}
+
+.tabbar__tabs:has(> .tab:last-of-type:hover),
+.tabbar__tabs:has(> .tab.active:last-of-type) {
+  background-image: none;
 }
 
 .tabbar__tabs::-webkit-scrollbar {
@@ -339,54 +385,92 @@ body,
   position: relative;
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 6px;
+  /* One width for every tab, so they are all the same size and shrink by the same amount. It is
+     a `width`, not a `flex-basis`, because the STRIP is content-sized (so the + can sit right
+     after the last tab) and Chromium sizes a flex container from its items' max-content
+     contributions — which a flex-basis does not enter and a definite width does. Measured: with
+     `flex: 0 1 var(--tab-w)` four tabs in a 1280px window sat at their 83px floor with the strip
+     hugging them. `min-width` stays `auto` on purpose: it resolves to the tab's fixed parts
+     (glyph, chips, the actions, 24px of name — see .tab__name), which is the floor a tab shrinks
+     to before the strip starts scrolling. The active tab's floor is wider by exactly its board
+     toggle. */
+  width: var(--tab-w);
+  flex: 0 1 auto;
+  /* Inset from the bar's top and bottom: the hover pill floats, it does not touch the edges. */
+  margin: var(--tab-inset) 0;
   /* Asymmetric on purpose: the right edge ends in the options button, whose three dots are a far
      narrower glyph than the name on the left, so an equal padding reads as a gap there. */
-  padding: 0 10px 0 14px;
+  padding: 0 4px 0 10px;
+  border-radius: var(--tab-radius);
   color: var(--muted);
-  font-size: 13px;
+  font-size: 12.5px;
   /* One weight for every tab: a heavier active tab shifts the whole strip's metrics as you switch,
      and the fill already says which one is active. */
   font-weight: 500;
   cursor: pointer;
   white-space: nowrap;
+  /* The divider, at this tab's LEFT edge: a 1px stroke, `--tab-divider-h` tall, centred. It is a
+     background image so a hover or active FILL replaces it in the same declaration. */
+  background: linear-gradient(var(--border), var(--border)) 0 50% / 1px var(--tab-divider-h)
+    no-repeat;
+}
+
+/* No divider before the first tab, nor to the right of a hovered or active one (the next tab's
+   left edge). The hover rule sits below these so a hovered tab that FOLLOWS an active one still
+   gets its pill. */
+.tab:first-child,
+.tab:hover + .tab,
+.tab.active + .tab {
+  background-image: none;
 }
 
 .tab:not(.active):hover {
-  background: rgba(var(--tint-rgb), 0.05);
+  background: rgba(var(--tint-rgb), 0.1);
   color: var(--text);
 }
 
 .tab.active {
-  /* THE tab look: the active tab is a hole in the bar showing the canvas behind it. */
+  /* THE tab look: the active tab is the page's own surface, reaching down into it. */
   background: var(--canvas-bg);
   /* Neutral, never the project colour: the fill alone says which tab is active and `.tab__dot`
      says which project it is, so tinting the label would say the same thing twice. */
   color: var(--text);
-  /* Above `.tabbar::after`, so the tab's own bottom pixel replaces the separator line and the
-     fill runs uninterrupted into the canvas. */
+  /* Square bottom, sitting ON the bar's bottom edge, so the fill runs straight into the canvas. */
+  margin-bottom: 0;
+  border-radius: var(--tab-radius) var(--tab-radius) 0 0;
+  /* Above `.tabbar::after` and the neighbouring tabs, so the tab's own bottom pixels and its
+     flares replace the separator line, and the flares paint over the neighbours' edges. */
   z-index: 1;
 }
 
-/* The two side hairlines that cut the tab out of the bar, drawn as an inset shadow so they cost
-   no layout. Sides ONLY: a top edge would draw a lid on a shape whose whole point is that it is
-   open into the canvas below. Load-bearing in LIGHT, where `--canvas-bg` and `--panel` are one
-   value apart and the fill alone would be invisible — hence in both themes, not just that one.
-
-   FOUR shadows, not two, so these edges render as the SAME colour as `.tabbar::after`. `--border`
-   is an alpha (0.1 dark / 0.14 light), and the bar's separator composites it over `--panel` while
-   these edges sit over `--canvas-bg` — which in dark is #000 against #282828, so the identical
-   token painted two grades darker. A box-shadow list paints first-on-top, so the `--panel` pair
-   is listed LAST to sit behind as an opaque ground and the `--border` pair lands on it exactly as
-   it does on the bar. Cheaper than a resolved token, which would have to restate the alpha per
-   theme and drift from `--border` the first time one of them is tuned. */
+/* The two concave flares. One pseudo-element a flare wider than the tab on each side, painted
+   with a radial gradient in each corner: the quarter-disc nearest the tab stays transparent (the
+   strip shows through) and everything past `--tab-flare` from that corner is the surface colour,
+   which is the inverted curve that runs the tab out into the page. The half-pixel between the two
+   stops is the anti-aliasing. The middle of the pseudo is transparent — the tab's own fill is
+   there. `::before` is taken by the drop-reorder insertion line. */
 .tab.active::after {
   content: '';
   position: absolute;
-  inset: 0;
-  box-shadow: inset 1px 0 0 var(--border), inset -1px 0 0 var(--border),
-    inset 1px 0 0 var(--panel), inset -1px 0 0 var(--panel);
+  left: calc(-1 * var(--tab-flare));
+  right: calc(-1 * var(--tab-flare));
+  bottom: 0;
+  height: var(--tab-flare);
   pointer-events: none;
+  background:
+    radial-gradient(
+        circle at 0 0,
+        transparent calc(var(--tab-flare) - 0.5px),
+        var(--canvas-bg) calc(var(--tab-flare) + 0.5px)
+      )
+      left / var(--tab-flare) var(--tab-flare) no-repeat,
+    radial-gradient(
+        circle at 100% 0,
+        transparent calc(var(--tab-flare) - 0.5px),
+        var(--canvas-bg) calc(var(--tab-flare) + 0.5px)
+      )
+      right / var(--tab-flare) var(--tab-flare) no-repeat;
 }
 
 /* In the all-projects board the highlighted tab follows the selected swimlane, not necessarily
@@ -447,10 +531,10 @@ body,
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  flex-shrink: 0;
   min-width: 17px;
   height: 17px;
   padding: 0 5px;
-  margin-left: 2px;
   border-radius: 9px;
   background: var(--accent);
   color: #fff;
@@ -460,30 +544,43 @@ body,
   line-height: 1;
 }
 
+/* The name takes whatever width the tab's fixed parts leave, and gives it back first when the
+   tab shrinks. `width: 0` is what keeps the TAB's automatic minimum from being the whole label:
+   a flex item's min-content contribution is its definite width when it has one, so the tab's
+   floor counts 24px of name (the `min-width`), not the full text. The text then runs under a
+   mask that fades the last `--tab-fade` px — a fade, not an ellipsis, because the fade shows the
+   letters that DO fit at every width while "…" spends three characters saying it cut something. A
+   name that fits ends before the fade zone, so it is untouched. */
 .tab__name {
-  max-width: 160px;
+  flex: 1 1 0;
+  width: 0;
+  min-width: 24px;
   overflow: hidden;
-  text-overflow: ellipsis;
+  -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - var(--tab-fade)), transparent);
+  mask-image: linear-gradient(90deg, #000 calc(100% - var(--tab-fade)), transparent);
 }
 
 .tab__edit {
+  flex: 1 1 0;
+  width: 0;
+  min-width: 48px;
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: 5px;
   color: var(--text);
-  font-size: 13px;
+  font-size: 12.5px;
   padding: 2px 6px;
-  width: 120px;
   outline: none;
 }
 
-/* The two tab actions read as one cluster: a hair between them, and a wider step from the name
-   than the 7px the tab's own parts (dot, name, badge) sit apart. */
+/* The two tab actions read as one cluster pinned to the tab's right edge: a hair between them,
+   and a step from the name (which stops at the fade) wider than the tab's own 6px gap. */
 .tab__actions {
   display: inline-flex;
   align-items: center;
+  flex-shrink: 0;
   gap: 1px;
-  margin-left: 3px;
+  margin-left: 2px;
 }
 
 .tab__board-toggle,
@@ -529,22 +626,22 @@ body,
   align-items: center;
   justify-content: center;
   align-self: center;
-  /* Load-bearing: without this a squeezed bar shrinks the 28px + instead of scrolling the tabs. */
+  /* Load-bearing: without this a squeezed bar shrinks the + instead of scrolling the tabs. */
   flex-shrink: 0;
-  /* Its own breathing room now the strip runs at `gap: 0` — "+" is a separate action, not the
-     next tab in the row. Small: it belongs to the strip it ends, not to the empty bar beside it. */
+  /* The strip's end divider already separates the + from the last tab; this is only the step
+     between that divider and the glyph. */
   margin-left: 2px;
   width: 28px;
   height: 28px;
   background: transparent;
   border: none;
-  border-radius: 14px;
+  border-radius: 8px;
   color: var(--muted);
   cursor: pointer;
 }
 
 .tab__add:hover {
-  background: rgba(var(--tint-rgb), 0.07);
+  background: rgba(var(--tint-rgb), 0.1);
   color: var(--text);
 }
 
@@ -7079,9 +7176,9 @@ button.group-node__setup:disabled {
   /* Issue #503: each account is a tall block (label + Session/Weekly/Opus meters), so past
      about four accounts the panel grew off the TOP of the window — the first account's header
      and meter were clipped with no way to reach them. Capped to the space between the pill
-     (bottom: 34px) and the tab bar (44px at z 30, which paints over this panel in canvas mode),
-     with the blocks scrolling inside __body while the heading and footer action stay put. */
-  max-height: calc(100vh - 86px);
+     (bottom: 34px) and the tab bar (`--tabbar-h` at z 30, which paints over this panel in canvas
+     mode), with the blocks scrolling inside __body while the heading and footer action stay put. */
+  max-height: calc(100vh - var(--tabbar-h) - 34px - 8px);
   display: flex;
   flex-direction: column;
 }
@@ -8115,7 +8212,7 @@ button.group-node__setup:disabled {
    is `overflow-x: auto` and clipped it — so the leftmost drop target showed nothing), and sit
    under the ACTIVE tab, whose `z-index: 1` swallowed it whenever the target was the tab right
    after it. Hence `left: 0` and z-index 2. */
-.tab.is-drop-before::before { content: ''; position: absolute; left: 0; top: 8px; bottom: 8px; width: 2px; border-radius: 1px; background: var(--accent); pointer-events: none; z-index: 2; }
+.tab.is-drop-before::before { content: ''; position: absolute; left: 0; top: 6px; bottom: 6px; width: 2px; border-radius: 1px; background: var(--accent); pointer-events: none; z-index: 2; }
 
 /* The same line for "after the last tab", which has no tab to hang off. A real flex item rather
    than a pseudo-element: the strip scrolls, and an absolutely positioned marker on a scroll
@@ -8124,7 +8221,9 @@ button.group-node__setup:disabled {
 .tab__dropline {
   flex: 0 0 2px;
   align-self: stretch;
-  margin: 8px -1px;
+  /* The tabs are inset by `--tab-inset` and their own line stops 6px inside that, so this one
+     (which spans the full strip height) stops at the same two rows. */
+  margin: calc(var(--tab-inset) + 6px) -1px;
   border-radius: 1px;
   background: var(--accent);
   pointer-events: none;
@@ -9293,7 +9392,7 @@ button.group-node__setup:disabled {
 /* ---- Kanban view (full-page board over the canvas; the canvas stays mounted under it) ---- */
 .kanban-overlay {
   position: fixed;
-  top: 44px; /* below the tab bar (.tabbar height) */
+  top: var(--tabbar-h); /* below the tab bar */
   left: 0;
   right: 0;
   bottom: 0;

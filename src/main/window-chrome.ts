@@ -1,5 +1,5 @@
 import type { BrowserWindowConstructorOptions } from 'electron'
-import { TRAFFIC_LIGHT_X, trafficLightY } from '@shared/window-chrome-metrics'
+import { TABBAR_HEIGHT_PX, TRAFFIC_LIGHT_X, trafficLightY } from '@shared/window-chrome-metrics'
 
 /**
  * The window-frame options that only mean something on macOS.
@@ -12,14 +12,21 @@ import { TRAFFIC_LIGHT_X, trafficLightY } from '@shared/window-chrome-metrics'
  *
  * The lights' `y` is DERIVED from the bar height (`@shared/window-chrome-metrics`), not typed
  * here: it was a literal 15 for a 44px bar, and shrinking the bar to Chrome's proportions would
- * have left them hanging below its centre.
+ * have left them hanging below its centre. `barHeight` is the user's resolved
+ * `settings.tabBarHeight`; the same function answers the live re-centre when the setting changes
+ * (`BrowserWindow.setWindowButtonPosition`, macOS only).
  */
+export function trafficLightPositionFor(barHeight: number = TABBAR_HEIGHT_PX): { x: number; y: number } {
+  return { x: TRAFFIC_LIGHT_X, y: trafficLightY(barHeight) }
+}
+
 export function macTitleBarOptions(
-  platform: NodeJS.Platform
+  platform: NodeJS.Platform,
+  barHeight: number = TABBAR_HEIGHT_PX
 ): Pick<BrowserWindowConstructorOptions, 'titleBarStyle' | 'trafficLightPosition'> {
   if (platform !== 'darwin') return {}
   return {
     titleBarStyle: 'hiddenInset',
-    trafficLightPosition: { x: TRAFFIC_LIGHT_X, y: trafficLightY() }
+    trafficLightPosition: trafficLightPositionFor(barHeight)
   }
 }

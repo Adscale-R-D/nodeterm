@@ -14,6 +14,7 @@ import type { ClientId, DinoSnapshot, PeerDiff, PeerIdentity, PeerState } from '
 import type { WhisperModelInfo } from './speech'
 import type { ProjectKanbanGitHub } from './github-issues'
 import type { CodexAccount } from './codex-account'
+import type { NotchAlign } from './notch-hud'
 import type { ProjectIcon, ProjectIconPickResult } from './project-icon'
 import type { CanvasLayout, LayoutViewports } from './canvas-layout'
 import type {
@@ -1751,6 +1752,14 @@ export interface Settings {
    *  `auxiliaryTopLeftArea`), so the capsule has to assume one — this is the knob that makes it sit
    *  flush on YOUR Mac. Bigger = the capsule sits further left. */
   notchWidth: number
+  /** Which side of the primary display the capsule sits on. `center` (default) hugs the physical
+   *  notch; `left` / `right` draw a floating pill at that edge. Re-validated at use
+   *  (`sanitizeNotchAlign`, shared/notch-hud.ts): an unknown string means `center`. */
+  notchAlign: NotchAlign
+  /** Vertical offset of the capsule from its resting place, px, positive = DOWN. Up is bounded by
+   *  the display's top edge (the fused notch capsule is already there, so it only moves down —
+   *  and moving it detaches it into a pill). Clamped to NOTCH_OFFSET_MIN/MAX; non-finite → 0. */
+  notchOffsetY: number
   /** Expand the notch panel on hover (after a short dwell). Off = click the capsule to expand. */
   notchHoverExpand: boolean
   /** Dictation (desktop/server). Written as a whole object by the renderer. */
@@ -1916,6 +1925,8 @@ export const DEFAULT_SETTINGS: Settings = {
   // macOS Notch HUD default ON (guarded to darwin at runtime; a no-op elsewhere).
   notchHud: true,
   notchWidth: 168,
+  notchAlign: 'center',
+  notchOffsetY: 0,
   notchHoverExpand: true,
   // model: '' = the explicit "no dictation" state (SPEECH_MODEL_NONE, issue #143). Dictation is
   // opt-in: nothing is selected — and so nothing downloads and no shortcut records — until the

@@ -1993,6 +1993,8 @@ app.whenReady().then(async () => {
     return {
       enabled: s.notchHud,
       notchWidth: s.notchWidth,
+      align: s.notchAlign,
+      offsetY: s.notchOffsetY,
       hoverExpand: s.notchHoverExpand,
       percentMode: s.usagePercentMode
     }

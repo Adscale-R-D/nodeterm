@@ -4030,22 +4030,32 @@ the Settings section and ShortcutsPanel start disagreeing about what a chord mea
   top corners and two concave flares (`.tab.active::after`, radial gradients) so it merges into the
   surface below — which is also the kanban overlay's colour, so it merges under both views. In
   LIGHT the strip steps back to `--surface-deep` (`--tabbar-bg`), because `--panel` and
-  `--canvas-bg` are one value apart there and a canvas-coloured tab would vanish. Tabs share one
-  flex basis (`--tab-w`, the active one wider by its board toggle so its name shrinks in step) and
-  shrink together; the name is `flex: 1 1 0; width: 0; min-width: var(--tab-name-min)` under a mask
-  fade (never an ellipsis), and `width: 0` is what keeps a tab's automatic minimum at its fixed
-  parts instead of the whole label. **The name has priority as tabs shrink** (the #789 regression:
-  at 8 tabs / 1340px the ACTIVE name was 24px — 0 characters — because it carried the most
-  furniture and hit its floor first; at 12 every name was). `renderer/lib/tabDensity.ts` derives a
-  per-strip level from the measured strip width ÷ tab count (TabBar stamps it as `data-density`):
-  `compact` hides the SSH chip, `tight` makes the inactive caret hover-only (kept while its menu is
-  open, `tab--menu-open`); the active tab keeps both buttons at every level, and the 60px name floor
-  is the one place the strip decides to scroll instead of squeezing. Thresholds are derived from
-  the measured furniture, not chosen — change a padding and update the constants. **The bar's height is ONE number in two places that cannot read each
+  `--canvas-bg` are one value apart there and a canvas-coloured tab would vanish.
+  **A tab is as wide as its own NAME and never shrinks** (`max-width: var(--tab-max)` 260px,
+  `flex: 0 0 auto`; the name is `flex: 0 1 auto; min-width: 0` with `text-overflow: ellipsis`): the
+  strip SCROLLS when the tabs stop fitting, and nothing shortens a name except that cap. This is
+  the deliberate departure from Chrome, which shrinks because it must keep every tab reachable
+  without scrolling — here the sessions sidebar and ⌘1..9 both reach a project without touching
+  the strip, so a readable name is worth more than a visible tab edge.
+  **Two earlier rounds tried to ration the name between tabs and both spent the one thing the strip
+  is for**, which is why the third does not: #789 gave every tab one flex basis (at 8 tabs / 1340px
+  the ACTIVE name measured 24px — zero characters — because it carried the most furniture and hit
+  its floor first), and #790 added a 60px floor plus a `tabDensity` level that shed furniture to
+  pay for it — whose middle level hid the SSH chip, and 8 tabs in a 1340px window land on exactly
+  that level, so every remote tab lost its `SSH` label at the width people work at.
+  **`renderer/lib/tabDensity.ts` is deleted**: with full names there is no name budget to protect,
+  so there is nothing for a density level to buy. Do not reintroduce one without first saying what
+  it is buying. Measured on the third shape (headless Chrome, the real CSS, 86px traffic-light
+  reservation): 8 tabs in 1340px — every name whole, every SSH chip present, the strip 14px past
+  its width; 12 tabs — every name still whole, the strip scrolling 559px; a 60-character project
+  name stops at the 260px cap and is the only thing that ellipsises.
+  The fade mask went with the shrinking: a mask gradient is unconditional and would fade the tail
+  of a name that fits perfectly, while `text-overflow` is self-conditioning. **The bar's height is ONE number in two places that cannot read each
   other**: `--tabbar-h` in styles.css (every top-anchored panel, the kanban overlay and the usage
   popover position against it) and `TABBAR_HEIGHT_PX` in `@shared/window-chrome-metrics`, from
   which main derives the traffic-light `y` (`trafficLightY`) — a literal 15 for a 44px bar was
-  what made shrinking the bar hazardous. `styles.tabbar.test.ts` pins the token to the constant and
+  what made shrinking the bar hazardous. It is **40px** (36 for one release, which read as cramped
+  once the tabs carried whole names). `styles.tabbar.test.ts` pins the token to the constant and
   every dependant to the token. The New-project `+` is a **sibling** of `.tabbar__tabs`, not its last child — inside
   the scroller it vanished once the strip overflowed (no visible scrollbar to hint it was
   still there). The wrapping `.tabbar__projects` is `flex: 1` and stays a drag region (not

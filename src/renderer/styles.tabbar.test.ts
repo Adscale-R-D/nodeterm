@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { TABBAR_HEIGHT_PX } from '@shared/window-chrome-metrics'
-import { TAB_NAME_MIN_PX } from './lib/tabDensity'
 
 /**
  * The tab bar's height used to be a literal in four places — the bar's own rule, the kanban
@@ -74,38 +73,27 @@ describe('tab strip geometry', () => {
     expect(rule('.tabbar__tabs')).toMatch(/padding:\s*0\s+var\(--tab-flare\)/)
   })
 
-  it('shrinks every tab from one basis and fades the name instead of truncating it', () => {
-    // A definite width, not a flex-basis: only a width enters the content-sized strip's intrinsic
-    // size, so with a basis the tabs never widened past their floor however much room there was.
-    expect(rule('.tab')).toMatch(/width:\s*var\(--tab-w\)/)
-    expect(rule('.tab')).toMatch(/flex:\s*0 1 auto/)
+  it('sizes every tab by its own NAME, and scrolls instead of shortening one', () => {
+    const tab = rule('.tab')
+    // Content width, never a shared basis: the two earlier rounds (#789, #790) both rationed the
+    // name between tabs, which is the one thing the strip exists to show.
+    expect(tab).toMatch(/max-width:\s*var\(--tab-max\)/)
+    expect(tab).toMatch(/flex:\s*0 0 auto/)
+    expect(tab).not.toMatch(/width:\s*var\(--tab-w\)/)
     const name = rule('.tab__name')
-    expect(name).toMatch(/mask-image:\s*linear-gradient/)
-    expect(name).not.toMatch(/text-overflow/)
-    // `width: 0` is what keeps the tab's automatic minimum from being the whole label.
-    expect(name).toMatch(/width:\s*0;/)
+    // Ellipsis, not the old fade: a mask gradient is unconditional and would fade the tail of a
+    // name that fits perfectly, which is most names now.
+    expect(name).toMatch(/text-overflow:\s*ellipsis/)
+    expect(name).not.toMatch(/mask-image/)
+    expect(name).not.toMatch(/min-width:\s*var\(--tab-name-min\)/)
+    // The strip is the thing that gives way.
+    expect(rule('.tabbar__tabs')).toMatch(/overflow-x:\s*auto/)
   })
 
-  it('keeps a readable name floor, the same number the density rule reasons from', () => {
-    expect(token('--tab-name-min')).toBe(`${TAB_NAME_MIN_PX}px`)
-    expect(rule('.tab__name')).toMatch(/min-width:\s*var\(--tab-name-min\)/)
-    // The active tab's basis is wider by its board toggle, so its name shrinks in step with the
-    // inactive names instead of absorbing the toggle (the 24px active name at 8 tabs).
-    expect(rule('.tab.active')).toMatch(/width:\s*calc\(var\(--tab-w\) \+ var\(--tab-active-extra\)\)/)
-  })
-
-  it('sheds furniture by density before the name is squeezed, and never the active tab\'s buttons', () => {
-    // ORDER: the caret is deferred to hover at `compact`, and only `tight` takes the SSH chip off
-    // the tab. Reported from the running app — the first version shed the chip at `compact`, which
-    // is the level 8 tabs in a 1340px window land on, so every remote tab lost its `SSH` label at
-    // the width people work at. A deferred control is cheaper than a label that is simply gone.
-    const compactCaret = CSS.match(/\.tabbar__tabs\[data-density='compact'\] \.tab:not\(\.active\):not\(:hover\):not\(\.tab--menu-open\) \.tab__actions,\s*\.tabbar__tabs\[data-density='tight'\] \.tab:not\(\.active\):not\(:hover\):not\(\.tab--menu-open\) \.tab__actions \{[^}]*display:\s*none/)
-    expect(compactCaret).not.toBeNull()
-    const tightChip = CSS.match(/\.tabbar__tabs\[data-density='tight'\] \.tab__ssh \{[^}]*display:\s*none/)
-    expect(tightChip).not.toBeNull()
-    // The chip is never hidden at `compact` — the regression this replaced.
-    expect(CSS).not.toMatch(/\.tabbar__tabs\[data-density='compact'\] \.tab__ssh[^{]*\{[^}]*display:\s*none/)
-    // Nothing hides the board toggle at any density.
-    expect(CSS).not.toMatch(/\[data-density[^\]]*\][^{]*\.tab__board-toggle[^{]*\{[^}]*display:\s*none/)
+  it('carries no density machinery any more — nothing sheds furniture to buy name width', () => {
+    // `lib/tabDensity.ts` is deleted with this change: with full names there is no name budget to
+    // protect, and shedding the SSH chip took a LABEL off every remote tab at the width people
+    // work at (the report that ended the previous approach).
+    expect(CSS).not.toMatch(/data-density/)
   })
 })

@@ -10,8 +10,9 @@
  * stylesheet's token to it.
  */
 
-/** Height of `.tabbar`, in CSS px. Chrome's strip is ~40; this is one text line plus padding. */
-export const TABBAR_HEIGHT_PX = 36
+/** Height of `.tabbar`, in CSS px. Chrome's own strip is ~40, and so is this: 36 was a touch
+ *  tighter than the reference and read as cramped once the tabs carried full names. */
+export const TABBAR_HEIGHT_PX = 40
 
 /** The macOS traffic lights are 12px discs (measured on a 2x capture: 24 device px). */
 export const TRAFFIC_LIGHT_DIAMETER_PX = 12

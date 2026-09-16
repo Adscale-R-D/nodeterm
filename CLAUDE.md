@@ -4055,7 +4055,14 @@ the Settings section and ShortcutsPanel start disagreeing about what a chord mea
   popover position against it) and `TABBAR_HEIGHT_PX` in `@shared/window-chrome-metrics`, from
   which main derives the traffic-light `y` (`trafficLightY`) — a literal 15 for a 44px bar was
   what made shrinking the bar hazardous. It is **40px** (36 for one release, which read as cramped
-  once the tabs carried whole names). `styles.tabbar.test.ts` pins the token to the constant and
+  once the tabs carried whole names) **by default — the height is a SETTING**
+  (`settings.tabBarHeight`, Settings → Appearance, 28–64): `App.tsx` writes the resolved value to
+  `--tabbar-h` on `<html>`, and main re-centres the macOS traffic lights on the same settings
+  change (`win.setWindowButtonPosition(trafficLightPositionFor(h))`, change-gated), so the two
+  cannot disagree. Every reader goes through `resolveTabBarHeight`, which answers the default for
+  a non-number and clamps — the floor is what keeps the 12px lights inside the bar. The stylesheet
+  token keeps the default LITERAL so an un-hydrated renderer draws the default bar, not none.
+  `styles.tabbar.test.ts` pins the token to the constant and
   every dependant to the token. The New-project `+` is a **sibling** of `.tabbar__tabs`, not its last child — inside
   the scroller it vanished once the strip overflowed (no visible scrollbar to hint it was
   still there). The wrapping `.tabbar__projects` is `flex: 1` and stays a drag region (not

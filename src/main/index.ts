@@ -19,7 +19,8 @@ import { writeFilesToClipboard } from './clipboard-files'
 import { pickProjectIcon } from './project-icon-upload'
 import { allowGuestNavigation } from './webview-nav'
 import { hostOsFromPlatform, sshServerCopy } from '../shared/ssh-server'
-import { macTitleBarOptions } from './window-chrome'
+import { macTitleBarOptions, trafficLightPositionFor } from './window-chrome'
+import { resolveTabBarHeight } from '@shared/window-chrome-metrics'
 import { guestContextMenuTemplate } from './webview-context-menu'
 import { BrowserControlLedger } from './browser-control-ledger'
 import {
@@ -990,7 +991,9 @@ function createWindow(): BrowserWindow {
     // macOS-only in Electron, and the renderer's tab bar reserves its 86px of left padding for
     // exactly this window shape — so state the platform here rather than leaving it to Electron to
     // ignore the values elsewhere (issue #564). Windows/Linux keep their native frame, unchanged.
-    ...macTitleBarOptions(process.platform),
+    // The lights are centred on the user's tab-bar height (Settings → Appearance); a later change
+    // re-centres them live through the `settingsStore.onChange` hook below.
+    ...macTitleBarOptions(process.platform, resolveTabBarHeight(settingsStore.get().tabBarHeight)),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,
@@ -2003,10 +2006,19 @@ app.whenReady().then(async () => {
   // any future live label) tracks the renderer's setting. The renderer is the sole settings
   // writer; a change persists through `settingsStore`, which fires this hook. No reverse IPC.
   // Keep-awake re-reads its enable flag on the same edge.
-  settingsStore.onChange(() => {
+  // The traffic lights sit INSIDE the tab bar on macOS, so a bar-height change re-centres them —
+  // a bar that shrinks under lights left at the old y looks broken at once. Change-gated: the
+  // hook fires on every settings write and the position call is a native round trip.
+  let trafficLightBarHeight = resolveTabBarHeight(settingsStore.get().tabBarHeight)
+  settingsStore.onChange((s) => {
     applyNotchHudSettings(notchTunables())
     buildAppMenu(win)
     keepAwake?.refresh()
+    const barHeight = resolveTabBarHeight(s.tabBarHeight)
+    if (barHeight !== trafficLightBarHeight && process.platform === 'darwin' && !win.isDestroyed()) {
+      trafficLightBarHeight = barHeight
+      win.setWindowButtonPosition(trafficLightPositionFor(barHeight))
+    }
   })
   // Keep awake while agents work (docs/superpowers/specs/2026-08-18-keep-awake-design.md): hold an
   // idle-sleep power assertion while a LOCAL agent node is working, released the moment the last

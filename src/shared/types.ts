@@ -1,5 +1,6 @@
 // Types shared across the main, preload, and renderer processes.
 
+import { TABBAR_HEIGHT_PX } from './window-chrome-metrics'
 import { DEFAULT_WORKTREE_PATH_TEMPLATE } from './worktree'
 import type { CloneProgress } from './clone-url'
 import type { KeybindingOverrides, TerminalShortcutPolicy } from './keybindings'
@@ -1429,6 +1430,12 @@ export interface Settings {
    *  Distinct from `snapToGrid` (drag-time snap) — turning this on arranges once; it does not
    *  constrain future drags. v1: arrange-all-on-enable only. */
   autoAlignGrid: boolean
+  /** Height of the top project tab bar in CSS px (Settings → Appearance). Hand-editable; every
+   *  reader — the renderer's `--tabbar-h` and main's traffic-light `y` — goes through
+   *  `resolveTabBarHeight` (`@shared/window-chrome-metrics`), which clamps to 28–64 and answers
+   *  the default for anything that is not a finite number. Machine-local: it is one person's
+   *  chrome, not a canvas fact. */
+  tabBarHeight: number
   /** Default size (px) for NEW terminal/agent nodes on the canvas. Existing nodes keep
    *  whatever size they were saved with; other node kinds keep their own defaults. */
   defaultNodeWidth: number
@@ -1809,6 +1816,7 @@ export const DEFAULT_SETTINGS: Settings = {
   gridSize: 24,
   snapToGrid: false,
   autoAlignGrid: false,
+  tabBarHeight: TABBAR_HEIGHT_PX,
   defaultNodeWidth: 640,
   defaultNodeHeight: 440,
   sidebarAutoCollapse: true,

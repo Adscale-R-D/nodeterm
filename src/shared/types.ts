@@ -2998,8 +2998,14 @@ export interface LicenseStatus {
   /** 'pro' when entitled, else null. */
   tier: string | null
   active: boolean
-  /** Unix seconds when the entitlement expires, or null. */
+  /** Unix seconds when the entitlement TOKEN expires, or null — the offline grace window (the server
+   *  mints 7-day tokens and the app re-mints every 6 h, so this rolls forward forever). It is NOT
+   *  when the subscription ends and must never be shown as that; see `termEndsAt` (issue #800). */
   expiresAt: number | null
+  /** Unix seconds when the current subscription term ends, as the server stated it beside the token,
+   *  or null. Null is a first-class answer — a lifetime entitlement, a license with no expiry, or a
+   *  server that does not send the field yet — and renders as no date at all. Display only. */
+  termEndsAt: number | null
   /** Seat cap for the relay host (Team Access): premium → the token's seats (absent → 1), free/inactive → 0. */
   seats: number
   /** Last activation/refresh error reason code, or null. */

@@ -15,9 +15,16 @@
  *
  * Three levels, each dropping one thing, cheapest first:
  *   roomy   — everything shown.
- *   compact — the SSH chip is hidden (the tab's tooltip still carries user@host).
- *   tight   — the options caret on INACTIVE tabs shows only on hover (and while its menu is open);
+ *   compact — the options caret on INACTIVE tabs shows only on hover (and while its menu is open);
  *             the active tab keeps both its buttons at every width.
+ *   tight   — the SSH chip is hidden too (the tab's tooltip still carries user@host).
+ *
+ * The CARET goes before the CHIP, which is the opposite of the first version of this file and was
+ * a field correction: at 8 tabs / 1340px the strip lands on the middle level, so shedding the chip
+ * there took the `SSH` label off every remote tab in the common case. The chip is IDENTITY — which
+ * of two same-named projects is the one on the server — while the caret is an ACTION that is one
+ * hover away at every level (and a hover is how Chrome treats its own close button at this width).
+ * Losing a label you read costs more than deferring a control you click.
  *
  * One rule for the whole strip rather than per tab, so neighbours never disagree about which
  * furniture is on show. The thresholds are derived from the measured furniture, not chosen.
@@ -36,8 +43,8 @@ export type TabDensity = 'roomy' | 'compact' | 'tight'
 
 /** A tab can show everything (chip and caret) and still keep a readable name at this width. */
 export const ROOMY_MIN_TAB_PX = TAB_BASE_FURNITURE_PX + TAB_SSH_CHIP_PX + TAB_CARET_PX + TAB_NAME_MIN_PX
-/** A tab can show the caret (no chip) and keep a readable name at this width. */
-export const COMPACT_MIN_TAB_PX = TAB_BASE_FURNITURE_PX + TAB_CARET_PX + TAB_NAME_MIN_PX
+/** A tab can show the CHIP (caret on hover) and keep a readable name at this width. */
+export const COMPACT_MIN_TAB_PX = TAB_BASE_FURNITURE_PX + TAB_SSH_CHIP_PX + TAB_NAME_MIN_PX
 
 /**
  * @param stripInnerWidth the strip's width minus its own padding, in CSS px; `null`/non-finite

@@ -62,6 +62,19 @@ describe('sessions-sidebar row: the name outranks the chips', () => {
     expect(ROW).toContain('<AccountChip chip={accountChip} className="ss-account" />')
   })
 
+  it('takes the hover-only actions OUT of flow, so they cost the name nothing', () => {
+    // Measured: both buttons are invisible until the row is hovered, and in flow they held 46px of
+    // a 253px line. Out of flow the same row's name went 101px -> 131px (and 136 -> 174 with one
+    // chip). `position: absolute` is the whole mechanism; the pointer-events pair is what stops an
+    // invisible cluster from swallowing clicks meant for the row.
+    const r = rule('.ss-row__actions')
+    expect(r).toContain('position: absolute')
+    expect(r).toContain('pointer-events: none')
+    expect(CSS).toMatch(/\.ss-row:hover \.ss-row__actions[^{]*\{[^}]*pointer-events: auto/)
+    // The line it floats inside must establish the containing block, or it anchors to the viewport.
+    expect(rule('.ss-row__titleline')).toContain('position: relative')
+  })
+
   it('keeps the session chip readable once truncated, via its tooltip', () => {
     // It can now be ellipsised, and an ellipsised chip with no tooltip is the one state where the
     // session name is unrecoverable from the UI.

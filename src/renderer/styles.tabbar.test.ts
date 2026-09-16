@@ -95,10 +95,16 @@ describe('tab strip geometry', () => {
   })
 
   it('sheds furniture by density before the name is squeezed, and never the active tab\'s buttons', () => {
-    const compactChip = CSS.match(/\.tabbar__tabs\[data-density='compact'\] \.tab__ssh,\s*\.tabbar__tabs\[data-density='tight'\] \.tab__ssh \{[^}]*display:\s*none/)
-    expect(compactChip).not.toBeNull()
-    const tightCaret = CSS.match(/\.tabbar__tabs\[data-density='tight'\] \.tab:not\(\.active\):not\(:hover\):not\(\.tab--menu-open\) \.tab__actions \{[^}]*display:\s*none/)
-    expect(tightCaret).not.toBeNull()
+    // ORDER: the caret is deferred to hover at `compact`, and only `tight` takes the SSH chip off
+    // the tab. Reported from the running app — the first version shed the chip at `compact`, which
+    // is the level 8 tabs in a 1340px window land on, so every remote tab lost its `SSH` label at
+    // the width people work at. A deferred control is cheaper than a label that is simply gone.
+    const compactCaret = CSS.match(/\.tabbar__tabs\[data-density='compact'\] \.tab:not\(\.active\):not\(:hover\):not\(\.tab--menu-open\) \.tab__actions,\s*\.tabbar__tabs\[data-density='tight'\] \.tab:not\(\.active\):not\(:hover\):not\(\.tab--menu-open\) \.tab__actions \{[^}]*display:\s*none/)
+    expect(compactCaret).not.toBeNull()
+    const tightChip = CSS.match(/\.tabbar__tabs\[data-density='tight'\] \.tab__ssh \{[^}]*display:\s*none/)
+    expect(tightChip).not.toBeNull()
+    // The chip is never hidden at `compact` — the regression this replaced.
+    expect(CSS).not.toMatch(/\.tabbar__tabs\[data-density='compact'\] \.tab__ssh[^{]*\{[^}]*display:\s*none/)
     // Nothing hides the board toggle at any density.
     expect(CSS).not.toMatch(/\[data-density[^\]]*\][^{]*\.tab__board-toggle[^{]*\{[^}]*display:\s*none/)
   })

@@ -170,24 +170,30 @@ export function SessionRow({
               {contextPillText(usage.usedTokens, usage.windowTokens, usage.usedPercent, percentMode)}
             </span>
           )}
-          <button
-            className="ss-row__ai"
-            title="Name with AI (from terminal output)"
-            disabled={naming}
-            onClick={aiName}
-          >
-            {naming ? '…' : '✦'}
-          </button>
-          <button
-            className="ss-row__close"
-            title="End session"
-            onClick={(e) => {
-              e.stopPropagation()
-              onClose()
-            }}
-          >
-            <IconClose />
-          </button>
+          {/* Both buttons are invisible until the row is hovered, yet they used to hold 46px of a
+              253px line — a quarter of it — away from the NAME. The cluster is taken out of flow
+              and floated over the line's tail on hover instead: the tail is what an ellipsis was
+              already eating, and the name gets those pixels back at every other moment. */}
+          <span className="ss-row__actions">
+            <button
+              className="ss-row__ai"
+              title="Name with AI (from terminal output)"
+              disabled={naming}
+              onClick={aiName}
+            >
+              {naming ? '…' : '✦'}
+            </button>
+            <button
+              className="ss-row__close"
+              title="End session"
+              onClick={(e) => {
+                e.stopPropagation()
+                onClose()
+              }}
+            >
+              <IconClose />
+            </button>
+          </span>
         </div>
         {(row.projectName || row.cwd || row.sshHost || stateAgeLabel) && (
           <div className="ss-meta">

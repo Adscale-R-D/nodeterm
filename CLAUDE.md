@@ -4024,8 +4024,21 @@ the Settings section and ShortcutsPanel start disagreeing about what a chord mea
     XWayland and quietly ignored otherwise. Size and maximized restore either way, which is what the
     drop-don't-clamp rule already degrades to.
 - **Window chrome**: macOS integrated title bar (`titleBarStyle: 'hiddenInset'`); the tab
-  bar (`TabBar.tsx`) is the drag region with the `nodeterm` logo + a rounded pill of project
-  tabs. The New-project `+` is a **sibling** of `.tabbar__tabs`, not its last child — inside
+  bar (`TabBar.tsx`) is the drag region with the `nodeterm` logo + a **Chrome-style tab strip**
+  (2026-09-16): inactive tabs are flat and separated by a 1px divider that drops on both sides of a
+  hovered or active tab, hover is an inset pill, and the active tab is `--canvas-bg` with rounded
+  top corners and two concave flares (`.tab.active::after`, radial gradients) so it merges into the
+  surface below — which is also the kanban overlay's colour, so it merges under both views. In
+  LIGHT the strip steps back to `--surface-deep` (`--tabbar-bg`), because `--panel` and
+  `--canvas-bg` are one value apart there and a canvas-coloured tab would vanish. Tabs share one
+  flex basis (`--tab-w`) and shrink together; the name is `flex: 1 1 0; width: 0` under a mask fade
+  (never an ellipsis), and `width: 0` is what keeps a tab's automatic minimum at its fixed parts
+  instead of the whole label. **The bar's height is ONE number in two places that cannot read each
+  other**: `--tabbar-h` in styles.css (every top-anchored panel, the kanban overlay and the usage
+  popover position against it) and `TABBAR_HEIGHT_PX` in `@shared/window-chrome-metrics`, from
+  which main derives the traffic-light `y` (`trafficLightY`) — a literal 15 for a 44px bar was
+  what made shrinking the bar hazardous. `styles.tabbar.test.ts` pins the token to the constant and
+  every dependant to the token. The New-project `+` is a **sibling** of `.tabbar__tabs`, not its last child — inside
   the scroller it vanished once the strip overflowed (no visible scrollbar to hint it was
   still there). The wrapping `.tabbar__projects` is `flex: 1` and stays a drag region (not
   `no-drag`); the pill itself must not be `flex: 1` or it inflates into an empty capsule.

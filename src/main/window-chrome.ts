@@ -1,4 +1,5 @@
 import type { BrowserWindowConstructorOptions } from 'electron'
+import { TRAFFIC_LIGHT_X, trafficLightY } from '@shared/window-chrome-metrics'
 
 /**
  * The window-frame options that only mean something on macOS.
@@ -8,10 +9,17 @@ import type { BrowserWindowConstructorOptions } from 'electron'
  * are macOS-only Electron options; on Windows and Linux the window keeps its native frame either
  * way, so this changes nothing there and simply stops claiming a shape those platforms don't have
  * (issue #564, where the renderer reserved the traffic-light space on Windows regardless).
+ *
+ * The lights' `y` is DERIVED from the bar height (`@shared/window-chrome-metrics`), not typed
+ * here: it was a literal 15 for a 44px bar, and shrinking the bar to Chrome's proportions would
+ * have left them hanging below its centre.
  */
 export function macTitleBarOptions(
   platform: NodeJS.Platform
 ): Pick<BrowserWindowConstructorOptions, 'titleBarStyle' | 'trafficLightPosition'> {
   if (platform !== 'darwin') return {}
-  return { titleBarStyle: 'hiddenInset', trafficLightPosition: { x: 16, y: 15 } }
+  return {
+    titleBarStyle: 'hiddenInset',
+    trafficLightPosition: { x: TRAFFIC_LIGHT_X, y: trafficLightY() }
+  }
 }

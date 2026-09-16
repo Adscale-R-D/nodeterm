@@ -243,7 +243,7 @@ export function TabBar({
 
       <div className="tabbar">
         <div className="brand">
-          <svg className="brand__mark" viewBox="0 0 48 48" width="26" height="26" aria-hidden="true">
+          <svg className="brand__mark" viewBox="0 0 48 48" width="22" height="22" aria-hidden="true">
             <defs>
               <linearGradient id="ntg" x1="0" y1="0" x2="1" y2="1">
                 <stop offset="0" stopColor="#a38dff" />
@@ -291,7 +291,11 @@ export function TabBar({
               <div
                 key={p.id}
                 className={`tab${active ? ' active' : ''}${swimlaneHighlight ? ' tab--swimlane-highlight' : ''}${p.unavailable ? ' unavailable' : ''}${dropId === p.id ? ' is-drop-before' : ''}`}
-                style={active ? { color: p.color } : undefined}
+                // The project colour rides the GLYPH (below), not the label: `.tab.active` is
+                // neutral text on the page's own surface, like a browser tab. The one exception is
+                // the swimlane highlight, whose underline is `currentColor` and is meant to be the
+                // project's colour.
+                style={swimlaneHighlight ? { color: p.color } : undefined}
                 draggable={editingId !== p.id}
                 onDragStart={(e) => {
                   e.dataTransfer.effectAllowed = 'move'

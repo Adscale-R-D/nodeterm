@@ -255,6 +255,8 @@ describe('Windows revoke sweeps the administrators key file', () => {
     expect(readFileSync(ADMIN_KEYS, 'utf8')).toBe(`${OTHER}\n${KEY_A}\n`)
   })
 
+  // The unelevated case: that file's ACL denies even a read. Skipped (see the KNOWN RESIDUAL note on
+  // removeAdministratorsKeysForDevice) — a missing file stands in for an unreadable one here.
   it('does not fail a revoke over a file it cannot read — the normal, unelevated case', async () => {
     seed()
     rmSync(ADMIN_KEYS)

@@ -537,9 +537,14 @@ export function createPairingService(
    *
    * Rewritten IN PLACE, deliberately not temp + rename: the file's ACL must stay Administrators +
    * SYSTEM only, and a temp file inherits the directory's ACL instead, which sshd then refuses —
-   * breaking every other administrator key in it. An unreadable file (the normal case: only an
-   * elevated process may read it) is skipped; a line that IS there but cannot be removed throws,
-   * so the revoke reports `local: false` rather than a removal that did not happen.
+   * breaking every other administrator key in it. A line that IS there but cannot be removed
+   * throws, so the revoke reports `local: false` rather than a removal that did not happen.
+   *
+   * KNOWN RESIDUAL: an unreadable file is skipped, and unreadable is the NORMAL case — that ACL
+   * denies an unelevated process even a read. So an unelevated revoke cannot see a manually copied
+   * line and cannot say one exists; only an elevated nodeterm reaches it. Failing every unelevated
+   * revoke instead would make "Remove device" permanently impossible on any admin account with
+   * sshd installed, for a copy nodeterm never made.
    */
   async function removeAdministratorsKeysForDevice(deviceId: string): Promise<void> {
     if (platform !== 'win32') return

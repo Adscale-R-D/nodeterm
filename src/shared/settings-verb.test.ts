@@ -63,8 +63,14 @@ describe('the allowlist is the gate, and the forbidden set outranks it', () => {
     expect(set).toEqual({ error: expect.stringContaining('"fontSize"') })
   })
 
-  it('a forbidden key gets its own refusal that says the user decides it', () => {
-    for (const key of ['claudePermissionMode', 'defaultPermissionMode', 'hookIdentityStrict', 'controlConfirmWaivers']) {
+  it('EVERY forbidden key gets its own refusal that says the user decides it — for reads and writes', () => {
+    // Walked off the set, not a sample: a hand-written list here shrinks without reddening anything,
+    // and a forbidden key whose refusal silently became "not allowed" (or an allowance) is the bug.
+    expect(SETTINGS_VERB_FORBIDDEN.size).toBeGreaterThan(0)
+    for (const key of SETTINGS_VERB_FORBIDDEN) {
+      expect(parseSettingsRequest({ get: key }), key).toEqual({
+        error: expect.stringContaining(`settings-key-forbidden: "${key}"`)
+      })
       const r = parseSettingsRequest({ set: key, value: 'true' })
       expect(r, key).toEqual({ error: expect.stringContaining(`settings-key-forbidden: "${key}"`) })
     }

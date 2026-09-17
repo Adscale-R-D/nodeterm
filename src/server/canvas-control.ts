@@ -39,6 +39,7 @@ import {
 } from './control-unsupported'
 import { HeadlessNodeFactory } from './headless-node-factory'
 import { sendSettledEnvelope } from './settled-envelope'
+import { serverSettingsControl } from './settings-control'
 
 export interface ServerCanvasControlDeps {
   workspaceStore: WorkspaceStore
@@ -218,6 +219,17 @@ export async function initServerCanvasControl(
     rename: (sourceNodeId, args) => factory.rename(sourceNodeId, args),
     color: (sourceNodeId, args) => factory.color(sourceNodeId, args),
     sticky: (sourceNodeId, args) => factory.sticky(sourceNodeId, args),
+    settings: async (sourceNodeId, args) =>
+      serverSettingsControl(
+        {
+          persistedCanvases: () => deps.workspaceStore.persistedCanvases(),
+          capabilityProjectFor: (id) => deps.workspaceStore.capabilityProjectFor(id),
+          projectName: (id) => deps.workspaceStore.projectTargetInfo(id)?.name,
+          settings: deps.settings
+        },
+        sourceNodeId,
+        args
+      ),
     // `runDelivery` applies caller→target creator proof before any pane probe or write, and
     // re-applies it when a queued delivery flushes.
     deliver: async (input) => (await deliverFromControl(input, messaging)).reply

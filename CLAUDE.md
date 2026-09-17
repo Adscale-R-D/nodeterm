@@ -2505,6 +2505,26 @@ else, and its context links must keep classifying across restarts).
   so reporting it as "the error" would be a confident wrong fact. Reading the text, and the
   *failed-to-start* watchdog (a station that never emits ANY hook event — the opposite failure,
   which hangs dependents honestly rather than firing them wrongly), stay open.
+  **Settings (`settings`, 2026-09):** `settings [--project <id>]` lists, `settings --get <key>`
+  reads, `settings --set <key> --value <v> [--project <id>]` asks to change — flags only, because the
+  shim drops a positional sub-action for an unlisted verb and an SSH host keeps the shim it got at
+  connect. The pure `@shared/settings-verb` is the whole rule set, shared by the desktop dispatch, the
+  Server Edition and main's `parseControlRequest`: an **allowlist** (`agentMessaging` per project;
+  `snapToGrid`/`gridSize`/`defaultNodeWidth`/`defaultNodeHeight` machine-wide, bounds = the UI's) with
+  a required `why` per entry, and a **forbidden set + name pattern that outranks it** (permission
+  modes incl. `bypassPermissions`, `hookIdentityStrict`, `agentBrowserControl`, accounts/credentials/
+  gateway/launch commands, telemetry, keybindings, confirm waivers, `capabilityAck`) — the test walks
+  the table against both. Four load-bearing rules: (1) **every `--set` confirms**, and `settings` is
+  in `DESTRUCTIVE_VERBS` (one dialog at a time) but NOT in `CONFIRM_WAIVABLE_VERBS` — no waiver of any
+  scope, bypass included, answers for the user (`control-destructive.test.ts` pins no `waiveVerb`/no
+  `controlConfirmDecision` in its block, and the write only on the confirm leg). (2) A capability read
+  is the **grant** (`projectCapabilityGrantedFor`), never the file bit, and a capability write goes
+  through `applySettingsChange` → the UI's own `setProjectCapability` (flag + `'kept'`), pinned by
+  `settingsVerb.test.ts` comparing the two resulting projects. (3) Verified-only (`requiresVerified`)
+  and `--project` is own-or-granted via `PROJECT_TARGETABLE_VERBS`/`gateProjectTarget`. (4) **Server
+  Edition refuses every `--set` by name** — its headless opt-in (#537) is not consent to grant
+  capabilities, and there is no dialog; `--get` answers from `capabilityProjectFor`, own project only.
+  Mobile: N/A (the phone issues no control verbs).
   **Review panel (`verify`, 2026-07):** `verify --node <id> [--lenses …] [--focus …] [--agent …]
   [--synthesis off]` opens one reviewer per LENS, each armed behind the target (`--after`) and
   bridged to it, wrapped in a `Verify: <title>` group, plus a judge armed behind the whole panel.

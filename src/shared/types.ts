@@ -1684,6 +1684,15 @@ export interface Settings {
    *  Scheduled/loop agents and sessions with live subagents are never touched
    *  (renderer/terminal/hibernation-policy.ts explains why). */
   agentHibernationEnabled: boolean
+  /**
+   * Agent messaging for a project whose `.nodeterm/project.json` carries NO `agentMessaging` value
+   * (@shared/project-capabilities, CAPABILITY_MACHINE_DEFAULTS). MACHINE-LOCAL on purpose: it is
+   * this machine's user deciding for their own unconfigured projects, which is why it may answer
+   * without a clone notice — while an explicit `true` in a cloned file still needs one, and an
+   * explicit `false` still wins. Read strictly (`=== true`). Never settable from the canvas CLI
+   * (@shared/settings-verb forbids it): it is a grant over every project at once.
+   */
+  agentMessagingDefault: boolean
   /** How long a session must be idle + offscreen before "Eco" hibernates it (minutes). */
   agentHibernationIdleMinutes: number
   /** When Eco hibernates a session, also mark it PAUSED (see `AgentNodeStatus.paused`) so it does
@@ -1900,6 +1909,10 @@ export const DEFAULT_SETTINGS: Settings = {
   // Opt-in: hibernation exits a live CLI, so nobody gets it without asking. The 30-minute floor
   // is deliberately long — shorter windows exit sessions the user is between turns on.
   agentHibernationEnabled: false,
+  // OFF until the cross-restart pane-ownership proof lands: messaging refuses every pane that
+  // survived an app restart (core/agents/pane-ownership.ts), so "on by default" would be false
+  // after every restart and every update. Flipping this is a separate, deliberate change.
+  agentMessagingDefault: false,
   agentHibernationIdleMinutes: 30,
   agentHibernationPersistAcrossRestart: false,
   // Opt-out (default on). Existing users pick this up on hydrate ONLY if their settings.json has

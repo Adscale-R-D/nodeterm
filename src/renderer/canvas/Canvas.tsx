@@ -545,6 +545,13 @@ import { chordHeld, isHoldChord, isModifierEventKey, matchesShortcut } from '@sh
 // write/close as "the confirm-gated pair" from inside `src/main` — which this project cannot see —
 // while the gating lived in two hand-written blocks here, so the set decided nothing.
 import { isDestructiveVerb, dryRunRequested } from '@shared/control-verbs'
+import {
+  SETTINGS_VERB_KEY_LIST,
+  parseSettingsRequest,
+  planSettingsSet,
+  renderSettingsGet
+} from '@shared/settings-verb'
+import { applySettingsChange } from '../lib/settingsVerb'
 import { useExpiringDialog } from '../lib/useExpiringDialog'
 import {
   confirmExpiresAt,
@@ -9669,6 +9676,98 @@ export function Canvas() {
             opFinish(
               opPlan.confirmKind === 'adopt' && opProbed ? { ...opProbed, closed: false } : undefined
             )
+          },
+          onCancel: () => reply({ ok: false, error: 'denied by user' })
+        })
+        return
+      }
+
+      // ── `settings` (@shared/settings-verb) — handled BEFORE the source-routing machinery ─────
+      // A STORE_ANSWERED_VERBS member: it reads settings.json and the projects store, its dialog is
+      // app-global, and a background agent asking must never travel the user's view. Main already
+      // required a VERIFIED caller (hook-server `requiresVerified`) and, for `--project`, own-or-
+      // granted (gateProjectTarget). The renderer's job: parse through the shared allowlist, answer
+      // reads, and put EVERY change in front of the user. There is deliberately no waiver read
+      // here — `settings` is outside CONFIRM_WAIVABLE_VERBS, so no standing "don't ask again"
+      // (app-run, project, always, bypass) can answer for the user. A settings change can grant a
+      // capability, and a CLI that waived its own confirm would make the confirm decorative.
+      if (verb === 'settings') {
+        const request = parseSettingsRequest(args)
+        if ('error' in request) {
+          reply({ ok: false, error: request.error })
+          return
+        }
+        const stStore = useProjects.getState()
+        const stLive = nodesRef.current.find((n) => n.id === sourceNodeId)
+        const stStored = stStore.projects
+          .flatMap((p) => p.nodes.map((n) => ({ node: n, projectId: p.id })))
+          .find((x) => x.node.id === sourceNodeId)
+        if (!stLive && !stStored) {
+          reply({ ok: false, error: 'source node is not in any open project' })
+          return
+        }
+        if (!sourceIsControlCapable(stLive?.data.agentId ?? stStored?.node.agentId)) {
+          reply({ ok: false, error: 'source node is not a control-capable agent' })
+          return
+        }
+        const stCallerProjectId = stLive ? stStore.activeProjectId : stStored?.projectId
+        const stProjectId = request.project ?? stCallerProjectId
+        const stProject = stProjectId ? stStore.getProject(stProjectId) : undefined
+        if (request.project && !stProject) {
+          // Belt: main refused every id the caller has no relationship to. This is an authorized id
+          // this renderer's store cannot see yet (mid-hydration), so it is worded transient.
+          reply({
+            ok: false,
+            error: 'project-target-refused: the target project is not available here — try again'
+          })
+          return
+        }
+        const stSettings = useSettings.getState().settings
+        if (request.action !== 'set') {
+          reply(
+            renderSettingsGet({
+              keys: request.action === 'get' ? [request.key] : SETTINGS_VERB_KEY_LIST,
+              settings: stSettings,
+              project: stProject
+            })
+          )
+          return
+        }
+        const stTitle =
+          oneLine((stLive?.data.title as string) ?? stStored?.node.title ?? '') || sourceNodeId
+        const stPlan = planSettingsSet({
+          request,
+          settings: stSettings,
+          project: stProject,
+          requestedBy: stTitle
+        })
+        if (stPlan.kind === 'error') {
+          reply({ ok: false, error: stPlan.error })
+          return
+        }
+        if (stPlan.kind === 'unchanged') {
+          reply({ ok: true, message: stPlan.message })
+          return
+        }
+        // One confirm dialog at a time — the write/close rule, read off the shared set.
+        if (isDestructiveVerb(verb) && confirmBusy()) {
+          reply({ ok: false, error: 'a confirmation is already pending — try again' })
+          return
+        }
+        setConfirm({
+          message: stPlan.message,
+          confirmLabel: stPlan.confirmLabel,
+          danger: stPlan.danger,
+          requestedBy: stTitle,
+          // NO `waiveVerb` (see the block comment): every change asks, every time.
+          expiresAt: confirmExpiresAt(Date.now()),
+          onExpire: () => reply({ ok: false, error: 'expired before the user answered' }),
+          onConfirm: () => {
+            setConfirm(null)
+            // The SAME setters the Settings UI calls (lib/settingsVerb) — a CLI grant is the state
+            // the switch produces, file flag and this machine's answer together.
+            applySettingsChange(stPlan.change)
+            reply({ ok: true, message: stPlan.done })
           },
           onCancel: () => reply({ ok: false, error: 'denied by user' })
         })

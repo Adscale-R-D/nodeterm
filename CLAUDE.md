@@ -2505,6 +2505,52 @@ else, and its context links must keep classifying across restarts).
   so reporting it as "the error" would be a confident wrong fact. Reading the text, and the
   *failed-to-start* watchdog (a station that never emits ANY hook event — the opposite failure,
   which hangs dependents honestly rather than firing them wrongly), stay open.
+  **Settings (`settings`, 2026-09):** `settings [--project <id>]` lists, `settings --get <key>`
+  reads, `settings --set <key> --value <v> [--project <id>]` asks to change — flags only, because the
+  shim drops a positional sub-action for an unlisted verb and an SSH host keeps the shim it got at
+  connect. The pure `@shared/settings-verb` is the whole rule set, shared by the desktop dispatch, the
+  Server Edition and main's `parseControlRequest`: an **allowlist** (`agentMessaging` per project;
+  `snapToGrid`/`gridSize`/`defaultNodeWidth`/`defaultNodeHeight` machine-wide, bounds = the UI's) with
+  a required `why` per entry, and a **forbidden set + name pattern that outranks it** (permission
+  modes incl. `bypassPermissions`, `hookIdentityStrict`, `agentBrowserControl`, accounts/credentials/
+  gateway/launch commands, telemetry, keybindings, confirm waivers, `capabilityAck`) — the test walks
+  the table against both. Four load-bearing rules: (1) **every `--set` confirms**, and `settings` is
+  in `DESTRUCTIVE_VERBS` (one dialog at a time) but NOT in `CONFIRM_WAIVABLE_VERBS` — no waiver of any
+  scope, bypass included, answers for the user (`control-destructive.test.ts` pins no `waiveVerb`/no
+  `controlConfirmDecision` in its block, and the write only on the confirm leg). (2) A capability read
+  is the **grant** (`projectCapabilityGrantedFor`), never the file bit, and a capability write goes
+  through `applySettingsChange` → the UI's own `setProjectCapability` (flag + `'kept'`), pinned by
+  `settingsVerb.test.ts` comparing the two resulting projects. (3) Verified-only (`requiresVerified`)
+  and `--project` is own-or-granted via `PROJECT_TARGETABLE_VERBS`/`gateProjectTarget`. (4) **Server
+  Edition refuses every `--set` by name** — its headless opt-in (#537) is not consent to grant
+  capabilities, and there is no dialog; `--get` answers from `capabilityProjectFor`, own project only.
+  Mobile: N/A (the phone issues no control verbs).
+  **Agent messaging's MACHINE DEFAULT (`settings.agentMessagingDefault`, 2026-09, ships OFF).** A
+  project whose `.nodeterm/project.json` carries NO `agentMessaging` value is answered by this
+  machine's settings.json; the rule is ONE function, `projectCapabilityEffective`
+  (`@shared/project-capability-consent`), and `projectCapabilityGrantedFor` now REQUIRES the
+  defaults argument so a consumer that forgot it fails to compile instead of reading every
+  unconfigured project as off while Settings reads it as on. Four rules: (1) an explicit `true` still
+  needs this machine's `'kept'` — `needsCapabilityNotice` is untouched and stays keyed on an explicit
+  `true`, so a cloned file still notices and a project on only by default never does; (2) OFF is now
+  WRITTEN — `setProjectCapability(…, false)` stores a literal `false` for a capability in
+  `CAPABILITY_MACHINE_DEFAULTS` (browser control has none and still deletes the field), because
+  absence now means "use the default"; `readProjectCapabilities` carries that `false` through the
+  file; (3) an ABSENT field with a recorded `'declined'` stays off — that is how every pre-default
+  build wrote "off", and a user's explicit no must not be undone by a default switched on later;
+  "Use this machine's default" (`resetProjectCapabilityToDefault`) therefore clears the field AND the
+  answer; (4) the default is forbidden to the `settings` verb (a grant over every project, clones
+  included). **This does not trip the `project-capabilities.ts` header's trigger**: the notice is not
+  dropped, and what the default answers is absence, whose value lives in machine-local settings.json.
+  **Why it ships OFF:** `core/agents/pane-ownership.ts` records a pane's owner only on a FRESH spawn,
+  so after an app restart or update every surviving pane is `unproven-target-owner` and refused —
+  "on by default" would be false after every restart. The flip is a separate one-line change that
+  waits for a cross-restart ownership proof (#659's signed record is the candidate). Settings →
+  Agents shows the machine switch, and the per-project row is a three-way choice (default / on /
+  off) plus "On in <project> (this machine's default)" — a two-position switch cannot draw absence.
+  Downgrade: a pre-default build writes `false` back as a deleted field, which this build then reads
+  as "use the default". Server Edition reads the same grant from its own settings.json; Mobile: N/A
+  (the phone has no capability switch).
   **Review panel (`verify`, 2026-07):** `verify --node <id> [--lenses …] [--focus …] [--agent …]
   [--synthesis off]` opens one reviewer per LENS, each armed behind the target (`--after`) and
   bridged to it, wrapped in a `Verify: <title>` group, plus a judge armed behind the whole panel.

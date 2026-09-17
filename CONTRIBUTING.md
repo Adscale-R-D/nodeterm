@@ -212,6 +212,13 @@ lane unaffected.
   arguments and lines above cmd's limit fail explicitly. Keep stdin direct: PowerShell's text
   pipeline changes Unicode and line endings under Windows PowerShell 5.1.
 
+- **The phone reaches a Windows desktop through the relay only.** Everything the iOS app sends over
+  SSH is POSIX sh plus tmux, and Windows OpenSSH hands out `cmd.exe`, so Windows pairing installs no
+  SSH key and requires remote access instead of an SSH server (`src/shared/pairing-gate.ts`). Do not
+  "fix" this by installing the key into `administrators_authorized_keys`. The phone tries SSH before
+  the relay, so a key that works locks it onto a path that cannot work. CLAUDE.md, "Remote access",
+  has the details.
+
 - **Normalize BOTH sides of a path comparison, through one function.** A marker normalized where
   it is built and matched raw where it is used is a no-op on the machine you wrote it on and a
   silent defect on Windows. That is issue #558: the managed-hook marker was folded to `/` while

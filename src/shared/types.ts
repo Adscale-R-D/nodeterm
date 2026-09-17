@@ -3236,11 +3236,28 @@ export interface DeviceRevokeResult {
 /** Phone-pairing (nodeterm iOS "scan a QR" flow) bridge. */
 export interface PairingApi {
   /** Start the one-shot LAN listener; resolves with the QR payload + an SSH-reachable hint. */
-  start(): Promise<{ payload: string; sshOpen: boolean; relayPlan?: 'ok' | 'dev' | 'off' }>
+  start(): Promise<{
+    payload: string
+    sshOpen: boolean
+    relayPlan?: 'ok' | 'dev' | 'off'
+    /** false = relay-only host (Windows): no SSH key is installed and the QR waits for the relay,
+     *  not sshd (`pairingGate`). Absent from an older main process ⇒ treat as true. */
+    sshKey?: boolean
+    /** Windows only, explanation only: which authorized_keys file sshd reads for this account. */
+    windowsKeyFile?: 'administrators' | 'profile' | 'unknown'
+  }>
   /** Cancel an in-flight pairing (e.g. when the settings section unmounts). */
   stop(): Promise<void>
-  /** Fires once when pairing finishes (ok=true paired, ok=false timeout). Returns unsubscribe. */
-  onDone(cb: (result: { ok: boolean; relay?: 'ok' | 'off' | 'failed' | 'dev' }) => void): () => void
+  /** Fires once when pairing finishes (ok=true paired, ok=false timeout / relay-only mint failure).
+   *  Returns unsubscribe. */
+  onDone(
+    cb: (result: {
+      ok: boolean
+      relay?: 'ok' | 'off' | 'failed' | 'dev'
+      reason?: 'timeout' | 'relay-failed'
+      reached?: boolean
+    }) => void
+  ): () => void
   /** Live re-probe of 127.0.0.1:22, so the "SSH server is off" warning can clear the moment the
    *  user turns it on (polled by the UI only while the warning is showing). */
   probeSsh(): Promise<boolean>

@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, type DragEvent } from 'react'
 import { createPortal } from 'react-dom'
 import { useProjects } from '../state/projects'
-import { useViewMode, viewFor } from '../state/viewMode'
+import { isOmniKanbanEnabled, useViewMode, viewFor } from '../state/viewMode'
 import { useAgentStatus } from '../state/agentStatus'
 import { useSettings } from '../state/settings'
 import { accountsForProject, sshAccountsHint, systemAccountDisplay } from '../state/workspace'
@@ -12,7 +12,7 @@ import { sessionCount, sessionForProject, useProjectSession } from '../session/s
 import { tabClickAction } from '../session/relay-tab'
 import { useMenuFlip } from '../ui/useMenuFlip'
 import { commandTooltip } from '../lib/keybindingOverrides'
-import { IconCanvasView, IconKanban } from './icons'
+import { IconCanvasView, IconKanban, IconMoreVertical, IconPlus } from './icons'
 import { ProjectGlyph } from './ProjectGlyph'
 import {
   ALL_PERMISSION_MODES,
@@ -87,7 +87,12 @@ export function TabBar({
   // Closed projects are hidden here (reopen them from the start screen's "Recently closed").
   const projects = useMemo(() => allProjects.filter((p) => !p.closed), [allProjects])
   const activeId = useProjects((s) => s.activeProjectId)
-  const kanbanActive = useViewMode((s) => !!activeId && viewFor(s, activeId) === 'kanban')
+  const omniEnabled = useSettings((s) => isOmniKanbanEnabled(s.settings))
+  const globalKanban = useViewMode((s) => s.globalKanban)
+  const isGlobal = omniEnabled && globalKanban
+  const perProjectKanban = useViewMode((s) => !!activeId && viewFor(s, activeId) === 'kanban')
+  const kanbanActive = isGlobal || perProjectKanban
+  const highlightedId = useViewMode((s) => s.highlightedSwimlaneId)
   // Unread dots need only the unread id set — subscribing to the whole status map re-rendered
   // the TabBar on every working/waiting flip of any agent. Primitive signature → rare updates.
   const unreadIds = useAgentStatus((s) => {
@@ -181,6 +186,23 @@ export function TabBar({
     setEditingId(null)
   }
 
+  // Drop-at-end: the wrapper (gap between pill and +, empty title-bar to the right of +,
+  // and the + itself). Per-tab handlers stopPropagation, so a drop ON a tab is still
+  // insert-before. The + used to live inside the scroller, so a drop on it already meant
+  // "after the last tab".
+  const onEndZoneDragOver = (e: DragEvent) => {
+    if (!dragId) return
+    e.preventDefault()
+    if (dropId !== '') setDropId('')
+  }
+  const onEndZoneDrop = (e: DragEvent) => {
+    if (!dragId) return
+    e.preventDefault()
+    onReorder(dragId, null)
+    setDragId(null)
+    setDropId(null)
+  }
+
   // The strip scrolls without a visible scrollbar (see .tabbar__tabs), so keep it navigable:
   // a plain mouse wheel scrolls it horizontally, and the active tab is brought into view.
   const tabsRef = useRef<HTMLDivElement>(null)
@@ -189,6 +211,24 @@ export function TabBar({
       ?.querySelector('.tab.active')
       ?.scrollIntoView({ behavior: 'smooth', inline: 'nearest', block: 'nearest' })
   }, [activeId, projects.length])
+
+
+  // The backdrop deliberately sits BELOW the bar, so a click on another tab switches to it in one
+  // go instead of being swallowed as a dismiss — which leaves the bar itself (its empty stretch,
+  // the brand, the +) unable to close the menu. This covers exactly that gap, and it closes
+  // WITHOUT consuming the event, so the click still lands wherever it was aimed.
+  useEffect(() => {
+    if (!menuId) return
+    const onDown = (e: PointerEvent): void => {
+      const el = e.target as HTMLElement | null
+      // The caret owns its own toggle; closing here first would let its click re-open the menu.
+      if (el?.closest('.tab-menu, .tab__caret')) return
+      closeMenu()
+    }
+    document.addEventListener('pointerdown', onDown, true)
+    return () => document.removeEventListener('pointerdown', onDown, true)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [menuId])
 
   return (
     <>
@@ -204,7 +244,7 @@ export function TabBar({
 
       <div className="tabbar">
         <div className="brand">
-          <svg className="brand__mark" viewBox="0 0 48 48" width="26" height="26" aria-hidden="true">
+          <svg className="brand__mark" viewBox="0 0 48 48" width="22" height="22" aria-hidden="true">
             <defs>
               <linearGradient id="ntg" x1="0" y1="0" x2="1" y2="1">
                 <stop offset="0" stopColor="#a38dff" />
@@ -227,36 +267,36 @@ export function TabBar({
           <span className="brand__name">nodeterm</span>
         </div>
 
+        {/* Projects group: the pill scrolls; the + is a SIBLING so it cannot scroll away
+            with the tabs (issue #375). End-zone drop lives on this wrapper (covers the
+            4px gap and the +); per-tab handlers still stopPropagation. */}
         <div
-          className="tabbar__tabs"
-          ref={tabsRef}
-          onWheel={(e) => {
-            // Translate a vertical mouse wheel into horizontal strip scrolling (trackpads
-            // already produce deltaX). Nothing above the canvas scrolls vertically anyway.
-            if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) e.currentTarget.scrollLeft += e.deltaY
-          }}
-          // The strip itself is the "drop at the end" zone (per-tab handlers stopPropagation).
-          onDragOver={(e) => {
-            if (!dragId) return
-            e.preventDefault()
-            if (dropId !== '') setDropId('')
-          }}
-          onDrop={(e) => {
-            if (!dragId) return
-            e.preventDefault()
-            onReorder(dragId, null)
-            setDragId(null)
-            setDropId(null)
-          }}
+          className="tabbar__projects"
+          onDragOver={onEndZoneDragOver}
+          onDrop={onEndZoneDrop}
         >
+          <div
+            className="tabbar__tabs"
+            ref={tabsRef}
+            onWheel={(e) => {
+              // Translate a vertical mouse wheel into horizontal strip scrolling (trackpads
+              // already produce deltaX). Nothing above the canvas scrolls vertically anyway.
+              if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) e.currentTarget.scrollLeft += e.deltaY
+            }}
+          >
           {projects.map((p) => {
-            const active = p.id === activeId
+            const active = isGlobal ? (highlightedId ? p.id === highlightedId : p.id === activeId) : p.id === activeId
+            const swimlaneHighlight = isGlobal && p.id === highlightedId
             const unreadCount = p.nodes.filter((n) => unreadSet.has(n.id)).length
             return (
               <div
                 key={p.id}
-                className={`tab${active ? ' active' : ''}${p.unavailable ? ' unavailable' : ''}${dropId === p.id ? ' is-drop-before' : ''}`}
-                style={active ? { color: p.color } : undefined}
+                className={`tab${active ? ' active' : ''}${swimlaneHighlight ? ' tab--swimlane-highlight' : ''}${p.unavailable ? ' unavailable' : ''}${dropId === p.id ? ' is-drop-before' : ''}${menuId === p.id ? ' tab--menu-open' : ''}`}
+                // The project colour rides the GLYPH (below), not the label: `.tab.active` is
+                // neutral text on the page's own surface, like a browser tab. The one exception is
+                // the swimlane highlight, whose underline is `currentColor` and is meant to be the
+                // project's colour.
+                style={swimlaneHighlight ? { color: p.color } : undefined}
                 draggable={editingId !== p.id}
                 onDragStart={(e) => {
                   e.dataTransfer.effectAllowed = 'move'
@@ -286,8 +326,13 @@ export function TabBar({
                 }}
                 onClick={() => {
                   if (editingId) return
-                  // An unavailable tab distinguishes by its bound session source: a dropped RELAY
-                  // tab reconnects on click (Stage 4 Task 7), a missing local folder is inert.
+                  // In global swimlane overview, clicking the top project tab jumps to its
+                  // swimlane instead of switching the canvas project (analog zu Cmd+1..9).
+                  if (isGlobal) {
+                    useViewMode.getState().setHighlightedSwimlaneId(p.id)
+                    window.dispatchEvent(new CustomEvent('nodeterm:swimlane-jump', { detail: { projectId: p.id } }))
+                    return
+                  }
                   const action = tabClickAction(!!p.unavailable, sessionForProject(p.id).source)
                   if (action === 'switch') onSwitch(p.id)
                   else if (action === 'reconnect') onReconnect(p.id)
@@ -345,44 +390,77 @@ export function TabBar({
                   </span>
                 )}
 
-                {active && editingId !== p.id && (
-                  // The title was a hardcoded `(⌘⇧B)` — mac glyphs shown to Linux/Windows users
-                  // (a pre-existing bug: it was never even hintLabel-wrapped), and stale after a
-                  // remap. `commandTooltip` fixes both and drops the chord entirely when the
-                  // command is unbound.
-                  <button
-                    className="tab__board-toggle"
-                    title={commandTooltip(
-                      kanbanActive ? 'Canvas view' : 'Kanban view',
-                      'view.kanbanToggle'
+                {editingId !== p.id && (
+                  // The actions are one cluster with its own rhythm, not two more items in the
+                  // tab's label row: they sit a hair apart from each other and further from the
+                  // name than the name's own parts sit from one another.
+                  <span className="tab__actions">
+                    {active && (
+                      // On the ACTIVE tab only: the toggle says which view you are looking at, and
+                      // on an inactive tab it would flip a project's view without taking you
+                      // there. The chord comes from `commandTooltip`, so a remap or an unbound
+                      // command is not advertised as a chord that no longer works.
+                      <button
+                        className="tab__board-toggle"
+                        title={commandTooltip(
+                          kanbanActive ? 'Canvas view' : 'Kanban view',
+                          'view.kanbanToggle'
+                        )}
+                        aria-label={kanbanActive ? 'Canvas view' : 'Kanban view'}
+                        onClick={(e) => {
+                          e.stopPropagation() // a tab click switches projects, this flips the view
+                          const vm = useViewMode.getState()
+                          const settings = useSettings.getState().settings
+                          const omni = isOmniKanbanEnabled(settings)
+                          const asDefault = settings.omniKanbanAsDefault === true
+                          // Closing: the global overlay is exclusive, so any board toggle while
+                          // it is open closes it.
+                          if (vm.globalKanban) {
+                            vm.toggleGlobalKanban()
+                            return
+                          }
+                          if (omni && asDefault) {
+                            vm.toggleGlobalKanban()
+                          } else {
+                            vm.toggle(p.id)
+                          }
+                        }}
+                      >
+                        {kanbanActive ? <IconCanvasView /> : <IconKanban />}
+                      </button>
                     )}
-                    onClick={(e) => {
-                      e.stopPropagation() // a tab click switches projects, this only flips the view
-                      useViewMode.getState().toggle(p.id)
-                    }}
-                  >
-                    {kanbanActive ? <IconCanvasView /> : <IconKanban />}
-                  </button>
-                )}
-                {active && editingId !== p.id && (
-                  <button
-                    className="tab__caret"
-                    title="Project options"
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      if (menuId === p.id) closeMenu()
-                      else openMenu(p.id, e.currentTarget)
-                    }}
-                  >
-                    ⌄
-                  </button>
+                    <button
+                      className="tab__caret"
+                      title="Project options"
+                      aria-label="Project options"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        if (menuId === p.id) closeMenu()
+                        else openMenu(p.id, e.currentTarget)
+                      }}
+                    >
+                      <IconMoreVertical />
+                    </button>
+                  </span>
                 )}
               </div>
             )
           })}
-
-          <button className="tab__add" title="New project" onClick={onOpenWelcome}>
-            +
+          {/* The end-of-strip drop zone (`dropId === ''`) had no marker at all — every other target
+              draws its line as the `::before` of the tab it lands in front of, and "after the last
+              one" has no such tab. It lives INSIDE the scroller so it lands after the last tab
+              rather than at the window edge. Rendered only mid-drag, and its negative margins
+              cancel its own width so appearing costs no layout shift. */}
+          {dragId && dropId === '' && <span className="tab__dropline" aria-hidden />}
+          </div>
+          <button
+            type="button"
+            className="tab__add"
+            title="New project"
+            aria-label="New project"
+            onClick={onOpenWelcome}
+          >
+            <IconPlus />
           </button>
         </div>
       </div>

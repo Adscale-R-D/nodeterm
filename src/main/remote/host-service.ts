@@ -28,11 +28,11 @@ import path from 'path'
 import { app, ipcMain, type BrowserWindow } from 'electron'
 import { IPC } from '../../shared/ipc'
 import { REF_MAX_LEN } from '../../shared/presence'
-import type { CanvasMutation, CanvasState, DirEntry, PtyCreateOptions } from '../../shared/types'
+import type { CanvasMutation, CanvasState, DirEntry, KanbanColumn, PtyCreateOptions } from '../../shared/types'
 import type { AgentId } from '../../shared/agents/config'
 import { PtyManager, type DetachedSinks } from '../../core/pty-manager'
 import * as fsOps from '../../core/fs-ops'
-import type { RemoteNodeInput } from '../../core/project-node-append'
+import { TITLE_MAX, type RemoteNodeInput } from '../../core/project-node-append'
 import { getStoredEntitlement, isPremium } from '../../core/license'
 import { publicKeyToB64, type KeyPair } from './e2ee'
 import { loadOrCreateHostKeyPair, HostKeyLockedError } from './host-identity'
@@ -128,6 +128,47 @@ export interface HostGitOps {
   history(cwd: string): Promise<unknown>
 }
 
+/**
+ * Renderer-nudge node actions the phone's session-LIST long-press menu invokes (`node.wake` /
+ * `node.refresh` / `node.rename`). Each forwards to the host renderer and returns whether it was
+ * DELIVERED to a live window — never whether the action "worked": all three are nudges in the
+ * `agent:wake` shape (the renderer re-reads its own state and no-ops for a node it cannot
+ * resolve), which is exactly why they may take a client-sent node id where the session-scoped
+ * RPCs must not — the worst a hostile id buys is a no-op nudge, and `pty.attach` already accepts
+ * a client-chosen node id for a far stronger capability. Absent ⇒ the verbs answer an honest
+ * "not served" (a pre-feature host, and every pre-feature test fake).
+ */
+export interface HostNodeActions {
+  /** Ask the renderer to wake a hibernated node (same `agent:wake` channel the attach path uses). */
+  wake(nodeId: string): boolean
+  /** Ask the renderer to reload the node's terminal view in place (`respawnNonce` bump). */
+  refresh(nodeId: string): boolean
+  /** Rename a node through the renderer's `renameSession` funnel (title pre-sanitized here). */
+  rename(nodeId: string, title: string): boolean
+}
+
+/**
+ * The kanban board writes the phone may ask this host to make on its behalf (`projects.ensureBoard`
+ * / `projects.setCardColumn`). Both land in `WorkspaceStore`, which owns the read-modify-write and
+ * the save-chain ordering; nothing here touches a file.
+ *
+ * Two things the phone cannot do for itself, and this is why the verbs exist rather than more SSH:
+ * an SSH project's `.nodeterm/project.json` lives on a THIRD machine that the phone has no
+ * credentials for (only this desktop mirrors it), and the phone's direct-SSH write inlines the
+ * whole file into one argv string, so it silently stops working past Linux's `MAX_ARG_STRLEN`.
+ * Over these verbs the request is a few hundred bytes whatever the canvas weighs.
+ *
+ * Absent ⇒ the verbs answer an honest "not served" (a pre-feature host, and every pre-feature test
+ * fake), which the phone shows to the user instead of doing nothing.
+ */
+export interface HostKanbanOps {
+  /** Seed the default board on a project that has none; returns the board's columns either way,
+   *  or null when this project can have no board written. IDEMPOTENT. */
+  ensureBoard(projectId: string): Promise<KanbanColumn[] | null>
+  /** Move a card to a column (null = the virtual Ungrouped column). False = nothing was written. */
+  setCardColumn(projectId: string, nodeId: string, columnId: string | null): Promise<boolean>
+}
+
 interface Stream {
   sessionId: string
   /** The node id (tmux persistKey) this stream attached to. The ONLY tmux target a client can
@@ -206,7 +247,13 @@ export function createHostHandlers(
   // balanced per stream (kill, destroy, PTY exit, closeAll, an attach superseded mid-flight).
   // The desktop uses it to (a) wake a hibernated node someone just opened on their phone and
   // (b) keep Eco from hibernating a session a phone is actively watching. Absent ⇒ no tracking.
-  remoteViewer?: { attached(nodeId: string): void; detached(nodeId: string): void }
+  remoteViewer?: { attached(nodeId: string): void; detached(nodeId: string): void },
+  // Renderer-nudge node actions for the phone's session-list long-press menu (`node.wake` /
+  // `node.refresh` / `node.rename`). Absent ⇒ the verbs answer an honest "not served".
+  nodeActions?: HostNodeActions,
+  // Kanban board writes on the phone's behalf (`projects.ensureBoard` / `projects.setCardColumn`).
+  // Absent ⇒ the verbs answer an honest "not served".
+  kanban?: HostKanbanOps
 ): HostHandlers {
   // streamId -> Stream. PTY callbacks close over their own `streamId` directly, so no
   // reverse (sessionId -> streamId) index is needed.
@@ -493,6 +540,63 @@ export function createHostHandlers(
       .catch(() => socket.respond(req.id, true, { registered: false }))
   }
 
+  /**
+   * The two kanban board verbs, which exist because the phone's own SSH write cannot cover either
+   * of the cases they serve (see `HostKanbanOps`).
+   *
+   * `projects.ensureBoard { projectId }` → `{ columns }`: seed the default board on a project that
+   * has none, or hand back the board it already has. Idempotent, so the phone may call it on every
+   * Board tap without ever being the thing that replaces a board someone built.
+   *
+   * `projects.setCardColumn { projectId, nodeId, columnId | null }` → `{ moved }`: move one card.
+   *
+   * Validation lives in the store's pure transforms (`project-kanban-write.ts`), which refuse
+   * anything they cannot do rather than inventing a board or a column — and a refusal is an
+   * `ok:{...false}` ANSWER, not a protocol error, because the phone must be able to tell the user
+   * "that didn't happen" instead of leaving the optimistic card where it dropped it.
+   *
+   * No jail is needed and none is faked: the client sends a projectId and NOTHING path-shaped, and
+   * the file path is always derived by the store from its own index — the same rule the board-log
+   * handlers state. A projectId this host does not have is simply not found.
+   */
+  function handleKanban(req: RpcRequest): void {
+    if (!kanban) {
+      socket.respond(req.id, false, { message: `${req.method} is not served on this host.` })
+      return
+    }
+    const p = asRecord(req.params)
+    const projectId = str(p.projectId)
+    if (!projectId) {
+      socket.respond(req.id, false, { message: `${req.method} requires a projectId.` })
+      return
+    }
+    if (req.method === 'projects.ensureBoard') {
+      void kanban
+        .ensureBoard(projectId)
+        .then((columns) => socket.respond(req.id, true, { columns: columns ?? null }))
+        .catch(() => socket.respond(req.id, true, { columns: null }))
+      return
+    }
+    const nodeId = str(p.nodeId)
+    if (!nodeId) {
+      socket.respond(req.id, false, { message: 'projects.setCardColumn requires a nodeId.' })
+      return
+    }
+    // `null` is a REAL value here (the virtual Ungrouped column), so it must be told apart from a
+    // missing/garbage key — which is refused rather than silently read as "unassign".
+    const raw = p.columnId
+    if (raw !== null && typeof raw !== 'string') {
+      socket.respond(req.id, false, {
+        message: 'projects.setCardColumn requires columnId: a column id, or null for Ungrouped.'
+      })
+      return
+    }
+    void kanban
+      .setCardColumn(projectId, nodeId, raw)
+      .then((moved) => socket.respond(req.id, true, { moved }))
+      .catch(() => socket.respond(req.id, true, { moved: false }))
+  }
+
   function handleKill(req: RpcRequest): void {
     const streamId = num(asRecord(req.params).streamId, -1)
     const stream = streams.get(streamId)
@@ -564,6 +668,58 @@ export function createHostHandlers(
       )
   }
 
+  /**
+   * `node.wake` / `node.refresh` / `node.rename {nodeId, title?}` — the session-list long-press
+   * actions. Unlike the session-scoped RPCs these take a client-sent `nodeId`, deliberately:
+   * they fire from the LIST, where no stream exists, and each is a renderer NUDGE that no-ops
+   * for a node the canvas cannot resolve (the same trust envelope as `pty.attach`'s
+   * client-chosen node id, for a much weaker capability). Validation still applies — the id is
+   * length-capped and control-char-refused, and a rename title is sanitized here (control chars
+   * out, `TITLE_MAX` clamp) BEFORE it rides toward a `/rename` command line. The answer means
+   * "delivered to a live desktop window", never "the action happened" — that contract is in the
+   * verb docs the iOS client mirrors.
+   */
+  function handleNodeAction(req: RpcRequest): void {
+    if (!nodeActions) {
+      socket.respond(req.id, false, { message: `${req.method} is not served on this host.` })
+      return
+    }
+    const p = asRecord(req.params)
+    const nodeId = str(p.nodeId)
+    // eslint-disable-next-line no-control-regex -- refusing control chars is the point
+    if (!nodeId || nodeId.length > REF_MAX_LEN || /[\x00-\x1f\x7f-\x9f]/.test(nodeId)) {
+      socket.respond(req.id, false, { message: 'Invalid node id.' })
+      return
+    }
+    let delivered = false
+    if (req.method === 'node.rename') {
+      // Strip C0/C1 control chars (ESC/CSI included — the paste-injection rule: a payload must
+      // not be able to become structure) and collapse the leftovers; clamp to the registrar's
+      // TITLE_MAX so a rename can never persist a title registration would have refused.
+      const raw = str(p.title) ?? ''
+      const title = raw
+        // eslint-disable-next-line no-control-regex -- stripping control chars is the point
+        .replace(/[\x00-\x1f\x7f-\x9f]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, TITLE_MAX)
+      if (!title) {
+        socket.respond(req.id, false, { message: 'node.rename requires a non-empty title.' })
+        return
+      }
+      delivered = nodeActions.rename(nodeId, title)
+    } else {
+      delivered = req.method === 'node.wake' ? nodeActions.wake(nodeId) : nodeActions.refresh(nodeId)
+    }
+    if (!delivered) {
+      // The desktop window is gone (quitting / crashed) — an honest refusal, not a silent "ok"
+      // over a nudge that reached nothing.
+      socket.respond(req.id, false, { message: 'The desktop window is not available.' })
+      return
+    }
+    socket.respond(req.id, true, {})
+  }
+
   return {
     onRpc(req) {
       switch (req.method) {
@@ -603,6 +759,15 @@ export function createHostHandlers(
           break
         case 'projects.registerNode':
           handleRegisterNode(req)
+          break
+        case 'projects.ensureBoard':
+        case 'projects.setCardColumn':
+          handleKanban(req)
+          break
+        case 'node.wake':
+        case 'node.refresh':
+        case 'node.rename':
+          handleNodeAction(req)
           break
         case 'projects.list':
           // Read-only enumeration of the host's projects/sessions/agent-status (no client params —
@@ -842,6 +1007,12 @@ export interface HostSessionOptions {
   /** Relay-viewer presence per node (attach/detach, balanced per stream) — see createHostHandlers.
    *  Optional: absent ⇒ no tracking. */
   remoteViewer?: { attached(nodeId: string): void; detached(nodeId: string): void }
+  /** Renderer-nudge node actions (`node.wake` / `node.refresh` / `node.rename`) for the phone's
+   *  session-list long-press menu. Optional: absent ⇒ the verbs answer an honest "not served". */
+  nodeActions?: HostNodeActions
+  /** Kanban board writes for the phone's Board sheet (`projects.ensureBoard` /
+   *  `projects.setCardColumn`). Optional: absent ⇒ the verbs answer an honest "not served". */
+  kanban?: HostKanbanOps
   /** Extra fs/git jail roots beyond the shared canvas's node cwds — production passes the
    *  workspace's local project cwds: the phone browses EVERY project over `projects.list`, so a
    *  canvas-only jail denied whichever project the desktop didn't happen to have focused. */
@@ -964,7 +1135,9 @@ export function connectHostSession(opts: HostSessionOptions): HostSession {
     opts.git,
     opts.registerNode,
     opts.destroyNode,
-    opts.remoteViewer
+    opts.remoteViewer,
+    opts.nodeActions,
+    opts.kanban
   )
   canvasSync = createHostCanvasSync(socket, opts.applyMutation)
   unsubCanvas = opts.subscribeCanvas(() => scheduleBroadcast())
@@ -990,6 +1163,11 @@ export interface HostBridgeDeps {
   /** Relay-viewer presence per node — wakes a hibernated node a phone just opened and shields a
    *  phone-watched session from Eco (see main/index.ts's counter). */
   remoteViewer?: { attached(nodeId: string): void; detached(nodeId: string): void }
+  /** Renderer-nudge node actions for the phone's session-list long-press menu (`node.wake` /
+   *  `node.refresh` / `node.rename`) — see main/index.ts's deliverers. */
+  nodeActions?: HostNodeActions
+  /** Kanban board writes for the phone's Board sheet — see main/index.ts's WorkspaceStore wiring. */
+  kanban?: HostKanbanOps
   /** Workspace-level jail roots (local project cwds) merged with the canvas node cwds. */
   workspaceRoots?: () => string[]
 }
@@ -1062,6 +1240,8 @@ export function initRemoteHost(
       registerNode: bridge.registerNode,
       destroyNode: bridge.destroyNode,
       remoteViewer: bridge.remoteViewer,
+      nodeActions: bridge.nodeActions,
+      kanban: bridge.kanban,
       extraRoots: bridge.workspaceRoots,
       // Typing attribution: this session's input frames are this phone's keystrokes.
       getClientId: () => phone.id(),

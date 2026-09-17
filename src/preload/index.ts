@@ -90,6 +90,9 @@ const api: NodeTerminalApi = {
     generateGroupName: (memberKeys, cwd) =>
       ipcRenderer.invoke(IPC.ptyGenerateGroupName, memberKeys, cwd),
     capture: (persistKey, full) => ipcRenderer.invoke(IPC.ptyCapture, persistKey, full),
+    remoteSessionConfirmed: (persistKey, sshRemote) =>
+      ipcRenderer.invoke(IPC.ptyRemoteSessionConfirmed, persistKey, sshRemote),
+    sessionAge: (persistKey) => ipcRenderer.invoke(IPC.ptySessionAge, persistKey),
     readScrollback: (persistKey) => ipcRenderer.invoke(IPC.ptyReadScrollback, persistKey),
     sendText: (persistKey, text, opts) =>
       ipcRenderer.invoke(IPC.ptySendText, persistKey, text, opts?.enter),
@@ -156,7 +159,12 @@ const api: NodeTerminalApi = {
       const h = (_e: unknown, p: Project) => cb(p)
       ipcRenderer.on(IPC.workspaceExternalChange, h)
       return () => ipcRenderer.removeListener(IPC.workspaceExternalChange, h)
-    }
+    },
+    // Deliberate no-op on the desktop shell: nothing here writes the project file on an agent's
+    // behalf. `HeadlessNodeFactory` is Server Edition only — the desktop's canvas-control verbs run
+    // through the renderer's own React Flow state, and its watcher path stays on onExternalChange.
+    // A real subscription would be dead wiring for a channel this main process never broadcasts.
+    onServerChange: (_cb: (project: Project) => void) => () => {}
   },
   projectSettings: {
     read: (projectId: string) => ipcRenderer.invoke(IPC.projectSettingsRead, projectId),
@@ -520,6 +528,10 @@ const api: NodeTerminalApi = {
     readTranscript: (sessionId, cwd, accountId, nodeId) =>
       ipcRenderer.invoke(IPC.claudeReadTranscript, sessionId, cwd, accountId, nodeId)
   },
+  grok: {
+    cliCaps: () => ipcRenderer.invoke(IPC.grokCliCaps),
+    takenSessionIds: (cwd) => ipcRenderer.invoke(IPC.grokTakenSessionIds, cwd)
+  },
   agent: {
     envSnapshot: () => ipcRenderer.invoke(IPC.envSnapshot),
     discoverModels: (settings) => ipcRenderer.invoke(IPC.agentDiscoverModels, settings),
@@ -529,14 +541,19 @@ const api: NodeTerminalApi = {
     clearGatewayCredential: () => ipcRenderer.invoke(IPC.agentGatewayCredentialClear)
   },
   chat: {
-    readTranscript: (sessionId, cwd, accountId, nodeId) =>
-      ipcRenderer.invoke(IPC.chatReadTranscript, sessionId, cwd, accountId, nodeId)
+    readTranscript: (sessionId, cwd, accountId, nodeId, agentId) =>
+      ipcRenderer.invoke(IPC.chatReadTranscript, sessionId, cwd, accountId, nodeId, agentId),
+    transcriptExists: (sessionId, accountId, nodeId) =>
+      ipcRenderer.invoke(IPC.transcriptExists, sessionId, accountId, nodeId)
   },
   claudeAccounts: {
     add: (ctx) => ipcRenderer.invoke(IPC.claudeAccountsAdd, ctx),
     waitLogin: (id, ctx) => ipcRenderer.invoke(IPC.claudeAccountsWaitLogin, id, ctx),
     cancelWaitLogin: (id) => ipcRenderer.invoke(IPC.claudeAccountsCancelWait, id),
-    remove: (id, ctx) => ipcRenderer.invoke(IPC.claudeAccountsRemove, id, ctx)
+    remove: (id, ctx) => ipcRenderer.invoke(IPC.claudeAccountsRemove, id, ctx),
+    link: (configDir) => ipcRenderer.invoke(IPC.claudeAccountsLink, configDir),
+    setSkillSharing: (id, enabled) =>
+      ipcRenderer.invoke(IPC.claudeAccountsSetSkillSharing, id, enabled)
   },
   codexAccounts: {
     add: () => ipcRenderer.invoke(IPC.codexAccountsAdd),
@@ -767,6 +784,16 @@ const api: NodeTerminalApi = {
     const handler = (_e: unknown, nodeIds: string[]) => listener(nodeIds)
     ipcRenderer.on(IPC.agentRemoteViewers, handler)
     return () => ipcRenderer.removeListener(IPC.agentRemoteViewers, handler)
+  },
+  onAgentRefreshNode: (listener) => {
+    const handler = (_e: unknown, nodeId: string) => listener(nodeId)
+    ipcRenderer.on(IPC.agentRefreshNode, handler)
+    return () => ipcRenderer.removeListener(IPC.agentRefreshNode, handler)
+  },
+  onAgentRenameNode: (listener) => {
+    const handler = (_e: unknown, payload: { nodeId: string; title: string }) => listener(payload)
+    ipcRenderer.on(IPC.agentRenameNode, handler)
+    return () => ipcRenderer.removeListener(IPC.agentRenameNode, handler)
   },
   onSubagentActivity: (listener) => {
     const handler = (_e: unknown, payload: Parameters<typeof listener>[0]) => listener(payload)

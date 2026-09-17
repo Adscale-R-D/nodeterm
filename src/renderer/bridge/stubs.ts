@@ -16,6 +16,7 @@
 
 import {
   UNKNOWN_CLAUDE_CLI_CAPS,
+  UNKNOWN_GROK_CLI_CAPS,
   UNKNOWN_CODEX_IDENTITY_CAPS,
   type ClaudeUsage,
   type NodeTerminalApi,
@@ -125,6 +126,8 @@ export function buildStubApi(): Omit<
   | 'reportHibernated'
   | 'onAgentWake'
   | 'onRemoteViewers'
+  | 'onAgentRefreshNode'
+  | 'onAgentRenameNode'
   // Real over the bridge (IPC.appUserDataDir): the worktree dialog's default path is derived from
   // it, and a '' stub would propose `/worktrees/…` at the filesystem root.
   | 'userDataDir'
@@ -300,6 +303,14 @@ export function buildStubApi(): Omit<
       cliCaps: () => Promise.resolve(UNKNOWN_CLAUDE_CLI_CAPS),
       readTranscript: U('claude.readTranscript')
     },
+    grok: {
+      // Same shape and same reason as claude's above: the launch path reads this synchronously, so
+      // it must resolve rather than reject. Unprobed ⇒ no `--session-id` ⇒ today's command line.
+      cliCaps: () => Promise.resolve(UNKNOWN_GROK_CLI_CAPS),
+      // Nothing taken is the honest answer where no shell can look, and it degrades to today's
+      // behaviour: mint freely. Overridden by the real WS-backed namespace in ws-bridge.
+      takenSessionIds: () => Promise.resolve([])
+    },
     agent: {
       // No env snapshot outside the desktop window: the stub (and ws-bridge, identically) answers
       // an empty env, so `${env:VAR}` expansion reports every referenced var as missing and the
@@ -344,13 +355,20 @@ export function buildStubApi(): Omit<
       materializeShared: () => Promise.resolve([])
     },
     chat: {
-      readTranscript: U('chat.readTranscript')
+      readTranscript: U('chat.readTranscript'),
+      // Resolves rather than rejects, like the two `cliCaps` above and for the same reason: cold
+      // restore awaits this on the boot path, and its whole contract is that anything it cannot
+      // judge is `unknown` ⇒ resume exactly as before. A rejection here would be a second way of
+      // saying the same thing that every caller would have to remember to catch.
+      transcriptExists: () => Promise.resolve('unknown' as const)
     },
     claudeAccounts: {
       add: U('claudeAccounts.add'),
       waitLogin: U('claudeAccounts.waitLogin'),
       cancelWaitLogin: U('claudeAccounts.cancelWaitLogin'),
-      remove: U('claudeAccounts.remove')
+      remove: U('claudeAccounts.remove'),
+      link: U('claudeAccounts.link'),
+      setSkillSharing: U('claudeAccounts.setSkillSharing')
     },
     codexAccounts: {
       add: U('codexAccounts.add'),
@@ -527,6 +545,8 @@ export function buildStubApi(): Omit<
   | 'reportHibernated'
   | 'onAgentWake'
   | 'onRemoteViewers'
+  | 'onAgentRefreshNode'
+  | 'onAgentRenameNode'
     | 'userDataDir'
     | 'presence'
     | 'speech'

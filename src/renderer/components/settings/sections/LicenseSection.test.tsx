@@ -5,6 +5,7 @@
 // which sentence lands beside which data, what a destructive button does before it does it, and
 // whether a failed ACTION is reported as a failed READ.
 import { describe, it, expect, beforeEach, afterEach, vi, type Mock } from 'vitest'
+import { pinNeutralMachineNoun } from '@renderer/lib/testMachineNoun'
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import type { LicenseDetail, LicenseStatus } from '@shared/types'
@@ -95,6 +96,10 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
+
+// See testMachineNoun.ts: the rendered copy names the machine, so the host OS is pinned.
+pinNeutralMachineNoun()
+
 describe('LicenseSection — a release that did not land', () => {
   it('reports the RELEASE, and keeps saying the truth about the license', async () => {
     await mount(PRO)
@@ -174,7 +179,7 @@ describe('LicenseSection — confirming the destructive actions', () => {
     const dialog = screenText()
     expect(dialog).toMatch(/paired phone/)
     expect(dialog).toMatch(/once every 30 days/)
-    expect(dialog).toMatch(/this Mac keeps it/)
+    expect(dialog).toMatch(/this computer keeps it/)
 
     await act(async () => confirmDialog('Cancel'))
     expect(releaseOthers).not.toHaveBeenCalled()

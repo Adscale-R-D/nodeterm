@@ -49,8 +49,10 @@ import { registerLogHandlers } from '../core/log-handlers'
 import os from 'os'
 import { hookServer } from '../core/agents/hook-server'
 import { serverEditionControlHandler } from './control-unsupported'
+import { initServerCanvasControl, type ServerCanvasControl } from './canvas-control'
 import { refreshNodeTokens } from '../core/agents/node-token-service'
 import { armServerNodeIdentity } from './node-identity-arm'
+import { wireServerCodexSharedIdentity } from './codex-shared-identity'
 import {
   writePendingAnswerLocal,
   startPendingSweep,
@@ -84,11 +86,12 @@ import { startSessionMemoryService, sshScopePredicate } from '../core/session-me
 import { createMemoryPressureMonitor } from '../core/memory-pressure'
 import { createPtyPressureMonitor } from '../core/pty-pressure'
 import { claudeCliCaps, type ClaudeCliCaps } from '../core/claude-cli'
-import { claudeConfigDirFor } from '../core/claude-config-dir'
+import { claudeConfigDirFor, registerClaudeAccountsSource } from '../core/claude-config-dir'
 import { presenceHub } from '../core/presence/hub'
 import { initCanvasSync } from '../core/canvas-sync'
 import { wireAgentStatus } from './agent-status'
 import { initServerContextLink } from './context-link'
+import { createServerWorkspaceWatcher } from './workspace-external-watch'
 import { registerTranscriptIpc } from '../core/transcript-ipc'
 import { IPC } from '@shared/ipc'
 import { WhisperModelStore } from '../core/speech/whisper-models'
@@ -113,6 +116,22 @@ function readAppVersion(): string {
     return parsed.version ?? '0.0.0'
   } catch {
     return '0.0.0'
+  }
+}
+
+/**
+ * Name the account this process runs as, for the canvas-control boot notice. `os.userInfo()`
+ * THROWS a SystemError when the effective uid has no password-database entry — the normal case for
+ * a container started with an arbitrary uid — so it is never called bare on a boot path: the log
+ * line exists to inform the operator, and it must not be able to take the feature they enabled
+ * down with it. Falls back to the numeric uid, and then to a plain phrase on a platform with none.
+ */
+function serverUserLabel(): string {
+  try {
+    return os.userInfo().username
+  } catch {
+    const uid = typeof process.getuid === 'function' ? process.getuid() : null
+    return uid === null ? 'the server user' : `uid ${uid}`
   }
 }
 
@@ -186,6 +205,12 @@ export async function startServer(
   const workspaceStore = new WorkspaceStore()
 
   settingsStore.init()
+  // The linked-account resolver's one source of truth on this shell. Registered as
+  // soon as settings exist and BEFORE anything that resolves a config dir — the mirror settings
+  // provider, `installHooksIntoLocalAccounts`, the transcript jail — because an unregistered
+  // source means "no linked accounts", i.e. a linked row would resolve to a managed dir that does
+  // not exist. The desktop registers the identical getter next to `initTranscriptIndex`.
+  registerClaudeAccountsSource(() => settingsStore.get().claudeAccounts ?? [])
   const gatewayCredentials = new ModelGatewayCredentialService(
     new ServerSecretStore(config.dataDir, MODEL_GATEWAY_SECRET_FILE)
   )
@@ -270,6 +295,9 @@ export async function startServer(
   platform.handle(IPC.ptyCapture, (persistKey: string, full?: boolean) =>
     ptyManager.captureSession(persistKey, full)
   )
+  // The late cold-start check (PtyCreateResult.freshUnverified). Pure core, and this shell runs on
+  // the machine whose tmux it reads, so the answer is as good as the desktop's local one.
+  platform.handle(IPC.ptySessionAge, (persistKey: string) => ptyManager.sessionAgeSeconds(persistKey))
 
   // fs + git + commit handlers (shared with desktop core services). The ticket store is shared
   // between the RPC side (which mints) and the HTTP side (which redeems) — one instance, so a
@@ -338,7 +366,7 @@ export async function startServer(
   // Board-log: same CorePlatform registrar as desktop, but the Server Edition has no SSH projects
   // (terminals are local), so the router only ever resolves a local folder cwd or unsupported —
   // an SSH-ref project answers `{ entries: [], unsupported: true }` (v1: no remote board log here).
-  registerBoardLogHandlers(platform, {
+  const boardLog = registerBoardLogHandlers(platform, {
     route: (projectId: string): BoardLogRoute => {
       const cwd = workspaceStore.localCwdForProject(projectId)
       return cwd ? { kind: 'local', cwd } : { kind: 'unsupported' }
@@ -422,7 +450,12 @@ export async function startServer(
   // missing/corrupt file simply yields no block.
   const installMeta = readInstallMeta(config.dataDir)
   setMirrorServerProvider(() => installMeta)
-  const { contextTail, geminiContextTail } = wireAgentStatus(platform)
+  // Set after the initial workspace load when the opt-in flag is on. The status listener is wired
+  // now so the runtime, once present, consumes the exact same normalized stream as the UI/mirror.
+  let canvasControl: ServerCanvasControl | null = null
+  const { contextTail, geminiContextTail } = wireAgentStatus(platform, {
+    onEvent: (event) => canvasControl?.onAgentEvent(event)
+  })
   // The ⌘M chat view + the find-bar's transcript index. Registered HERE rather than with the rest
   // of the handlers because the hook-fed path authority is the tail created just above. No remote
   // leg: the Server Edition runs ON the host whose transcripts it reads, so local resolution is
@@ -541,14 +574,14 @@ export async function startServer(
     }
     // Managed Claude accounts each carry their OWN settings.json (Claude Code resolves it relative
     // to CLAUDE_CONFIG_DIR), so the hook has to be re-installed there as well or a managed account
-    // reports no agent status at all. Same loop the desktop runs, minus the canvas skill: canvas
-    // control is not wired on this edition. Per-account fail-open lives inside the helper.
+    // reports no agent status at all. Canvas-control adds its skill in its own opt-in initializer;
+    // this baseline hook pass stays unchanged when the feature flag is off.
     installHooksIntoLocalAccounts(settingsStore.get().claudeAccounts ?? [])
   }
   await hookServer.start()
-  // Canvas control does not exist on this edition, and saying so BY NAME is the whole point: the
-  // null handler answered `control unavailable`, which reads to an agent like a transient outage,
-  // and an agent retries an outage. See `control-unsupported.ts`.
+  // Safe default and rollback path. The opt-in runtime replaces this handler only after its
+  // workspace-backed services are ready; a failed initialization therefore degrades to the same
+  // named permanent refusal rather than a half-wired execution surface.
   hookServer.setControlHandler(serverEditionControlHandler)
 
   // ---- Node identity (src/core/agents/node-auth-secret.ts) ------------------------------------
@@ -570,6 +603,15 @@ export async function startServer(
     console.warn('[node-identity] no secret — hook identity unavailable, running legacy', error)
   }
 
+  // The Server Edition has the same local app-server, signed node tokens, and persistent canvas
+  // store as Electron. Wire the shared-thread spine after those secrets exist, so its Codex panes
+  // get the same daemon-reset supervisor instead of bypassing it through bare `codex`.
+  void wireServerCodexSharedIdentity(
+    hookServer,
+    workspaceStore,
+    (channel, event) => platform.broadcast(channel, event)
+  ).catch((error) => console.warn('[codex-identity] shared identity unavailable:', error))
+
   // Context Link: core owns the whole feature (read handler, shim, skill, instruction blocks) and
   // writes everything under `dataDir`; what it needs from a shell is the link map. The desktop's
   // renderer pushes it from the live canvas — headless there may be no browser attached at all, so
@@ -580,9 +622,12 @@ export async function startServer(
     canvases: () => workspaceStore.persistedCanvases(),
     installAgentIntegrations: config.installHooks !== false
   })
+  const workspaceWatcher = createServerWorkspaceWatcher(workspaceStore)
   // Every load()/save() is a canvas change as far as links are concerned: a browser drawing a
-  // bridge edge reaches us as the workspace save it triggers.
+  // bridge edge reaches us as the workspace save it triggers. It also refreshes the local-ref
+  // watcher set, so projects added or removed while the server runs get the same hand-edit path.
   workspaceStore.onPersist = () => {
+    workspaceWatcher.sync()
     contextLink.refresh()
     refreshNodeTokens()
   }
@@ -593,6 +638,39 @@ export async function startServer(
   await workspaceStore.load({ sideline: false }).catch((e) => {
     console.warn('[nodeterm-server] context-link initial workspace load failed', e)
   })
+
+  if (config.canvasControl === true) {
+    try {
+      canvasControl = await initServerCanvasControl({
+        workspaceStore,
+        ptyManager,
+        settings: () => settingsStore.get(),
+        boardLog,
+        installAgentIntegrations: config.installHooks !== false
+      })
+      hookServer.setControlHandler(canvasControl.handler)
+    } catch (error) {
+      console.warn(
+        '[nodeterm-server] Server Edition canvas control failed to initialize; keeping it disabled',
+        error
+      )
+    }
+    if (canvasControl) {
+      // Loud on purpose, and in the same register as the proxy-trust line above: this is the
+      // operator's one chance to notice that a flag reading as "canvas control" also hands agent
+      // sessions the ability to run commands as this user. An operator who took "opt-in canvas
+      // control" and "creator ownership" at face value could reasonably size the blast radius as
+      // the canvas; it is the host. Printed only when the runtime actually came up, so a failed
+      // init never announces a capability that is in fact disabled.
+      console.log(
+        `⚠️  Server canvas control ENABLED: agent sessions with verified node identity can run ` +
+          `arbitrary commands on this host as ${serverUserLabel()} (open-terminal --cmd), with ` +
+          `this user's environment, files and credentials. Creator ownership and the per-project ` +
+          `capability gates decide which agent may ask, not what may be asked for. Unset ` +
+          `NODETERM_SERVER_CANVAS_CONTROL / drop --canvas-control to turn it off.`
+      )
+    }
+  }
 
   // Session budget (docs/SERVER.md): reap long-idle DETACHED nt- tmux sessions under memory
   // pressure (10%-of-RAM watermark) or past a count cap, on BOTH the local socket and the
@@ -696,6 +774,8 @@ export async function startServer(
         sessionReaper.stop()
         pressure.stop()
         ptyPressure.stop()
+        canvasControl?.stop()
+        workspaceWatcher.dispose()
         await contextLink.stop()
         await ptyManager.killAll()
         // Same native hazard as the desktop app: a whisper transcribe still running when the
@@ -751,6 +831,8 @@ export async function startServer(
       sessionReaper.stop()
       pressure.stop()
       ptyPressure.stop()
+      canvasControl?.stop()
+      workspaceWatcher.dispose()
       await contextLink.stop()
       await ptyManager.killAll()
       // Same native hazard as the desktop app: a whisper transcribe still running when the node

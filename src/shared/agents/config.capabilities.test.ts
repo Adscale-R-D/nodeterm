@@ -4,6 +4,9 @@ import {
   BUILTIN_AGENT_IDS,
   canBranch,
   canChat,
+  mintsSessionId,
+  supportsSessionIdFlag,
+  readsClaudeShapedTranscript,
   canContextLink,
   canControlCanvas,
   canReadTitle,
@@ -40,7 +43,10 @@ describe('MODEL_SWITCH_CAPABLE', () => {
     expect(canSwitchModel('claude')).toBe(true)
     expect(canSwitchModel('codex')).toBe(true)
     expect(canSwitchModel('copilot')).toBe(true)
-    for (const id of ['gemini', 'opencode', 'grok', 'custom:plain'] as const) {
+    // grok joined once its leaf existed: `-m/--model` in the launch grammar plus `grok models` for
+    // discovery. It is NOT in this list as an example of a non-capable agent any more.
+    expect(canSwitchModel('grok')).toBe(true)
+    for (const id of ['gemini', 'opencode', 'custom:plain'] as const) {
       expect(canSwitchModel(id), id).toBe(false)
     }
   })
@@ -54,7 +60,8 @@ describe('copilot capabilities', () => {
       color: '#8957e5',
       launchCmd: 'copilot',
       promptInjectionMode: 'flag-interactive',
-      expectedProcess: 'copilot'
+      expectedProcess: 'copilot',
+      vanillaEnvPattern: '^COPILOT_PROVIDER_'
     })
     expect(hasHooks('copilot')).toBe(true)
     expect(canResume('copilot')).toBe(true)
@@ -176,11 +183,92 @@ describe('grok capabilities', () => {
     expect(canControlCanvas('grok')).toBe(true)
   })
 
+  it('reads a linked node, on the same already-installed skill the canvas verb uses', () => {
+    // The leaf that had to exist first: `locateGrok` (core/handoff/locate.ts), resolving the
+    // session directory a hook reported and returning `chat_history.jsonl` — NOT the
+    // `updates.jsonl` grok's payloads advertise. That sibling is the ACP event stream: it does carry
+    // conversation, but as CHUNKS interleaved with tool-call and hook events, so our line parser
+    // finds no `type` on any line and the linked agent gets an empty transcript with no error. Discovery needs no installer of its own,
+    // and that is now MEASURED rather than assumed: on 1.0.13, `grok inspect --json` lists
+    // `get-linked-context` as `vendor: 'claude', compatibilityStatus: 'enabled'`.
+    expect(canContextLink('grok')).toBe(true)
+  })
+
+  it('hands its conversation to another agent, and shows it in the chat panel', () => {
+    // Both ride the reader task06 wrote. Transfer adds `renderGrokTranscript` beside the other
+    // three renderers; the panel adds `chatMessagesFromGrok`. Neither re-derives grok's line
+    // vocabulary — they build on the same `grokParse`, so the two views cannot drift apart.
+    expect(canTransferFrom('grok')).toBe(true)
+    expect(canChat('grok')).toBe(true)
+  })
+
+  it('is CHAT_CAPABLE and yet NOT readable by claude\'s resolver — the pair is the invariant', () => {
+    // These two must never collapse back into one list. `canChat` means "we can render this
+    // conversation ourselves"; `readsClaudeShapedTranscript` means "claude's resolver can locate and
+    // parse this file". Grok is the first agent for which they differ, and the cost of merging them
+    // is not cosmetic: `resolveTranscript` falls back to the newest CLAUDE transcript for the node's
+    // cwd whenever its sessionId leg misses, which a grok id always does. A merged list would show a
+    // grok node someone else's conversation in the find bar and meter it from that session.
+    //
+    // If a future change "simplifies" CLAUDE_TRANSCRIPT_READABLE away, this line fails first.
+    expect(canChat('grok')).toBe(true)
+    expect(readsClaudeShapedTranscript('grok')).toBe(false)
+    // claude is the one agent where both hold — which is exactly why the shared list looked correct
+    // for as long as it was claude-only.
+    expect(canChat('claude')).toBe(true)
+    expect(readsClaudeShapedTranscript('claude')).toBe(true)
+  })
+
+  it('fills a context meter from the numbers it states itself', () => {
+    // grok states the numerator, the denominator AND the percentage (signals.json). The window is
+    // read, never inferred from the model id — which puts grok with codex, not with gemini.
+    expect(hasUsage('grok')).toBe(true)
+  })
+
+  it('joins USAGE_CAPABLE without joining the claude-transcript readers', () => {
+    // The regression this project already survived once: `hasUsage` gated THREE features, and
+    // joining it for the meter also switched on `context.ensure` and the find bar's index, both of
+    // which resolve through claude's `resolveTranscript` — whose cwd fallback then hands the node
+    // the newest CLAUDE transcript for that directory. A codex node metered and searched a
+    // stranger's session, and the preconditions were default-true, so it would have shipped.
+    //
+    // These two must therefore DISAGREE for grok, exactly as they do for codex and gemini.
+    expect(hasUsage('grok')).toBe(true)
+    expect(readsClaudeShapedTranscript('grok')).toBe(false)
+  })
+
+  it('mints its own session id, gated on ITS OWN probe and never on claude\'s', () => {
+    expect(mintsSessionId('grok')).toBe(true)
+    // The third argument is grok's probe. Claude's answer must not move grok's gate in EITHER
+    // direction — that is rule 9: a gate fed by a version probe belongs to the agent it probes, and
+    // the two CLIs are installed and upgraded independently.
+    expect(supportsSessionIdFlag('grok', false, true)).toBe(true)
+    expect(supportsSessionIdFlag('grok', true, false)).toBe(false)
+    // Unprobed reads as no: a bare command, never a blocked launch. There is no shorter call to
+    // write — the third argument is required precisely so nobody can omit grok's probe by accident.
+    expect(supportsSessionIdFlag('grok', true, false)).toBe(false)
+    // And grok's probe must not move CLAUDE's gate either.
+    expect(supportsSessionIdFlag('claude', true, false)).toBe(true)
+    expect(supportsSessionIdFlag('claude', false, true)).toBe(false)
+  })
+
+  it('picks a model through the base-harness mapping, from grok\'s own catalogue', () => {
+    // The whole capability is the leaf: membership plus `grok models` for discovery and `--model`
+    // in the launch grammar. No frontend spells a grok model id, and none spells `grok` here either
+    // — `modelsForAgent` decides who is offered which catalogue.
+    expect(canSwitchModel('grok')).toBe(true)
+  })
+
+  it('shows one card per subagent INSTANCE, not one per type', () => {
+    // Keyed by `subagentId`, measured by running two `explore` children in parallel: same type,
+    // different ids. The premise this task started from — that grok only exposes a TYPE, so two
+    // children of one type would have to share an aggregated card — was wrong, and running the two
+    // is the only thing that could have told us.
+    expect(canSubagent('grok')).toBe(true)
+  })
+
   it('does not yet claim the capabilities whose per-agent leaf is unwritten', () => {
-    expect(canContextLink('grok')).toBe(false)
-    expect(hasUsage('grok')).toBe(false)
     expect(canBranch('grok')).toBe(false)
-    expect(canSubagent('grok')).toBe(false)
   })
 })
 

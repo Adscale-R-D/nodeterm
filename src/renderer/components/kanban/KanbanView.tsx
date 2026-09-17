@@ -1,5 +1,6 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { KanbanLabel, ProjectKanban } from '@shared/types'
+import type { NodeIcon } from '@shared/node-icon'
 import { AGENT_CONFIG, BUILTIN_AGENT_IDS, type AgentId } from '@shared/agents/config'
 import { useViewMode } from '../../state/viewMode'
 import { useProjects } from '../../state/projects'
@@ -9,6 +10,7 @@ import {
   deleteColumn, labelsForCard, moveColumn,
   nextColumnColor, pruneAssignments, recolorColumn, renameColumn, unassigned
 } from '../../lib/kanban'
+import { markCanvasCovered } from '../../lib/canvasCovered'
 import { labelSwatch } from '../../lib/kanbanLabelColors'
 import { CardModal } from './CardModal'
 import { KanbanColumn, type KanbanLane } from './KanbanColumn'
@@ -50,6 +52,11 @@ export interface KanbanSession {
   /** Browser node session partition (kind 'browser' only) — threaded to the modal webview so it
    *  shares the canvas node's jar (`browser-partition-parity.test.tsx`). Absent = default session. */
   partition?: string
+  /** The node's user-chosen icon (see @shared/node-icon). The board is the canvas's other view of
+   *  the same session, so a session the user marked with an icon carries it here too. Terminal
+   *  cards only in v1 — that is the only kind whose canvas node offers the action, and a card
+   *  showing an icon its node cannot set would be a dead end on the board. */
+  icon?: NodeIcon
   /** The subset of the node's `data` the card modal's co-attach terminal needs to spawn/join the
    *  same session (kind 'terminal' only; sticky passes `{}`). */
   spawn: ModalSpawn
@@ -89,6 +96,8 @@ export interface KanbanViewProps {
   onModalNodeChange: (nodeId: string | null) => void
   /** Persist a browser card's navigation (url/title) from the modal webview to the node. */
   onBrowserNav: (nodeId: string, patch: { url?: string; title?: string }) => void
+  /** Set (or clear, with `undefined`) a node's icon — the card modal's icon button. */
+  onSetIcon: (nodeId: string, icon: NodeIcon | undefined) => void
 }
 
 type Drag =
@@ -115,10 +124,20 @@ const NO_CARDS: KanbanSession[] = []
  *  memo: Canvas re-renders on plenty the board doesn't care about (agent signatures, camera
  *  banners…); with every prop stable (Canvas useCallbacks + memoized board/sessions) those
  *  renders stop at this boundary. */
+/**
+ * While this board is on screen the canvas underneath is fully covered but still mounted, so its
+ * node glows and status pulses keep the compositor producing frames for something nobody can see.
+ * Mount is the signal (see lib/canvasCovered.ts for the measurements).
+ */
+function useCanvasCovered(): void {
+  useEffect(() => markCanvasCovered(document.documentElement), [])
+}
+
 export const KanbanView = memo(function KanbanView({
   board, sessions, onChange, onOpenNode, onCreateNode, onRenameNode, onEditSticky, onDeleteNode,
-  onModalNodeChange, onBrowserNav
+  onModalNodeChange, onBrowserNav, onSetIcon
 }: KanbanViewProps) {
+  useCanvasCovered()
   const { api } = useSession()
   const dragRef = useRef<Drag>(null)
   // One card modal at a time; a deleted node closes it via the byId.has render guard.
@@ -663,6 +682,7 @@ export const KanbanView = memo(function KanbanView({
           onRename={(t) => onRenameNode(modalNodeId, t)}
           onEditSticky={(t) => onEditSticky(modalNodeId, t)}
           onBrowserNav={(patch) => onBrowserNav(modalNodeId, patch)}
+          onSetIcon={(icon) => onSetIcon(modalNodeId, icon)}
         />
       )}
       {modalIssue && (

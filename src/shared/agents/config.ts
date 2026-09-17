@@ -32,6 +32,23 @@ export interface AgentConfig {
    */
   argvPromptSeparator?: string
   expectedProcess: string
+  /**
+   * Env var NAME pattern (regex source) to unset so the agent runs against its OWN default
+   * provider instead of a gateway/inherited override. Matched against the var name only, never
+   * the value. Stripped at spawn only when the node opts into "clear env" (a one-shot
+   * context-menu action) or the global `vanillaLaunchDefault` setting is on. Defined per builtin
+   * so the spawn site and the Settings toggle share one source of truth (a duplicated rule
+   * drifts). Resolved through the base harness via `vanillaEnvStripPattern`, so a custom agent
+   * inheriting a builtin (once custom-agent baseAgent lands) gets the same strip set.
+   *
+   * SECURITY: builtin patterns are static/trusted literals, but the value is a regex source applied
+   * to env var names. `vanillaEnvStripPattern` compiles it once behind a try/catch and caches; a
+   * malformed literal throws at compile (caught) and yields null (no strip). It is only ever
+   * `regex.test(envVarName)` in core — never `eval`'d or interpolated into a command. This mirrors
+   * the "re-validate at the interpolation site" rule (`isPermissionMode`, `SAFE_SESSION_ID`): the
+   * type is compile-time, the runtime match is guarded.
+   */
+  vanillaEnvPattern?: string
 }
 
 export const BUILTIN_AGENT_IDS: readonly BuiltinAgentId[] = [
@@ -49,14 +66,24 @@ export const AGENT_CONFIG: Record<BuiltinAgentId, AgentConfig> = {
     color: '#d97757',
     launchCmd: 'claude',
     promptInjectionMode: 'argv',
-    expectedProcess: 'claude'
+    expectedProcess: 'claude',
+    // `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_API_KEY` (gateway + inherited) + the
+    // OAuth token. Deliberately EXCLUDES `CLAUDE_CONFIG_DIR` — that is the managed-account dir, not
+    // a provider credential; stripping it would break account isolation and is unrelated to "run on
+    // subscription". A broad `CLAUDE_*` is unsafe (`CLAUDE_CONFIG_DIR`, and nodeterm's own
+    // `CLAUDE_HOOK_EVENTS` etc. are code constants, not env the pane sets).
+    vanillaEnvPattern: '^(ANTHROPIC_|CLAUDE_CODE_OAUTH_TOKEN$)'
   },
   codex: {
     label: 'Codex',
     color: '#10a37f',
     launchCmd: 'codex',
     promptInjectionMode: 'argv',
-    expectedProcess: 'codex'
+    expectedProcess: 'codex',
+    // The gateway vars only. Codex credentials live under `CODEX_HOME` (a config dir, like claude's)
+    // not `CODEX_*` env, so a broad `CODEX_*` strip is unverified and excluded. Narrowing to the two
+    // known gateway vars avoids touching unrelated `OPENAI_*` the user may set.
+    vanillaEnvPattern: '^(OPENAI_BASE_URL|OPENAI_API_KEY)$'
   },
   gemini: {
     label: 'Gemini',
@@ -95,7 +122,10 @@ export const AGENT_CONFIG: Record<BuiltinAgentId, AgentConfig> = {
     // `--prompt` is explicitly non-interactive and exits after one response. The installed
     // 1.0.80 CLI's `--interactive <prompt>` starts the ordinary TUI and submits the prompt there.
     promptInjectionMode: 'flag-interactive',
-    expectedProcess: 'copilot'
+    expectedProcess: 'copilot',
+    // All `COPILOT_PROVIDER_*` gateway vars. Excludes `COPILOT_HOME` (config dir) and
+    // `COPILOT_HOOK_*` (nodeterm constants).
+    vanillaEnvPattern: '^COPILOT_PROVIDER_'
   }
 }
 
@@ -120,17 +150,41 @@ export const RESUMABLE_AGENTS = ['claude', 'codex', 'gemini', 'opencode', 'grok'
 // clear/fork/compact), so hooks remain the only way to TRACK an id after launch. What minting
 // guarantees is that a node always has SOME resumable id, so the worst case degrades from "the
 // conversation is gone" to "continuity since the last /clear is gone".
-export const SESSION_ID_CAPABLE = ['claude', 'copilot'] as const
+export const SESSION_ID_CAPABLE = ['claude', 'copilot', 'grok'] as const
 // Claude's flag is version-gated and comes from the Claude CLI probe. Copilot's installed 1.0.80
 // binary and current official reference accept `--session-id=<uuid>`, so it does not borrow an
 // unrelated Claude probe result. Custom agents resolve through their declared base harness.
+//
+// grok is gated too, but on ITS OWN probe (`core/grok-cli.ts` reads `grok --help`) — never on
+// claude's. The two CLIs are installed and upgraded independently, so claude's answer is not even
+// correlated with grok's, and a gate fed by the wrong agent's probe is a guess wearing a
+// measurement's clothes. Its grammar also differs from claude's in three measured ways (1.0.13):
+// the UUID must not already exist under the target session directory, so minting one twice is a
+// LAUNCH ERROR and never a resume; `--session-id` combines with `--resume`/`--continue` only
+// alongside `--fork-session`; and `--resume` accepts a TITLE as well as an id, failing as ambiguous
+// on duplicates — which is why nothing in this codebase resumes grok by title.
 export const UNCONDITIONAL_SESSION_ID_CAPABLE = ['copilot'] as const
 // claude: Task/Agent tool via hooks (tool_use_id-keyed). codex: spawn_agent collaboration via its
 // native SubagentStart/SubagentStop hooks (agent_id-keyed), measured on codex-cli 0.146.0.
-export const SUBAGENT_CAPABLE = ['claude', 'codex'] as const
+// grok: its own native SubagentStart/SubagentStop, keyed by `subagentId` — measured on 1.0.13 by
+// running two subagents of the SAME type in parallel, which is the only way to tell an instance
+// id from a type. It was assumed to key by `subagentType` (a type, so two children of one type
+// would collide); the payloads say otherwise, and `subagentId` is also the ONLY id the start and
+// the stop share — on the start `sessionId` is the PARENT's.
+export const SUBAGENT_CAPABLE = ['claude', 'codex', 'grok'] as const
 export const RECURRING_CAPABLE = ['claude'] as const // /loop, /schedule, /cron
 export const BRANCH_CAPABLE = ['claude'] as const
-export const CONTEXT_LINK_CAPABLE = ['claude', 'codex', 'gemini', 'opencode'] as const
+// grok joins with NO installer of its own: it scans `~/.claude/skills` for Claude Code
+// compatibility, which is exactly where `get-linked-context` is already written — the same
+// argument `CANVAS_CONTROL_CAPABLE` makes below. That premise used to be marked unverified;
+// MEASURED on 1.0.13 (2026-09-01): `grok inspect --json` lists the skill with
+// `vendor: 'claude', compatibilityStatus: 'enabled'`, and `externalCompat.cells` reports
+// `{surface:'skills', enabled:true, source:'default'}`.
+// Two user settings can switch that off — `[compat.claude] skills = false` in
+// `~/.grok/config.toml`, and `GROK_CLAUDE_SKILLS_ENABLED=false`. Then the skill is undiscoverable
+// however this list reads, and the same `inspect` cell is what says so (`enabled:false`, a
+// non-default `source`) rather than leaving support to guess.
+export const CONTEXT_LINK_CAPABLE = ['claude', 'codex', 'gemini', 'opencode', 'grok'] as const
 // Agents whose per-node context meter we can fill. Each needs BOTH numbers: a used count and a
 // TRUSTWORTHY window.
 //  - claude: used from its transcript's assistant usage, window INFERRED from the model family
@@ -140,13 +194,64 @@ export const CONTEXT_LINK_CAPABLE = ['claude', 'codex', 'gemini', 'opencode'] as
 //  - gemini: states none, so the window comes from its model id through `geminiWindowFor`, which
 //    mirrors the CLI's OWN `tokenLimit(model)` — a family rule with a 1M catch-all default, so a
 //    model we have never heard of still gets the right answer rather than a stale guess.
-// grok is absent: its `updates.jsonl` parser is unbuilt (see docs/grok-agent.md), so there is no
-// used count to divide.
-export const USAGE_CAPABLE = ['claude', 'codex', 'gemini'] as const
+//  - grok: states BOTH numbers and the answer. `contextTokensUsed` and `contextWindowTokens` sit in
+//    `~/.grok/sessions/<cwd>/<id>/signals.json`, alongside `contextWindowUsage` — the percentage
+//    grok has already computed. MEASURED on 22 real sessions (1.0.13, 2026-09-02): all three present
+//    in all 22, and the stated percentage agrees with used/window in all 22. So the window is read,
+//    never inferred from the model id, which puts grok with codex rather than with gemini.
+//
+// Until 2026-09 this comment explained grok's absence by pointing at a missing parser for the wrong
+// file, and concluding there was no used count to divide. Both halves were false, and the first is
+// the one worth remembering: the counters never lived in the file it named, so the blocker it
+// declared was not the real blocker even on the day it was written. A comment that explains an
+// absence with a false cause is worse than no comment — it sends the next reader to build a parser
+// nobody needed. What let it survive is that nobody could check it: the integration was written with
+// no grok binary on the machine.
+//
+// signals.json is a METRICS file (66 keys: latencies, GCS queue counters, lines touched, peak RSS).
+// `core/grok-signals.ts` reads exactly three of them and nothing else. If a future grok drops
+// `contextWindowTokens`, that reader returns null and the meter disappears — no inferred
+// denominator, because a percentage over a guessed window is a wrong number presented as a fact.
+export const USAGE_CAPABLE = ['claude', 'codex', 'gemini', 'grok'] as const
 // Agents whose structured transcript we can render as a chat panel (Cmd+M chat mode).
-export const CHAT_CAPABLE = ['claude'] as const
+//
+// SPLIT from CLAUDE_TRANSCRIPT_READABLE below on 2026-09-02, when grok joined. Until then this one
+// list carried TWO facts that happened to coincide while claude was its only member: "we can render
+// this agent's conversation ourselves" and "CLAUDE's transcript resolver can locate and parse this
+// agent's file". Grok satisfies the first (`linesFromGrok`, core/context-link-render.ts) and NOT the
+// second, and merging them is not a cosmetic error: `resolveTranscript` (core/transcript-ipc.ts:58)
+// falls back to `transcriptPathForCwd` when the sessionId leg misses — which it ALWAYS does for a
+// non-claude id, since no `<that id>.jsonl` exists under `~/.claude/projects` — and hands back the
+// newest CLAUDE transcript for that cwd. A grok node in this list would therefore show a stranger's
+// conversation in its find bar and rehydrate its meter from it. That exact bug already happened once
+// with codex and gemini; transcriptGates.ts documents it.
+export const CHAT_CAPABLE = ['claude', 'grok'] as const
+// Agents whose transcript CLAUDE's own resolver can locate and parse — the gate for everything that
+// goes through `resolveTranscript` (the find bar's index, the meter's mount-time rehydration).
+//
+// This is deliberately NOT a superset of CHAT_CAPABLE and must not be "simplified" back into it: the
+// question here is not "can we read this agent" but "does this agent's conversation live in a file
+// shaped like claude's, under claude's tree". Only claude answers yes, and the failure mode of a
+// wrong answer is a read of SOMEONE ELSE'S session (see the comment above), which fails OPEN — it
+// shows data rather than hiding it. `config.capabilities.test.ts` pins that grok is absent.
+export const CLAUDE_TRANSCRIPT_READABLE = ['claude'] as const
 // Agents whose native transcript we can read + render for cross-agent transfer.
-export const TRANSFER_SOURCE_CAPABLE = ['claude', 'codex', 'gemini'] as const
+export const TRANSFER_SOURCE_CAPABLE = ['claude', 'codex', 'gemini', 'grok'] as const
+// Agents whose hooks announce that a session ENDED — i.e. whose orderly `/exit` we will hear about.
+//
+// Derived by reading `normalize.ts`, not by intent: exactly four normalizers map an event to
+// `sessionPhase: 'end'` (claude `SessionEnd`, gemini `SessionEnd`, copilot `SessionEnd`, grok
+// `sessionend`). `normalizeCodex` and `normalizeOpencode` map none, which is why they are absent
+// here — and their absence is load-bearing, not an oversight to tidy up later.
+//
+// What it gates today is the DROPPED chip (`terminal/agent-liveness.ts`): "the pane went back to a
+// shell but nobody told us the session ended" is only evidence of a CRASH for an agent that WOULD
+// have told us. On codex and opencode a deliberate `/quit` and an OOM kill leave byte-identical
+// evidence, so a chip there could only be a coin flip shown as a fact.
+//
+// Before adding an id: find its normalizer's `sessionPhase: 'end'` branch. If there isn't one, the
+// branch is the change — this list is a consequence of it, never a substitute for it.
+export const SESSION_END_CAPABLE = ['claude', 'gemini', 'copilot', 'grok'] as const
 // Agents that accept a node title being PUSHED back into the session — the write leg only. The
 // write is the same literal `/rename <name>` for both, which grok also accepts as `/title`.
 // The READ leg is TITLE_READ_CAPABLE below, which is a superset: an agent can name its own session
@@ -218,7 +323,7 @@ export const PERMISSION_MODE_CAPABLE = ['claude', 'grok', 'gemini', 'codex'] as 
 // Agents whose harness accepts a per-launch model override and whose gateway protocol we know how
 // to configure. Custom agents inherit this through `capabilityAgentId`, like every other harness
 // capability — the renderer never maintains its own Claude/Codex/Copilot allowlist.
-export const MODEL_SWITCH_CAPABLE = ['claude', 'codex', 'copilot'] as const
+export const MODEL_SWITCH_CAPABLE = ['claude', 'codex', 'copilot', 'grok'] as const
 // Agents whose own CLI already tells the user when it copies, so nodeterm must not say it again.
 // Claude Code captures the mouse itself and prints its own line — "copied N chars to tmux buffer ·
 // paste with prefix + ]" — which makes our copy pill a second message for one gesture. Membership
@@ -275,6 +380,31 @@ export function capabilityAgentId(id: AgentId): AgentId {
   return baseAgentOf(id) ?? id
 }
 
+/**
+ * The compiled env-var-NAME strip pattern for an agent, resolved through its base harness (so a
+ * custom agent inheriting a builtin gets the builtin's strip set once custom-agent baseAgent lands).
+ * `null` ⇒ the agent has no strip set (gemini/grok/opencode, or any unknown id) ⇒ the vanilla
+ * relaunch action is hidden and the strip is a no-op. Compiled once and cached; a malformed
+ * `vanillaEnvPattern` literal throws at compile, is caught, and yields `null` (no strip) — see the
+ * security note on `AgentConfig.vanillaEnvPattern`. The cache key is the regex SOURCE string, so two
+ * agents sharing a pattern share one compiled `RegExp`.
+ */
+const VANILLA_PATTERN_CACHE = new Map<string, RegExp | null>()
+export function vanillaEnvStripPattern(id: AgentId): RegExp | null {
+  const source = AGENT_CONFIG[capabilityAgentId(id) as BuiltinAgentId]?.vanillaEnvPattern
+  if (!source) return null
+  const cached = VANILLA_PATTERN_CACHE.get(source)
+  if (cached !== undefined) return cached
+  let compiled: RegExp | null
+  try {
+    compiled = new RegExp(source)
+  } catch {
+    compiled = null
+  }
+  VANILLA_PATTERN_CACHE.set(source, compiled)
+  return compiled
+}
+
 const includes = (list: readonly string[], id: AgentId): boolean =>
   list.includes(capabilityAgentId(id))
 
@@ -282,16 +412,39 @@ export const hasHooks = (id: AgentId): boolean => includes(AGENT_HOOK_TARGETS, i
 export const canResume = (id: AgentId): boolean => includes(RESUMABLE_AGENTS, id)
 export const mintsSessionId = (id: AgentId): boolean => includes(SESSION_ID_CAPABLE, id)
 /** Is the caller-chosen session-id flag available for this effective base harness? */
-export const supportsSessionIdFlag = (id: AgentId, claudeFlagSupported: boolean): boolean =>
-  includes(UNCONDITIONAL_SESSION_ID_CAPABLE, id) ||
-  (mintsSessionId(id) && capabilityAgentId(id) === 'claude' && claudeFlagSupported)
+export const supportsSessionIdFlag = (
+  id: AgentId,
+  claudeFlagSupported: boolean,
+  // REQUIRED, not defaulted. A default here would let a caller forget grok's probe and silently get
+  // "grok never mints" — a feature quietly missing, with a green typecheck and no test to notice.
+  // That is the same shape as the optional prop that let the chat panel's agent id be dropped; the
+  // lesson taken from it is that the fix for this family is a type that cannot express the broken
+  // state, not another test somebody has to remember to write.
+  grokFlagSupported: boolean
+): boolean => {
+  if (includes(UNCONDITIONAL_SESSION_ID_CAPABLE, id)) return true
+  if (!mintsSessionId(id)) return false
+  const base = capabilityAgentId(id)
+  // Each probed agent answers with ITS OWN probe. A missing third argument reads as "grok was not
+  // probed", which yields a bare command — the safe direction, and the same one an unprobed claude
+  // gets.
+  if (base === 'grok') return grokFlagSupported
+  return base === 'claude' && claudeFlagSupported
+}
 export const canSubagent = (id: AgentId): boolean => includes(SUBAGENT_CAPABLE, id)
 export const canRecur = (id: AgentId): boolean => includes(RECURRING_CAPABLE, id)
 export const canBranch = (id: AgentId): boolean => includes(BRANCH_CAPABLE, id)
 export const canContextLink = (id: AgentId): boolean => includes(CONTEXT_LINK_CAPABLE, id)
 export const hasUsage = (id: AgentId): boolean => includes(USAGE_CAPABLE, id)
 export const canChat = (id: AgentId): boolean => includes(CHAT_CAPABLE, id)
+/** Can CLAUDE's transcript resolver locate and parse this agent's conversation? Never widen this
+ *  to mean "can we read this agent" — see CLAUDE_TRANSCRIPT_READABLE. */
+export const readsClaudeShapedTranscript = (id: AgentId): boolean =>
+  includes(CLAUDE_TRANSCRIPT_READABLE, id)
 export const canTransferFrom = (id: AgentId): boolean => includes(TRANSFER_SOURCE_CAPABLE, id)
+/** Will this agent's hooks tell us when its session ends? See SESSION_END_CAPABLE — the honest
+ *  answer for codex and opencode is no, and callers must degrade rather than assume a crash. */
+export const reportsSessionEnd = (id: AgentId): boolean => includes(SESSION_END_CAPABLE, id)
 export const canRename = (id: AgentId): boolean => includes(RENAME_CAPABLE, id)
 export const canReadTitle = (id: AgentId): boolean => includes(TITLE_READ_CAPABLE, id)
 export const canControlCanvas = (id: AgentId): boolean => includes(CANVAS_CONTROL_CAPABLE, id)
@@ -602,7 +755,32 @@ export function resolvePermissionMode(
   project: { defaultPermissionMode?: AgentPermissionMode } | undefined,
   settings: { claudePermissionMode: AgentPermissionMode }
 ): AgentPermissionMode {
-  if (isPermissionMode(project?.defaultPermissionMode)) return project.defaultPermissionMode
-  if (isPermissionMode(settings.claudePermissionMode)) return settings.claudePermissionMode
-  return DEFAULT_PERMISSION_MODE
+  return resolvePermissionModeWithSource(project, settings).mode
+}
+
+/**
+ * The same resolution, plus WHO chose the mode — and that second half is a security fact, not a
+ * nicety.
+ *
+ * `project.defaultPermissionMode` is persisted to `.nodeterm/project.json`, which is git-shared:
+ * a `bypassPermissions` override travels to everyone who clones the repo. So anything that
+ * LOOSENS a gate on the strength of the mode (today: the canvas-control confirm waiver,
+ * `decideControlConfirm` in @shared/control-confirm) must be able to tell "the user set this
+ * globally on this machine" from "this arrived in somebody's repo". `'default'` is its own answer
+ * rather than being folded into `'global'`: nobody has chosen anything, and a caller that treats
+ * an unset setting as a deliberate global choice is reading consent into silence.
+ *
+ * `resolvePermissionMode` delegates here so the two can never disagree about which half wins.
+ */
+export function resolvePermissionModeWithSource(
+  project: { defaultPermissionMode?: AgentPermissionMode } | undefined,
+  settings: { claudePermissionMode: AgentPermissionMode }
+): { mode: AgentPermissionMode; source: 'project' | 'global' | 'default' } {
+  if (isPermissionMode(project?.defaultPermissionMode)) {
+    return { mode: project.defaultPermissionMode, source: 'project' }
+  }
+  if (isPermissionMode(settings.claudePermissionMode)) {
+    return { mode: settings.claudePermissionMode, source: 'global' }
+  }
+  return { mode: DEFAULT_PERMISSION_MODE, source: 'default' }
 }

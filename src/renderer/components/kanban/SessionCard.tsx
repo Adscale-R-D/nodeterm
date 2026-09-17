@@ -1,7 +1,9 @@
 import { memo, useState } from 'react'
 import type { KanbanCardMeta, KanbanLabel, KanbanPriority } from '@shared/types'
 import { useAgentStatus } from '../../state/agentStatus'
+import { AccountChip, useAccountChip } from '../AccountChip'
 import { ContextMeter } from '../ContextMeter'
+import { NodeIconView } from '../NodeIcon'
 import { LabelChips } from './LabelChips'
 import type { KanbanSession } from './KanbanView'
 
@@ -39,6 +41,10 @@ export const SessionCard = memo(function SessionCard({
   // (see its loopSig comment) and StatusAwareMiniMap demonstrates: subscribe where the value is
   // read, so the re-render is confined to the one thing that changed.
   const status = useAgentStatus((s) => s.byId[session.id])
+  // The board is the canvas's other view of the same node (CONTRIBUTING), so the card carries the
+  // node header's account chip from the same helper — created-with account, else what the session
+  // was observed running as.
+  const accountChip = useAccountChip(session.spawn.accountId, status?.account)
   // Local drag state only styles THIS card (ghost look) — the drag payload lives in KanbanView.
   const [dragging, setDragging] = useState(false)
   // Which edge a drag is hovering over → shows the drop line (top = before, bottom = after).
@@ -51,22 +57,31 @@ export const SessionCard = memo(function SessionCard({
   // SLEEPING (Eco: the agent CLI was exited to reclaim its RAM) is one more branch here, not a
   // follow-up. Ranked last: a hibernated node is idle by definition, so `working`/`waiting` can
   // only mean the wake already landed and the hooks are ahead of the flag.
+  // DROPPED (the CLI died unannounced — see terminal/agent-liveness.ts) is ranked FIRST: it is the
+  // strongest claim on the card, and it cannot actually collide with the others, since the verdict
+  // is only ever raised on a `done` node that is neither paused nor hibernated. Ordering it here is
+  // about which sentence a reader of this chain meets first, not about resolving a conflict.
   const badge =
-    session.kind !== 'sticky' && status?.state === 'working'
-      ? 'running'
-      : session.kind !== 'sticky' && (status?.state === 'waiting' || status?.state === 'blocked')
-        ? 'needs'
-        : session.kind !== 'sticky' && status?.paused
-          ? 'paused'
-          : session.kind !== 'sticky' && status?.hibernated
-            ? 'sleeping'
-            : null
+    session.kind !== 'sticky' && status?.dropped
+      ? 'dropped'
+      : session.kind !== 'sticky' && status?.state === 'working'
+        ? 'running'
+        : session.kind !== 'sticky' && (status?.state === 'waiting' || status?.state === 'blocked')
+          ? 'needs'
+          : session.kind !== 'sticky' && status?.paused
+            ? 'paused'
+            : session.kind !== 'sticky' && status?.hibernated
+              ? 'sleeping'
+              : null
   const stickyPreview = session.kind === 'sticky' ? (session.text ?? '').trim() : ''
   const assignees = meta?.assignees ?? []
   const due = meta?.dueAt
   const overdue = due !== undefined && due < Date.now()
   const priority = meta?.priority
-  const hasDetail = !!status?.sessionId || !!status?.session || stickyPreview.includes('\n')
+  // The account chip counts as detail in its own right: a card whose only thing to say is "this
+  // one is on the other Claude login" is exactly the card that must say it.
+  const hasDetail =
+    !!status?.sessionId || !!status?.session || !!accountChip || stickyPreview.includes('\n')
   return (
     <div
       className={`kanban-card kanban-card--session${dragging ? ' kanban-card--dragging' : ''}${
@@ -105,9 +120,18 @@ export const SessionCard = memo(function SessionCard({
     >
       <div className="kanban-card__row">
         <span className="kanban-card__nodedot" style={{ background: session.color }} />
+        <NodeIconView icon={session.icon} size={14} className="kanban-card__icon" />
         <span className="kanban-card__title">{session.title}</span>
         {session.kind === 'sticky' && <span className="kanban-card__kind">note</span>}
         {session.kind === 'browser' && <span className="kanban-card__kind">web</span>}
+        {badge === 'dropped' && (
+          <span
+            className="kanban-badge kanban-badge--dropped"
+            title="This session's agent process is gone (it did not exit cleanly) — open the card to resume it"
+          >
+            DROPPED
+          </span>
+        )}
         {badge === 'running' && <span className="kanban-badge kanban-badge--running">RUNNING</span>}
         {badge === 'needs' && <span className="kanban-badge kanban-badge--needs">NEEDS YOU</span>}
         {badge === 'paused' && (
@@ -168,6 +192,7 @@ export const SessionCard = memo(function SessionCard({
           ) : (
             <>
               <ContextMeter sessionId={status?.sessionId ?? null} />
+              <AccountChip chip={accountChip} />
               {status?.session && (
                 <span className="kanban-card__session" title={status.session}>
                   {status.session}

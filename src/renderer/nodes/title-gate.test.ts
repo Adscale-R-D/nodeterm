@@ -37,11 +37,11 @@ describe('session-name title gates', () => {
   })
 
   it('the `/rename` push is gated on the WRITE capability', () => {
-    // Matched on `renameCommand(` rather than the literal `/rename `: the line is no longer
-    // composed here — see the next test for why that matters.
+    // Matched on `pushSessionRename(`: the push is delegated to the shared helper,
+    // which owns both the pane probe and renameCommand composition.
     const pushes = terminalNode
       .split('\n')
-      .filter((l) => l.includes('renameCommand(') && l.includes('sendText'))
+      .filter((l) => l.includes('pushSessionRename('))
     expect(pushes.length).toBe(1)
     expect(pushes[0]).toContain('canRenameNode')
   })
@@ -78,6 +78,27 @@ describe('session-name title gates', () => {
     ] as const) {
       expect(src.includes('canReadTitle'), name).toBe(false)
     }
+  })
+
+  it('every canvas rename push is compared against the name the node already carries', () => {
+    // Issues #582 and #569 §2: an orchestrator re-asserts its node's name on startup and after
+    // every context reset, and the canvas-control `rename` verb pushed `/rename <same title>`
+    // into the pane every single time — 32 identical injections over six hours in the report,
+    // each costing the working session a transcript entry plus a `<system-reminder>` claiming the
+    // USER had renamed it. `pushSessionRename` now REQUIRES the previous name, so the compiler
+    // catches an omitted argument; what it cannot catch is a call site passing something that is
+    // not the node's own title, which is what this asserts.
+    const lines = canvas.split('\n')
+    const calls = lines.map((l, i) => [l, i] as const).filter(([l]) => l.includes('pushSessionRename('))
+    expect(calls.length).toBeGreaterThan(0)
+    for (const [line, i] of calls) {
+      expect(line.includes('prevTitle'), `${i + 1}: ${line.trim()}`).toBe(true)
+    }
+    // …and `prevTitle` is read off the NODE (before the rename lands), never restated from the
+    // incoming title — comparing the new name against itself would answer "unchanged" always.
+    const assigned = lines.filter((l) => l.includes('const prevTitle ='))
+    expect(assigned.length).toBe(calls.length)
+    for (const line of assigned) expect(line, line.trim()).toContain('data.title')
   })
 
   it('every canvas rename push sits behind a canRename guard', () => {

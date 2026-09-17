@@ -70,74 +70,31 @@ export function routeControlSource(
 }
 
 /**
- * Verbs that are answered from the SERIALIZED store instead of the live canvas.
- *
- * `list` reads names only, and it is the verb an agent calls most — answering it out of the store
- * keeps a background agent's polling from yanking the user's view to another project tab on every
- * call.
- *
- * `send`/`reply` are here for a stronger reason than politeness, and it is worth being precise
- * about WHICH travel this prevents: routing here is by SOURCE
- * (`routeControlSource(projects, activeId, sourceNodeId)`), so what the declaration stops is a trip
- * to the SENDER's project — which an off-canvas orchestrator would otherwise trigger on every
- * message it sent, hijacking the human's view on a background agent's say-so and clearing that
- * node's unread badge via `setActive` on the way (G5). A delivery goes to a tmux PANE, not to a
- * canvas, so it needs no live canvas at either end.
- *
- * The other half — never travelling to the TARGET's project — is not this function's doing. It
- * comes from `resolveDeliveryScope` (`src/core/agents/agent-message-scope.ts`) taking the
- * serialized store and having no live-node parameter at all, so there is nothing to travel toward.
- *
- * LIVE AS OF PR 5: Canvas.tsx's dispatch handles `send`/`reply` BEFORE its source-routing
- * machinery, so neither `routeControlSource` nor any travel runs for them — the declaration here
- * and that early-exit are the same decision stated once each, and `controlRouting.test.ts` pins
- * this half.
+ * The off-screen verb table lives in `@shared/control-off-screen` because CORE renders the
+ * agent-facing help from it and core cannot import the renderer. Re-exported here so every
+ * renderer caller keeps one import for "how does canvas control route".
  */
-/*
- * `sticky` is store-answered for the send/reply reason, not the list reason: its headline use is
- * a SCHEDULED agent rewriting one note every few minutes, and routing is by SOURCE — so a live
- * requirement would yank the human's view to the sync agent's project on every run (G5), which is
- * exactly the behaviour that gets the sync loop turned off. The write lands in the owning
- * project's serialized nodes (`applyNodeMutation`, the same path peer mutations take) when that
- * project is not the active one; the live canvas handles it when it is.
- */
-/*
- * `open-project` (issue #338) is store-answered for the G5 reason in its sharpest form: its
- * headline caller is a background orchestrator registering one repo after another, and routing is
- * by SOURCE — a live requirement would yank the human's view to the CALLER's project on every
- * registration (and clear its unread badge via `setActive` on the way). The verb acts on the
- * projects STORE through the non-activating `registerProject`, and its consent dialog is
- * app-global (`ConfirmState` overlays the window), so no live canvas is needed at either end.
- * Canvas.tsx handles it BEFORE the source-routing machinery — this declaration and that
- * early-exit are the same decision stated once each (spec §2.3, P6), pinned by
- * `controlRouting.test.ts`.
- */
-const STORE_ANSWERED_VERBS: ReadonlySet<string> = new Set([
-  'list',
-  'send',
-  'reply',
-  'sticky',
-  'open-project'
-])
-
-/**
- * Does this verb have to run against the LIVE canvas? Everything that creates, moves, writes to or
- * closes a node does.
- */
-export function needsLiveCanvas(verb: string): boolean {
-  return !STORE_ANSWERED_VERBS.has(verb)
-}
+export {
+  needsLiveCanvas,
+  canColdOpen,
+  answersOffCanvas,
+  answersFromStoredNodes,
+  offScreenDisposition,
+  offScreenRefusal,
+  offScreenGuidanceLines,
+  controlVerbSetsForTests,
+  type OffScreenDisposition
+} from '@shared/control-off-screen'
 
 /**
  * The capability half of the guard: may a session in this node drive the canvas?
  *
- * The empty/absent default MIRRORS pty-manager's spawn-time default (`options.agentId ?? 'claude'`):
- * a plain terminal node received the claude hook env at spawn, so a manual `claude` there holds
- * NODETERM_CANVAS_CONTROL — rejecting it here would contradict the env it was handed.
+ * Plain terminals are not agent nodes. Treating missing identity as Claude made a bare shell look
+ * control-capable and let recovery code relabel it as an agent. A hand-launched CLI is still
+ * observable through its runtime hooks, but the serialized node does not gain agent authority.
  */
 export function sourceIsControlCapable(agentId: unknown): boolean {
-  const id = typeof agentId === 'string' && agentId ? agentId : 'claude'
-  return canControlCanvas(id as AgentId)
+  return typeof agentId === 'string' && agentId.length > 0 && canControlCanvas(agentId as AgentId)
 }
 
 /**

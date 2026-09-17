@@ -3,8 +3,11 @@ import type { Socket } from 'net'
 import type { IPty } from 'node-pty'
 import {
   HostSession,
+  KILL_LINE,
   SESSION_EMULATOR_OUTPUT_HIGH_WATER_BYTES,
-  SESSION_EMULATOR_OUTPUT_LOW_WATER_BYTES
+  SESSION_EMULATOR_OUTPUT_LOW_WATER_BYTES,
+  WINDOWS_KILL_LINE,
+  shellKillLineSequence
 } from './session'
 import type { TerminalEmulator } from './terminal-emulator'
 import type { SessionHostSpawnOptions } from './protocol'
@@ -540,5 +543,167 @@ describe('HostSession emulator output watermarks', () => {
     expect(proc.resume).toHaveBeenCalledTimes(1)
     await expect(session.recordOutput('good')).resolves.toBeUndefined()
     await expect(session.serialize()).resolves.toBe('good')
+  })
+})
+
+describe('HostSession launch echo verification', () => {
+  // The launch line this leg actually carries: long enough that head and tail windows
+  // (ECHO_EDGE_CHARS = 24 each) do not overlap.
+  const COMMAND = 'claude --permission-mode auto --session-id 0f9a1c3e-5b7d-4e21-9a86-1d2c3b4a5e6f'
+
+  function deliveryProc(): { value: IPty; written: string[]; emit: (chunk: string) => void } {
+    let sink: ((d: string) => void) | undefined
+    const written: string[] = []
+    return {
+      value: {
+        pid: 42,
+        pause: vi.fn(),
+        resume: vi.fn(),
+        resize: vi.fn(),
+        write: (d: string) => {
+          written.push(d)
+        },
+        onData: (cb: (d: string) => void) => {
+          sink = cb
+          return { dispose: vi.fn() }
+        },
+        onExit: () => ({ dispose: vi.fn() })
+      } as unknown as IPty,
+      written,
+      emit: (chunk: string) => sink?.(chunk)
+    }
+  }
+
+  function deliver(session: HostSession, command: string): Promise<void> {
+    return (
+      session as unknown as { deliverVerifiedCommand(c: string): Promise<void> }
+    ).deliverVerifiedCommand(command)
+  }
+
+  it('submits when the head scrolled out of the bounded window before the tail arrived', async () => {
+    const proc = deliveryProc()
+    const session = new HostSession('echo-window', SPAWN, 100, {
+      proc: proc.value,
+      term: inertTerm()
+    })
+    const delivered = deliver(session, COMMAND)
+
+    // The shell echoes the head, then a full-line ZLE redraw pushes more than the window
+    // (max(command.length + 256, 512)) of visible characters through before the tail lands.
+    // Without a sticky head the two substrings never coexist in `echoed`, all three attempts
+    // fail, and this leg REFUSES the launch — the node never starts.
+    proc.emit(COMMAND.slice(0, 32))
+    proc.emit('x'.repeat(700))
+    proc.emit(COMMAND.slice(-32))
+
+    await expect(delivered).resolves.toBeUndefined()
+    expect(proc.written.at(-1)).toBe('\r')
+  })
+
+  it('still requires the head: a tail-only echo does not submit', async () => {
+    const proc = deliveryProc()
+    const session = new HostSession('echo-tail-only', SPAWN, 100, {
+      proc: proc.value,
+      term: inertTerm()
+    })
+    // Left pending on purpose: this asserts the NON-event, and the retry timer is unref'd.
+    void deliver(session, COMMAND).catch(() => {})
+
+    proc.emit('x'.repeat(700))
+    proc.emit(COMMAND.slice(-32))
+
+    // submit() is synchronous inside the data handler, so its absence is observable now.
+    expect(proc.written).not.toContain('\r')
+  })
+
+  it('clears line with \\x1b on Windows PowerShell during retry and refusal', async () => {
+    vi.useFakeTimers()
+    try {
+      const proc = deliveryProc()
+      const winSpawn: SessionHostSpawnOptions = {
+        ...SPAWN,
+        shell: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+        launchDialect: 'windows-powershell'
+      }
+      const session = new HostSession('echo-win-retry', winSpawn, 100, {
+        proc: proc.value,
+        term: inertTerm()
+      })
+      const delivered = deliver(session, COMMAND)
+      const failure = expect(delivered).rejects.toThrow(
+        'session-host could not verify launch command delivery'
+      )
+      await vi.advanceTimersByTimeAsync(2_000 * 3)
+      await failure
+      expect(proc.written).toEqual([
+        COMMAND,
+        WINDOWS_KILL_LINE,
+        COMMAND,
+        WINDOWS_KILL_LINE,
+        COMMAND,
+        WINDOWS_KILL_LINE
+      ])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('clears line with \\x15 on POSIX shells during retry and refusal', async () => {
+    vi.useFakeTimers()
+    try {
+      const proc = deliveryProc()
+      const posixSpawn: SessionHostSpawnOptions = {
+        ...SPAWN,
+        shell: '/bin/zsh',
+        launchDialect: 'posix'
+      }
+      const session = new HostSession('echo-posix-retry', posixSpawn, 100, {
+        proc: proc.value,
+        term: inertTerm()
+      })
+      const delivered = deliver(session, COMMAND)
+      const failure = expect(delivered).rejects.toThrow(
+        'session-host could not verify launch command delivery'
+      )
+      await vi.advanceTimersByTimeAsync(2_000 * 3)
+      await failure
+      expect(proc.written).toEqual([
+        COMMAND,
+        KILL_LINE,
+        COMMAND,
+        KILL_LINE,
+        COMMAND,
+        KILL_LINE
+      ])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+describe('shellKillLineSequence', () => {
+  it('returns \\x1b for Windows PowerShell, pwsh, and cmd dialects', () => {
+    expect(shellKillLineSequence('windows-powershell')).toBe(WINDOWS_KILL_LINE)
+    expect(shellKillLineSequence('pwsh')).toBe(WINDOWS_KILL_LINE)
+    expect(shellKillLineSequence('cmd')).toBe(WINDOWS_KILL_LINE)
+  })
+
+  it('returns \\x15 for posix dialect', () => {
+    expect(shellKillLineSequence('posix')).toBe(KILL_LINE)
+  })
+
+  it('infers sequence from shell executable name when dialect is omitted', () => {
+    expect(shellKillLineSequence(undefined, 'powershell.exe')).toBe(WINDOWS_KILL_LINE)
+    expect(shellKillLineSequence(undefined, 'powershell')).toBe(WINDOWS_KILL_LINE)
+    expect(shellKillLineSequence(undefined, 'pwsh.exe')).toBe(WINDOWS_KILL_LINE)
+    expect(shellKillLineSequence(undefined, 'cmd.exe')).toBe(WINDOWS_KILL_LINE)
+    expect(shellKillLineSequence(undefined, 'bash.exe')).toBe(KILL_LINE)
+    expect(shellKillLineSequence(undefined, 'zsh')).toBe(KILL_LINE)
+  })
+
+  it('falls back based on host platform when dialect and shell executable are unknown', () => {
+    expect(shellKillLineSequence(undefined, undefined, 'win32')).toBe(WINDOWS_KILL_LINE)
+    expect(shellKillLineSequence(undefined, undefined, 'darwin')).toBe(KILL_LINE)
+    expect(shellKillLineSequence(undefined, undefined, 'linux')).toBe(KILL_LINE)
   })
 })

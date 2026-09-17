@@ -143,6 +143,17 @@ lane unaffected.
   `.nodeterm/project.json`, which is git-shared, or a cloned repo could switch someone's confirms
   off.
 
+- **An agent may only reach settings through an ALLOWLIST, and every change asks.** The
+  canvas-control `settings` verb (`src/shared/settings-verb.ts`) reads and asks to change a short
+  table of keys; anything off the table is refused by name, and a forbidden set (permission modes,
+  accounts/credentials, node identity, browser control, telemetry, keybindings, confirm waivers)
+  outranks the table — its test walks the table against the set AND a name pattern, so an entry that
+  would let an agent grant itself a power goes red even when added on purpose. `settings` is outside
+  `CONFIRM_WAIVABLE_VERBS`: a CLI that could waive its own confirm would make the confirm decorative.
+  A capability change must land through the UI's own setter (`setProjectCapability`: file flag AND
+  this machine's `'kept'` answer), never a hand-rolled flag write. Adding a key is one line in the
+  table plus a `why`. The Server Edition has no dialog, so it refuses every `--set` by name.
+
 - **A permission mode (or anything else) that rides `project.json` is GIT-SHARED — never key a
   local gate on it alone.** `project.defaultPermissionMode` travels to everyone who clones the
   repo, so binding a confirmation-skip to "the mode is bypassPermissions" would let a cloned
@@ -151,6 +162,10 @@ lane unaffected.
   act only on the user's own machine-local choice — and keep `default` distinct from `global`,
   because reading an unset setting as a deliberate choice is reading consent into silence. Anything
   machine-local goes in `settings.json`; nothing that grants a capability goes in `project.json`.
+  A machine-local DEFAULT for a project capability (`agentMessagingDefault`) is allowed only because
+  it answers ABSENCE: an explicit `true` in `project.json` still needs this machine's recorded
+  answer, an explicit `false` still wins, and "off" must therefore be written as a literal `false`.
+  Read grants through `projectCapabilityGrantedFor(project, cap, settings)` — never the file bit.
 
 - **Nothing an agent asks for may take the user's screen.** Canvas control routes by SOURCE: the
   request names the agent's own node, and the dispatch has to find the canvas that owns it. For
@@ -458,7 +473,7 @@ caller's project before answering. For an OPEN that was a screen hijack: the use
 project B, an agent in project A runs `open-claude`, the tab switches and A's saved viewport is
 applied, so the camera appears to jump and zoom. The rule now has three tiers, all membership lists
 in `renderer/lib/controlRouting.ts`: `STORE_ANSWERED_VERBS` ("no canvas is needed at either end" —
-`list`, `send`, `reply`, `sticky`, `open-project`), `canColdOpen` ("a canvas IS needed, but the
+`list`, `send`, `reply`, `sticky`, `open-project`, `settings`), `canColdOpen` ("a canvas IS needed, but the
 serialized one will do" — `open-terminal`, `open-claude`, `open-agent`, which write into the owning
 project's stored nodes with their launch armed and report `queued: true`) and `answersOffCanvas`
 ("…and there is nothing to defer" — `show-image`, `show-video`, `show-web`, `open-browser`, whose

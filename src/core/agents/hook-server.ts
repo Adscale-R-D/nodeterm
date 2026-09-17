@@ -216,6 +216,10 @@ export interface HookEventMeta {
  * `open-project`, and a grant recorded for an unverifiable caller would authorize whoever can
  * name that caller's node id. NEW verb, so fail-closed from day one strands nobody.
  *
+ * `settings` (@shared/settings-verb) joins for the same reason again: its `--set` raises a dialog
+ * that names the requesting node, and the user's click grants what the requester asked for — a
+ * requester nobody can verify is a requester the dialog would be lying about. NEW verb.
+ *
  * Consulted in the `/control/` route BEFORE `identityGate`'s decision is, so no future change to
  * the policy table can widen it; `messaging-verified-only.test.ts` drives the route on both sides
  * of every hatch and is the test that fails if either half of this comment stops being true.
@@ -225,7 +229,8 @@ export const requiresVerified: ReadonlySet<string> = new Set([
   'reply',
   'notify',
   'sticky',
-  'open-project'
+  'open-project',
+  'settings'
 ])
 
 /**
@@ -243,8 +248,13 @@ export const STICKY_CONTROL_REFUSAL = 'Sticky write refused.'
  *  diagnosis, no token or restart advice — a designed refusal, not a rollout accident. */
 export const OPEN_PROJECT_CONTROL_REFUSAL = 'Project open refused.'
 
+/** Same posture for `settings`: a caller that cannot prove which node it is must not read this
+ *  machine's settings, and must never be the one a settings dialog names as the requester. */
+export const SETTINGS_CONTROL_REFUSAL = 'Settings access refused.'
+
 /** The verified-only refusal, worded for the verb that was refused. */
 export function verifiedRefusalFor(verb: string): string {
+  if (verb === 'settings') return SETTINGS_CONTROL_REFUSAL
   if (verb === 'sticky') return STICKY_CONTROL_REFUSAL
   if (verb === 'open-project') return OPEN_PROJECT_CONTROL_REFUSAL
   return MESSAGING_CONTROL_REFUSAL

@@ -58,7 +58,7 @@ describe('the confirm-gated set and the dispatch that reads it stay in agreement
     expect(src).toMatch(/import \{[^}]*isDestructiveVerb[^}]*\} from '@shared\/control-verbs'/)
   })
 
-  for (const verb of ['write', 'close', 'open-project'] as const) {
+  for (const verb of ['write', 'close', 'open-project', 'settings'] as const) {
     it(`${verb} reaches its confirm through isDestructiveVerb`, () => {
       expect(isDestructiveVerb(verb)).toBe(true)
       const body = dispatchBody(verb)
@@ -114,10 +114,27 @@ describe('the confirm-gated set and the dispatch that reads it stay in agreement
     expect(body).toContain('expiresAt: confirmExpiresAt(')
   })
 
+  it('settings raises the SAME dialog on every change and can never be waived', () => {
+    // A settings change can GRANT a capability (agentMessaging). A standing "don't ask again" that
+    // covered it would let an agent waive its own consent, so: outside the waivable table, no
+    // waiver field on its dialog, no waiver decision read, and still a deadline.
+    expect(isWaivableVerb('settings')).toBe(false)
+    const body = dispatchBody('settings')
+    expect(body).not.toMatch(/waiveVerb:/)
+    expect(body).not.toContain('controlConfirmDecision(')
+    expect(body).toContain('expiresAt: confirmExpiresAt(')
+    // The write happens only on the confirm leg, through the shared applier — never before the
+    // dialog and never on cancel/expiry.
+    const confirmLeg = body.slice(body.indexOf('onConfirm:'), body.indexOf('onCancel:'))
+    expect(confirmLeg).toContain('applySettingsChange(')
+    expect(body.split('applySettingsChange(').length - 1).toBe(1)
+    expect(body.slice(0, body.indexOf('setConfirm({'))).not.toContain('applySettingsChange(')
+  })
+
   it('no case hard-codes a skip of its confirm', () => {
     // The only admissible way past one of these dialogs is `controlConfirmDecision`. A literal
     // shortcut (an env check, a `true`, a settings flag read inline) would be a silent loosening.
-    for (const verb of ['write', 'close', 'open-project'] as const) {
+    for (const verb of ['write', 'close', 'open-project', 'settings'] as const) {
       const body = dispatchBody(verb)
       expect(body).not.toMatch(/skipConfirm|dontAskAgain|SKIP_CONFIRM/)
     }
@@ -146,7 +163,7 @@ describe('the confirm-gated set and the dispatch that reads it stay in agreement
     const labels = [...src.matchAll(/\n {10}case '([a-z-]+)': \{/g)].map((m) => m[1])
     const gated = labels.filter((v) => /isDestructiveVerb\(verb\)/.test(caseBody(v)))
     // The early-handled block (`open-project`) is counted the same way, off its own slice.
-    for (const early of ['open-project']) {
+    for (const early of ['open-project', 'settings']) {
       if (/isDestructiveVerb\(verb\)/.test(earlyBody(early))) gated.push(early)
     }
     expect(new Set(gated)).toEqual(new Set(DESTRUCTIVE_VERBS))

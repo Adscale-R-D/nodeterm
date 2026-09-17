@@ -50,7 +50,10 @@ import {
   projectCapabilityGrantedFor,
   type CapabilityAckMap
 } from '../project-capability-consent'
-import type { ProjectCapability } from '../../shared/project-capabilities'
+import type {
+  CapabilityMachineDefaults,
+  ProjectCapability
+} from '../../shared/project-capabilities'
 
 /** The little the service needs to know about a stored node. */
 export interface MessagingStoredNode {
@@ -137,9 +140,15 @@ export function messagingEnabledVia(
     projectId: string
   ) =>
     | (Partial<Record<ProjectCapability, unknown>> & { capabilityAck?: CapabilityAckMap })
-    | undefined
+    | undefined,
+  /** This machine's settings, read per call like the project — so a change to the machine default
+   *  (settings.json, `agentMessagingDefault`) takes effect on the next delivery, exactly as an
+   *  off-toggle does. Required: a shell that forgot it would read every unconfigured project as off
+   *  while the Settings page reads it as on. */
+  getDefaults: () => CapabilityMachineDefaults
 ): (projectId: string) => boolean {
-  return (projectId) => projectCapabilityGrantedFor(getProject(projectId), 'agentMessaging')
+  return (projectId) =>
+    projectCapabilityGrantedFor(getProject(projectId), 'agentMessaging', getDefaults())
 }
 
 // ── The receipt bus ───────────────────────────────────────────────────────────────────────────

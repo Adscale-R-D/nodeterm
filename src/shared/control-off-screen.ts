@@ -81,7 +81,10 @@ const STORE_ANSWERED_VERBS: ReadonlySet<string> = new Set([
   'reply',
   'notify',
   'sticky',
-  'open-project'
+  'open-project',
+  // Reads settings.json and the projects store, and its dialog is app-global — no canvas at either
+  // end, and a background agent asking must never travel the user's view (@shared/settings-verb).
+  'settings'
 ])
 
 /**

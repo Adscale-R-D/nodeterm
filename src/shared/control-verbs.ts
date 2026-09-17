@@ -38,7 +38,17 @@
 // `open-project` (issue #338): create/adopt/first-attach all raise a human confirm (spec B2 +
 // Q1), and its early-handled block in Canvas.tsx reads `isDestructiveVerb(verb)` before its
 // `confirmBusy()` refusal exactly as write/close's cases do — the drift alarm covers all three.
-export const DESTRUCTIVE_VERBS: ReadonlySet<string> = new Set(['write', 'close', 'open-project'])
+//
+// `settings` (@shared/settings-verb): its `--set` raises a human confirm from an early-handled
+// block that reads this set for its `confirmBusy()` refusal. Not destructive in the literal sense —
+// a settings change is reversible — but it can GRANT a capability, and one dialog at a time is the
+// rule for every dialog an agent can raise. Its `--get` reads and never reaches the confirm.
+export const DESTRUCTIVE_VERBS: ReadonlySet<string> = new Set([
+  'write',
+  'close',
+  'open-project',
+  'settings'
+])
 
 /**
  * Does this verb's dispatch case take its `confirmBusy()` refusal from the shared set?

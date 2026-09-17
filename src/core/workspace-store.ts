@@ -1493,7 +1493,7 @@ export class WorkspaceStore {
    */
   capabilityProjectFor(
     projectId: string
-  ): (Partial<Record<ProjectCapability, true>> & { capabilityAck?: CapabilityAckMap }) | undefined {
+  ): (Partial<Record<ProjectCapability, boolean>> & { capabilityAck?: CapabilityAckMap }) | undefined {
     for (const e of this.index?.entries ?? []) {
       if (e.project) {
         if (e.project.id !== projectId) continue

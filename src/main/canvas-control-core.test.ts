@@ -15,6 +15,7 @@ import {
 import { RETRYABLE } from '../core/agents/agent-message-decide'
 import { PROJECT_TARGETABLE_VERBS } from '../core/project-grants'
 import { DRY_RUN_VERBS } from '../shared/control-verbs'
+import { SETTINGS_VERB_KEYS, SETTINGS_VERB_KEY_LIST } from '../shared/settings-verb'
 import { STRICT_CONTROL_VERBS } from '../core/agents/node-identity-policy'
 import { BROWSER_ACTION_KEYS } from '../core/browser-verb'
 import { BROWSER_RETRYABLE, BROWSER_OUTCOME_LABEL } from '../core/browser-outcomes'
@@ -548,6 +549,38 @@ describe('parseControlRequest', () => {
       // Server Edition has no browser control.
       expect(lower).toContain('server edition')
     }
+  })
+
+  it('both bodies document `settings` from the REAL allowlist and state that every change asks', () => {
+    for (const body of [buildCanvasSkillBody('/x/shim.sh'), buildCanvasControlInstructions('/tmp/nodeterm.sh')]) {
+      // Walked off the table, so a key added to or dropped from the allowlist reddens here unless
+      // the text moves with it.
+      for (const key of SETTINGS_VERB_KEY_LIST) {
+        expect(body, `settings key ${key} documented`).toContain(`\`${key}\` (${SETTINGS_VERB_KEYS[key].scope}`)
+      }
+      expect(body).toContain('`settings --set <key> --value <value> [--project <id>]`')
+      expect(body).toMatch(/user ALWAYS\s+confirms, every time/)
+      expect(body).toMatch(/no "don't ask again" covers this verb/)
+      expect(body).toMatch(/`denied by user` is FINAL/)
+      // The keys a human decides are named as unreachable, not merely "not listed".
+      expect(body).toMatch(/permission modes, accounts and credentials, node identity, browser\s+control, telemetry, keybindings, confirm waivers/)
+      expect(body).toMatch(/Server Edition reads settings but refuses every `--set`/)
+      // The messaging line now names the way to ask for the switch, instead of implying there is none.
+      expect(body).toContain('`--set agentMessaging --value true`')
+    }
+  })
+
+  it('parseControlRequest runs the settings allowlist, so main refuses a forbidden key by name', () => {
+    expect(parseControlRequest('settings', { set: 'claudePermissionMode', value: 'bypassPermissions' })).toEqual({
+      error: expect.stringContaining('settings-key-forbidden: "claudePermissionMode"')
+    })
+    expect(parseControlRequest('settings', { get: 'fontSize' })).toEqual({
+      error: expect.stringContaining('settings-key-not-allowed: "fontSize"')
+    })
+    expect(parseControlRequest('settings', { set: 'agentMessaging', value: 'true' })).toEqual({
+      verb: 'settings',
+      args: { set: 'agentMessaging', value: 'true' }
+    })
   })
 
   // The consent sentence is a contract string owned by browser-drive.ts (main). The doc must carry

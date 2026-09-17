@@ -280,45 +280,56 @@ describe('session-host startup lock liveness (issue #783)', () => {
     await expect(endpointAcceptsConnections(paths.endpoint)).resolves.toBe(false)
   }, 30_000)
 
-  // Windows-only because only a named pipe reproduces it: on POSIX the host unlinks a stale socket
-  // path before binding, so a second listener never sees EADDRINUSE. #783 measured the pipe staying
-  // busy for ~1.5 min after its host was killed.
-  it.skipIf(process.platform !== 'win32')(
-    'waits out an endpoint someone else still holds, instead of dying on it',
-    async () => {
-      const fixtureDir = mkdtempSync(path.join(os.tmpdir(), 'nt-session-host-busy-endpoint-'))
-      cleanupPaths.push(fixtureDir)
-      const dataDir = path.join(fixtureDir, 'user-data')
-      mkdirSync(dataDir)
-      const paths = sessionHostPaths(dataDir)
-
-      // Hold the endpoint the way the killed host's leftover pipe did.
+  // Occupying the endpoint differs per platform, the failure does not: `listen` answers
+  // EADDRINUSE and the host must wait rather than die. On Windows that is another server holding
+  // the named pipe — the shape #783 actually hit, where the killed host's pipe stayed busy for
+  // ~1.5 min. On POSIX a squatting server would NOT reproduce it (the host unlinks a stale socket
+  // path before binding), so a DIRECTORY takes the path instead: the unlink fails, and listen
+  // answers EADDRINUSE just the same.
+  const occupyEndpoint = async (endpoint: string): Promise<() => Promise<void>> => {
+    if (process.platform === 'win32') {
       const squatter = net.createServer()
       await new Promise<void>((resolve, reject) => {
         squatter.once('error', reject)
-        squatter.listen(paths.endpoint, () => resolve())
+        squatter.listen(endpoint, () => resolve())
       })
+      return () => new Promise<void>((resolve) => squatter.close(() => resolve()))
+    }
+    mkdirSync(endpoint, { recursive: true })
+    return async () => rmSync(endpoint, { recursive: true, force: true })
+  }
 
-      const { child } = await buildAndStartHost(fixtureDir, dataDir, [inertPtyPlugin()])
-      try {
-        // It must still be alive with the lock held and empty — and heartbeating it, which is what
-        // tells other launches (and the client) that this is a live starter rather than a corpse.
-        await waitUntil(() => existsSync(paths.statePath), 10_000, 'the startup lock')
-        const firstTouch = statSync(paths.statePath).mtimeMs
-        await new Promise((r) => setTimeout(r, 3_000))
-        expect(child.exitCode).toBeNull()
-        expect(statSync(paths.statePath).size).toBe(0)
-        expect(statSync(paths.statePath).mtimeMs).toBeGreaterThan(firstTouch)
+  it('waits out an endpoint someone else still holds, instead of dying on it', async () => {
+    const fixtureDir = mkdtempSync(path.join(os.tmpdir(), 'nt-session-host-busy-endpoint-'))
+    cleanupPaths.push(fixtureDir)
+    const dataDir = path.join(fixtureDir, 'user-data')
+    mkdirSync(dataDir)
+    const paths = sessionHostPaths(dataDir)
+    if (process.platform !== 'win32') cleanupPaths.push(paths.endpoint)
 
-        // Release it: the host must take the endpoint without being restarted.
-        await new Promise<void>((resolve) => squatter.close(() => resolve()))
-        await waitUntil(() => publishedState(paths.statePath), 15_000, 'the host to bind and publish')
-        await expect(endpointAcceptsConnections(paths.endpoint)).resolves.toBe(true)
-      } finally {
-        child.kill()
-        squatter.close()
-      }
-    },
-    45_000
-  )
+    const release = await occupyEndpoint(paths.endpoint)
+    const { child } = await buildAndStartHost(fixtureDir, dataDir, [inertPtyPlugin()])
+    try {
+      // Alive, lock held and empty, and its mtime moving: the heartbeat is what tells other
+      // launches (and the client) that this is a live starter rather than a corpse.
+      //
+      // `exitCode` is the load-bearing assertion. The first version of this retry unref'd its
+      // timer, so with `listen` failed the server held no handle, the event loop emptied, and the
+      // host exited 0 while its log still said it was retrying — a silent no-retry.
+      await waitUntil(() => existsSync(paths.statePath), 10_000, 'the startup lock')
+      const firstTouch = statSync(paths.statePath).mtimeMs
+      await new Promise((r) => setTimeout(r, 3_000))
+      expect(child.exitCode).toBeNull()
+      expect(statSync(paths.statePath).size).toBe(0)
+      expect(statSync(paths.statePath).mtimeMs).toBeGreaterThan(firstTouch)
+
+      // Release it: the host must take the endpoint without being restarted.
+      await release()
+      await waitUntil(() => publishedState(paths.statePath), 20_000, 'the host to bind and publish')
+      await expect(endpointAcceptsConnections(paths.endpoint)).resolves.toBe(true)
+    } finally {
+      child.kill()
+      await release().catch(() => undefined)
+    }
+  }, 60_000)
 })

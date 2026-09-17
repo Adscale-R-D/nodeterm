@@ -1086,11 +1086,14 @@ async function main(): Promise<void> {
         )
       }
       touchStartupLock()
-      const timer = setTimeout(() => {
+      // Deliberately NOT unref'd: while `listen` has failed the server holds no handle, so an
+      // unref'd timer leaves an empty event loop and the process exits 0 — a host that silently
+      // stops retrying while its log says it is waiting. (Caught by the Windows job below; the
+      // Linux one cannot reach this path at all.)
+      setTimeout(() => {
         touchStartupLock()
         server.listen(paths.endpoint)
       }, listenDelay)
-      timer.unref?.()
       listenDelay = Math.min(listenDelay * 2, LISTEN_RETRY_MAX_DELAY_MS)
       return
     }

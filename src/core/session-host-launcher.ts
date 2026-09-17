@@ -109,7 +109,10 @@ export function hostLauncherPath(
   fsLike: HostLinkFs = fs as unknown as HostLinkFs
 ): string {
   if (platform !== 'win32') return execPath
-  const link = path.join(path.dirname(execPath), WINDOWS_HOST_EXE)
+  // `path.win32`, not `path`: the platform is a parameter, so the separator rules must follow it
+  // rather than the OS this runs on. With the running OS's `path`, a Linux runner sees no separator
+  // in `C:\Program Files\…\nodeterm.exe` and returns a bare, cwd-relative link name.
+  const link = path.win32.join(path.win32.dirname(execPath), WINDOWS_HOST_EXE)
   try {
     const target = fsLike.statSync(execPath, { bigint: true })
     try {

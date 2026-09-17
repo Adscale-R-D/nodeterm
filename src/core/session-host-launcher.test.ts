@@ -77,6 +77,8 @@ describe('WINDOWS_HOST_EXE', () => {
   })
 })
 
+// Deliberately NOT gated on the runner's platform: `platform` is a parameter, so these Windows paths
+// must resolve identically on the Linux `quality` job and on `windows-latest`.
 describe('hostLauncherPath', () => {
   const exe = 'C:\\Program Files\\node-terminal\\nodeterm.exe'
   const link = 'C:\\Program Files\\node-terminal\\' + WINDOWS_HOST_EXE

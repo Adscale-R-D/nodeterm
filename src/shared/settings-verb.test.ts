@@ -27,23 +27,45 @@ describe('the allowlist is the gate, and the forbidden set outranks it', () => {
     }
   })
 
-  it('the forbidden set covers what a human must decide', () => {
-    for (const key of [
-      'claudePermissionMode',
-      'defaultPermissionMode',
-      'hookIdentityStrict',
+  it('the forbidden set is EXACTLY this — removing a member is a reviewed test edit, not a silent one', () => {
+    // A membership snapshot, not a sample and not a loop over the set (which is a tautology). Two
+    // members escape SETTINGS_VERB_FORBIDDEN_PATTERN and cannot be caught by widening it:
+    // `customAgents` (it defines what command a custom agent runs) and `agentMessagingDefault` —
+    // the obvious `agent` term would also forbid `agentMessaging`, the key this verb exists to set.
+    // For those two the set is the only fence, so the only change that could make them settable —
+    // allowlist the key AND drop it from the set, in one edit — must redden a test. This one.
+    expect([...SETTINGS_VERB_FORBIDDEN].sort()).toEqual([
       'agentBrowserControl',
-      'claudeAccounts',
-      'codexAccounts',
-      'modelGateway',
-      'telemetryEnabled',
-      'keybindings',
-      'controlConfirmWaivers',
+      'agentLaunchCommands',
+      'agentMessagingDefault',
       'capabilityAck',
-      'agentMessagingDefault'
-    ]) {
-      expect((SETTINGS_VERB_FORBIDDEN as ReadonlySet<string>).has(key), key).toBe(true)
-    }
+      'claudeAccounts',
+      'claudePermissionMode',
+      'codexAccounts',
+      'commitAgentCommand',
+      'confirmBeforeQuit',
+      'controlConfirmWaivers',
+      'customAgents',
+      'defaultAccountId',
+      'defaultPermissionMode',
+      'defaultShell',
+      'hookIdentityStrict',
+      'hookReplyApprovals',
+      'keybindings',
+      'modelGateway',
+      'modelGatewayDefaultModel',
+      'phoneAccessEnabled',
+      'telemetryEnabled',
+      'terminalShortcutPolicy',
+      'vanillaLaunchDefault'
+    ])
+  })
+
+  it('the keys the pattern cannot see are named, so the snapshot above is known to be load-bearing', () => {
+    expect(
+      [...SETTINGS_VERB_FORBIDDEN].filter((k) => !SETTINGS_VERB_FORBIDDEN_PATTERN.test(k)).sort()
+    ).toEqual(['agentMessagingDefault', 'customAgents'])
+    for (const key of SETTINGS_VERB_KEY_LIST) expect(SETTINGS_VERB_FORBIDDEN_PATTERN.test(key), key).toBe(false)
   })
 
   it('the name pattern catches forbidden classes nobody has named yet', () => {

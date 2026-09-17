@@ -39,7 +39,8 @@ describe('the allowlist is the gate, and the forbidden set outranks it', () => {
       'telemetryEnabled',
       'keybindings',
       'controlConfirmWaivers',
-      'capabilityAck'
+      'capabilityAck',
+      'agentMessagingDefault'
     ]) {
       expect((SETTINGS_VERB_FORBIDDEN as ReadonlySet<string>).has(key), key).toBe(true)
     }
@@ -227,5 +228,53 @@ describe('planSettingsSet', () => {
     expect(plan.message).toContain('this machine')
     expect(plan.change).toEqual({ scope: 'machine', patch: { gridSize: 32 } })
     expect(plan.danger).toBe(false)
+  })
+})
+
+describe('agentMessaging under the MACHINE DEFAULT', () => {
+  const on = { ...DEFAULT_SETTINGS, agentMessagingDefault: true }
+  it('reads "on (this machine\'s default)" for a project whose file says nothing', () => {
+    expect(readSettingsValue('agentMessaging', on, project())).toMatchObject({
+      value: true,
+      display: "on (this machine's default)"
+    })
+    expect(readSettingsValue('agentMessaging', DEFAULT_SETTINGS, project())).toMatchObject({
+      value: false,
+      display: "off (this machine's default)"
+    })
+  })
+  it('an explicit value reads as the project\'s own', () => {
+    expect(
+      readSettingsValue('agentMessaging', on, project({ agentMessaging: false }))
+    ).toMatchObject({ value: false, display: 'off (this project)' })
+  })
+  it('--set true on a project already on by default changes nothing, and says why', () => {
+    const plan = planSettingsSet({
+      request: { action: 'set', key: 'agentMessaging', value: true },
+      settings: on,
+      project: project(),
+      requestedBy: 'a'
+    })
+    expect(plan).toEqual({
+      kind: 'unchanged',
+      message: expect.stringContaining("already on (this machine's default)")
+    })
+  })
+  it('--set false on a project on by default asks, and turns it off for this project', () => {
+    const plan = planSettingsSet({
+      request: { action: 'set', key: 'agentMessaging', value: false },
+      settings: on,
+      project: project(),
+      requestedBy: 'a'
+    })
+    expect(plan).toMatchObject({
+      kind: 'confirm',
+      change: { scope: 'project', projectId: 'p1', capability: 'agentMessaging', on: false }
+    })
+  })
+  it('the machine default itself can never be set from the CLI', () => {
+    expect(parseSettingsRequest({ set: 'agentMessagingDefault', value: 'true' })).toEqual({
+      error: expect.stringContaining('settings-key-forbidden: "agentMessagingDefault"')
+    })
   })
 })

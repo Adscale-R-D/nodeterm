@@ -31,14 +31,10 @@
  * In `src/shared` because both edges need it: the desktop renderer (dispatch + dialog) and the
  * Server Edition's headless handler (`get`, plus the named `--set` refusal).
  */
-import {
-  PROJECT_CAPABILITY_COPY,
-  projectCapabilityFlagInFile,
-  type ProjectCapability
-} from './project-capabilities'
+import { PROJECT_CAPABILITY_COPY, type ProjectCapability } from './project-capabilities'
 import {
   capabilityAnswerOf,
-  projectCapabilityGrantedFor,
+  projectCapabilityEffective,
   type CapabilityAckMap
 } from './project-capability-consent'
 import type { Project, Settings } from './types'
@@ -66,6 +62,10 @@ type MachineKey = keyof Pick<
 >
 type ProjectKey = Extract<ProjectCapability, 'agentMessaging'>
 export type SettingsVerbKey = MachineKey | ProjectKey
+/** What a reader needs from settings.json: the machine keys, plus the machine default a project
+ *  capability falls back to when its file says nothing. */
+export type SettingsVerbSettings = Pick<Settings, MachineKey> &
+  Partial<Pick<Settings, 'agentMessagingDefault'>>
 
 /**
  * THE ALLOWLIST. Order = the order `settings` lists them in.
@@ -139,6 +139,9 @@ export const SETTINGS_VERB_FORBIDDEN = new Set<keyof Settings | keyof Project>([
   'customAgents',
   'commitAgentCommand',
   'defaultShell',
+  // The machine default for messaging: a grant over EVERY project on this machine at once, cloned
+  // ones included. The per-project switch is the narrower, confirmable thing an agent may ask for.
+  'agentMessagingDefault',
   // Telemetry.
   'telemetryEnabled',
   // Keybindings and the terminal-first shortcut policy.
@@ -283,7 +286,7 @@ export interface SettingsValue {
  */
 export function readSettingsValue(
   key: SettingsVerbKey,
-  settings: Pick<Settings, MachineKey>,
+  settings: SettingsVerbSettings,
   project: SettingsProjectView | undefined
 ): SettingsValue | { error: string } {
   const spec = SETTINGS_VERB_KEYS[key]
@@ -295,22 +298,26 @@ export function readSettingsValue(
     return { error: `settings: ${key} belongs to a project, and this node is not in a saved project yet` }
   }
   const cap = key as ProjectCapability
-  const granted = projectCapabilityGrantedFor(project, cap)
+  const effective = projectCapabilityEffective(project, cap, {
+    agentMessagingDefault: settings.agentMessagingDefault
+  })
   let display: string
-  if (granted) display = 'on (this project)'
-  else if (projectCapabilityFlagInFile(project, cap)) {
+  if (effective.pendingNotice) {
     display =
       capabilityAnswerOf(project, cap) === 'declined'
         ? 'off (the project file turns it on, but the user declined it on this machine)'
         : 'off (the project file turns it on, but the user has not confirmed it on this machine yet)'
-  } else display = 'off (this project)'
-  return { key, scope: 'project', value: granted, display }
+  } else {
+    const why = effective.source === 'default' ? "this machine's default" : 'this project'
+    display = `${effective.on ? 'on' : 'off'} (${why})`
+  }
+  return { key, scope: 'project', value: effective.on, display }
 }
 
 /** The text/plain + structured reply for `settings` / `settings --get <key>`. */
 export function renderSettingsGet(input: {
   keys: readonly SettingsVerbKey[]
-  settings: Pick<Settings, MachineKey>
+  settings: SettingsVerbSettings
   project: SettingsProjectView | undefined
 }): { ok: true; message: string; result: unknown } | { ok: false; error: string } {
   const values: SettingsValue[] = []
@@ -380,7 +387,7 @@ function showValue(key: SettingsVerbKey, v: boolean | number): string {
  */
 export function planSettingsSet(input: {
   request: Extract<SettingsRequest, { action: 'set' }>
-  settings: Pick<Settings, MachineKey>
+  settings: SettingsVerbSettings
   project: SettingsProjectView | undefined
   requestedBy: string
 }): SettingsSetPlan {
@@ -393,7 +400,9 @@ export function planSettingsSet(input: {
   if (current.value === request.value) {
     return {
       kind: 'unchanged',
-      message: `${request.key} is already ${to}${spec.scope === 'project' && project ? ` in project "${project.name}"` : ''} — nothing changed`
+      message:
+        `${request.key} is already ${current.display}` +
+        `${spec.scope === 'project' && project ? ` in project "${project.name}"` : ''} — nothing changed`
     }
   }
   const where =

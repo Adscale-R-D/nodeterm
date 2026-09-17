@@ -1797,12 +1797,17 @@ app.whenReady().then(async () => {
     hasLiveSession: (id) => ptyManager.hasLiveSession(id),
     projects: () => workspaceStore.persistedCanvases(),
     isRemoteNode: (id) => !!ptyManager.sshRemoteForNode(id),
-    // GLOBAL CONSTRAINT 11: every delivery path is gated behind the per-project switch, OFF by
-    // default. The switch is the `agentMessaging` capability GRANT: the strict `=== true` flag
-    // in the hostile git-shared project.json AND this machine's recorded 'kept' answer to the
-    // clone notice (projectCapabilityGrantedFor — never the raw file bit). Read per call off
-    // the store's index, so a decline or an off-toggle refuses the very next delivery.
-    messagingEnabled: messagingEnabledVia((id) => workspaceStore.capabilityProjectFor(id)),
+    // GLOBAL CONSTRAINT 11: every delivery path is gated behind the per-project switch. The switch
+    // is the `agentMessaging` capability GRANT (projectCapabilityGrantedFor — never the raw file
+    // bit): an explicit `true` in the hostile git-shared project.json needs this machine's 'kept'
+    // answer to the clone notice, an explicit `false` is off, and an ABSENT value is answered by
+    // this machine's settings.json `agentMessagingDefault` (OFF by default). Read per call off the
+    // store's index and the settings store, so a decline, an off-toggle or a default change
+    // takes effect on the very next delivery.
+    messagingEnabled: messagingEnabledVia(
+      (id) => workspaceStore.capabilityProjectFor(id),
+      () => settingsStore.get()
+    ),
     // Runtime pane ownership: which project actually SPAWNED the target's pane this run
     // (core/agents/pane-ownership.ts). The gate trusts this over the attacker-writable store to
     // decide whose grant applies; unproven ⇒ refused (PR #237 fix round 2).

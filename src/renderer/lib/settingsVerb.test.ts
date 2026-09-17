@@ -55,7 +55,7 @@ describe('a CLI change lands as exactly the state the Settings switch produces',
     expect(strip(cli)).toEqual(strip(ui))
     expect(projectCapabilityFlagInFile(cli, 'agentMessaging')).toBe(true)
     expect(capabilityAnswerOf(cli, 'agentMessaging')).toBe('kept')
-    expect(projectCapabilityGrantedFor(cli, 'agentMessaging')).toBe(true)
+    expect(projectCapabilityGrantedFor(cli, 'agentMessaging', {})).toBe(true)
     expect(
       needsCapabilityNotice({
         capability: 'agentMessaging',
@@ -76,7 +76,7 @@ describe('a CLI change lands as exactly the state the Settings switch produces',
     expect(strip(useProjects.getState().getProject('cli')!)).toEqual(
       strip(useProjects.getState().getProject('ui')!)
     )
-    expect(projectCapabilityGrantedFor(useProjects.getState().getProject('cli'), 'agentMessaging')).toBe(true)
+    expect(projectCapabilityGrantedFor(useProjects.getState().getProject('cli'), 'agentMessaging', {})).toBe(true)
   })
 
   it('turning it OFF matches too', () => {
@@ -86,7 +86,7 @@ describe('a CLI change lands as exactly the state the Settings switch produces',
     expect(strip(useProjects.getState().getProject('cli')!)).toEqual(
       strip(useProjects.getState().getProject('ui')!)
     )
-    expect(projectCapabilityGrantedFor(useProjects.getState().getProject('cli'), 'agentMessaging')).toBe(false)
+    expect(projectCapabilityGrantedFor(useProjects.getState().getProject('cli'), 'agentMessaging', {})).toBe(false)
   })
 })
 
@@ -96,5 +96,31 @@ describe('applySettingsChange writes through exactly one setter', () => {
     applySettingsChange({ scope: 'machine', patch: { gridSize: 32 } }, writers)
     expect(writers.updateSettings).toHaveBeenCalledWith({ gridSize: 32 })
     expect(writers.setProjectCapability).not.toHaveBeenCalled()
+  })
+})
+
+describe('under a machine default that is ON, the CLI and the Settings choice still land identically', () => {
+  it('--set false writes the same explicit false + declined as choosing "Off in this project"', () => {
+    useProjects.getState().hydrate({
+      version: 2,
+      activeProjectId: 'cli',
+      projects: [base('cli'), base('ui')]
+    })
+    const settings = { ...DEFAULT_SETTINGS, agentMessagingDefault: true }
+    const request = parseSettingsRequest({ set: 'agentMessaging', value: 'false' })
+    if ('error' in request || request.action !== 'set') throw new Error('bad request')
+    const plan = planSettingsSet({
+      request,
+      settings,
+      project: useProjects.getState().getProject('cli'),
+      requestedBy: 'agent'
+    })
+    if (plan.kind !== 'confirm') throw new Error(`expected a confirm, got ${plan.kind}`)
+    applySettingsChange(plan.change)
+    useProjects.getState().setProjectCapability('ui', 'agentMessaging', false)
+    const cli = useProjects.getState().getProject('cli')!
+    expect(strip(cli)).toEqual(strip(useProjects.getState().getProject('ui')!))
+    expect(cli.agentMessaging).toBe(false)
+    expect(projectCapabilityGrantedFor(cli, 'agentMessaging', settings)).toBe(false)
   })
 })

@@ -196,8 +196,11 @@ export async function initServerCanvasControl(
     mirrorEntry,
     projects: () => deps.workspaceStore.persistedCanvases(),
     isRemoteNode: () => false,
-    messagingEnabled: messagingEnabledVia((projectId) =>
-      deps.workspaceStore.capabilityProjectFor(projectId)),
+    messagingEnabled: messagingEnabledVia(
+      (projectId) => deps.workspaceStore.capabilityProjectFor(projectId),
+      // The SAME machine default the desktop reads — this shell's own settings.json.
+      () => deps.settings()
+    ),
     paneOwnerProject,
     callerOwnsTarget: (sourceNodeId, targetNodeId) =>
       factory.ownsSpawn(sourceNodeId, targetNodeId),

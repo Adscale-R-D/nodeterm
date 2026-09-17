@@ -2525,6 +2525,32 @@ else, and its context links must keep classifying across restarts).
   Edition refuses every `--set` by name** — its headless opt-in (#537) is not consent to grant
   capabilities, and there is no dialog; `--get` answers from `capabilityProjectFor`, own project only.
   Mobile: N/A (the phone issues no control verbs).
+  **Agent messaging's MACHINE DEFAULT (`settings.agentMessagingDefault`, 2026-09, ships OFF).** A
+  project whose `.nodeterm/project.json` carries NO `agentMessaging` value is answered by this
+  machine's settings.json; the rule is ONE function, `projectCapabilityEffective`
+  (`@shared/project-capability-consent`), and `projectCapabilityGrantedFor` now REQUIRES the
+  defaults argument so a consumer that forgot it fails to compile instead of reading every
+  unconfigured project as off while Settings reads it as on. Four rules: (1) an explicit `true` still
+  needs this machine's `'kept'` — `needsCapabilityNotice` is untouched and stays keyed on an explicit
+  `true`, so a cloned file still notices and a project on only by default never does; (2) OFF is now
+  WRITTEN — `setProjectCapability(…, false)` stores a literal `false` for a capability in
+  `CAPABILITY_MACHINE_DEFAULTS` (browser control has none and still deletes the field), because
+  absence now means "use the default"; `readProjectCapabilities` carries that `false` through the
+  file; (3) an ABSENT field with a recorded `'declined'` stays off — that is how every pre-default
+  build wrote "off", and a user's explicit no must not be undone by a default switched on later;
+  "Use this machine's default" (`resetProjectCapabilityToDefault`) therefore clears the field AND the
+  answer; (4) the default is forbidden to the `settings` verb (a grant over every project, clones
+  included). **This does not trip the `project-capabilities.ts` header's trigger**: the notice is not
+  dropped, and what the default answers is absence, whose value lives in machine-local settings.json.
+  **Why it ships OFF:** `core/agents/pane-ownership.ts` records a pane's owner only on a FRESH spawn,
+  so after an app restart or update every surviving pane is `unproven-target-owner` and refused —
+  "on by default" would be false after every restart. The flip is a separate one-line change that
+  waits for a cross-restart ownership proof (#659's signed record is the candidate). Settings →
+  Agents shows the machine switch, and the per-project row is a three-way choice (default / on /
+  off) plus "On in <project> (this machine's default)" — a two-position switch cannot draw absence.
+  Downgrade: a pre-default build writes `false` back as a deleted field, which this build then reads
+  as "use the default". Server Edition reads the same grant from its own settings.json; Mobile: N/A
+  (the phone has no capability switch).
   **Review panel (`verify`, 2026-07):** `verify --node <id> [--lenses …] [--focus …] [--agent …]
   [--synthesis off]` opens one reviewer per LENS, each armed behind the target (`--after`) and
   bridged to it, wrapped in a `Verify: <title>` group, plus a judge armed behind the whole panel.

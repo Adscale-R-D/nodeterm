@@ -162,6 +162,10 @@ lane unaffected.
   act only on the user's own machine-local choice — and keep `default` distinct from `global`,
   because reading an unset setting as a deliberate choice is reading consent into silence. Anything
   machine-local goes in `settings.json`; nothing that grants a capability goes in `project.json`.
+  A machine-local DEFAULT for a project capability (`agentMessagingDefault`) is allowed only because
+  it answers ABSENCE: an explicit `true` in `project.json` still needs this machine's recorded
+  answer, an explicit `false` still wins, and "off" must therefore be written as a literal `false`.
+  Read grants through `projectCapabilityGrantedFor(project, cap, settings)` — never the file bit.
 
 - **Nothing an agent asks for may take the user's screen.** Canvas control routes by SOURCE: the
   request names the agent's own node, and the dispatch has to find the canvas that owns it. For

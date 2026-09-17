@@ -39,7 +39,7 @@ export interface ServerSettingsControlDeps {
   persistedCanvases(): Array<{ id: string; nodes: ReadonlyArray<{ id: string }> }>
   capabilityProjectFor(
     projectId: string
-  ): (Partial<Record<ProjectCapability, true>> & { capabilityAck?: CapabilityAckMap }) | undefined
+  ): (Partial<Record<ProjectCapability, boolean>> & { capabilityAck?: CapabilityAckMap }) | undefined
   projectName(projectId: string): string | undefined
   settings(): Settings
 }

@@ -156,7 +156,9 @@ export function answerBrowserResolve(
     // LIVE read — the drive-time capability check the whole feature's safety rests on. A project.json
     // hand-edit that flipped the switch off is reflected here the next time an agent drives, which is
     // exactly drive time.
-    capabilityOn: projectCapabilityGrantedFor(project, 'agentBrowserControl'),
+    // `{}`: browser control has no machine default (CAPABILITY_MACHINE_DEFAULTS) — an absent switch is
+    // off, and no setting on this machine can change that.
+    capabilityOn: projectCapabilityGrantedFor(project, 'agentBrowserControl', {}),
     sourceTitle: typeof node.title === 'string' ? node.title : '',
     browserTitle: typeof browserNode?.title === 'string' ? browserNode.title : ''
   }

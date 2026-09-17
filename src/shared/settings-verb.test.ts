@@ -27,6 +27,20 @@ describe('the allowlist is the gate, and the forbidden set outranks it', () => {
     }
   })
 
+  it('the allowlist is EXACTLY this — adding a key is a reviewed test edit, not a silent one', () => {
+    // The walk above (not forbidden, not pattern-matched) cannot see a brand-new key the pattern
+    // misses — `agentHibernationEnabled` allowlisted in one edit left every related suite green
+    // (measured). An exact snapshot makes ADDING a key as loud as removing a forbidden one: both are
+    // now a decision somebody signs for, beside the `why` the table already requires.
+    expect([...SETTINGS_VERB_KEY_LIST].sort()).toEqual([
+      'agentMessaging',
+      'defaultNodeHeight',
+      'defaultNodeWidth',
+      'gridSize',
+      'snapToGrid'
+    ])
+  })
+
   it('the forbidden set is EXACTLY this — removing a member is a reviewed test edit, not a silent one', () => {
     // A membership snapshot, not a sample and not a loop over the set (which is a tautology). Two
     // members escape SETTINGS_VERB_FORBIDDEN_PATTERN and cannot be caught by widening it:
@@ -62,6 +76,8 @@ describe('the allowlist is the gate, and the forbidden set outranks it', () => {
   })
 
   it('the keys the pattern cannot see are named, so the snapshot above is known to be load-bearing', () => {
+    // A deliberate TRIPWIRE: a future forbidden key the pattern also cannot see reddens this, and
+    // adding it here is the correct response — it records that the set is that key's only fence.
     expect(
       [...SETTINGS_VERB_FORBIDDEN].filter((k) => !SETTINGS_VERB_FORBIDDEN_PATTERN.test(k)).sort()
     ).toEqual(['agentMessagingDefault', 'customAgents'])

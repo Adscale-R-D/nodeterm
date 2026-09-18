@@ -2606,12 +2606,27 @@ export interface ContextApi {
   /** Fires whenever a session's context fill changes. Returns unsubscribe. */
   onUpdate(listener: (usage: ContextWindowUsage) => void): () => void
   /**
-   * Ask main to start (or refresh) tracking a session's transcript so the meter populates
+   * Ask the core to start (or refresh) tracking a session's transcript so the meter populates
    * without waiting for a live hook event — e.g. on node mount after an app restart, when
    * the continuing session is idle. `cwd` is a transcript-path fallback only.
    * `accountId` scopes resolution to a managed Claude account's transcript root (default `~/.claude`).
+   *
+   * `nodeId` and `agentId` are what make this work for anything but a LOCAL CLAUDE node, and both
+   * are load-bearing rather than informational (see `core/context-ensure.ts`):
+   * - `nodeId` is the only way to learn that this session runs on an SSH project's HOST, whose
+   *   transcript no local resolver can see. Without it a remote node's meter stayed blank until
+   *   its next turn, every app restart.
+   * - `agentId` routes the resolve to THAT agent's own locator and tail. Claude's resolver falls
+   *   back to the newest claude transcript for the cwd, so resolving a codex/gemini session through
+   *   it would meter a stranger's conversation. Both omitted ⇒ the legacy local-claude behaviour.
    */
-  ensure(sessionId: string, cwd?: string, accountId?: string): void
+  ensure(
+    sessionId: string,
+    cwd?: string,
+    accountId?: string,
+    nodeId?: string,
+    agentId?: string
+  ): void
 }
 
 /**

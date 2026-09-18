@@ -1577,9 +1577,13 @@ else, and its context links must keep classifying across restarts).
   - **`hasUsage` gated THREE features, not one.** Joining `USAGE_CAPABLE` also switched on
     `context.ensure` and the find bar's transcript index, both of which go through claude's
     `resolveTranscript` — whose **cwd fallback** then handed a codex node *the newest claude transcript
-    for that cwd*: a stranger's session as its meter and its search hits. Now gated by the pure
-    `readsClaudeTranscript` (`renderer/lib/transcriptGates.ts`), which reuses `CHAT_CAPABLE` rather than
-    adding a fourth list. Non-claude agents lose only the mount-time head start.
+    for that cwd*: a stranger's session as its meter and its search hits. Gated by the pure
+    `readsClaudeTranscript` (`renderer/lib/transcriptGates.ts`) rather than by a fourth list.
+    `context.ensure` LEFT that gate in 2026-09 (issue #813) once its handler stopped *being* claude's
+    resolver — see **Context-meter rehydration** below; the find bar's index still has no routing and
+    so has not moved. The lasting rule is the one the episode taught: **grep every consumer of a
+    helper before adding an id to its list**, and when two consumers need different answers, route
+    the one that can be routed instead of widening the gate for both.
   - **`TITLE_READ_CAPABLE` was created here**: gemini names its own sessions through its `update_topic`
     tool (the title is in that call's `args.title`, NOT a top-level field) but has no rename command, so
     the read and write legs split. Its read path is the transcript the context tail already tracks
@@ -1589,6 +1593,44 @@ else, and its context links must keep classifying across restarts).
     because `/quit --delete` exits *and permanently deletes* the session history, i.e. exactly what the
     restart exists to resume (pinned by its own test).
   Full picture, measurements, gaps and a device checklist: **`docs/gemini-agent.md`**.
+- **Context-meter rehydration (`context:ensure`)** — the meter is fed by hook events, and a tmux
+  session outlives the app, so a continuing session that is idle after a restart emits nothing and
+  its meter stays blank until the user's next prompt. The mount-time read that exists to close that
+  is `core/context-ensure.ts` (`registerContextEnsureIpc`), **in core so BOTH shells serve it** — it
+  used to be inline in `src/main/index.ts` and the Server Edition had no handler at all, so a browser
+  node's meter filled only on its next turn too (issue #813; the identical hole
+  `core/transcript-ipc.ts` was moved to core to close). Three rules:
+  - **It routes per agent; it does not widen a gate.** `agentId` picks that agent's OWN locator and
+    tail — claude → `resolveTranscript`, codex → `locateCodex`, gemini → `locateGemini` (the last two
+    keyed STRICTLY by session id, no cwd fallback, so neither can adopt a session that is not its
+    own). A closed switch: an agent that is not in it gets **no meter**, never claude's resolver.
+    That is what let the renderer gate move from `readsClaudeTranscript` to `showUsage` — the danger
+    was never the meter, it was one resolver answering for four agents. **grok is deliberately
+    absent**: its meter reads a `signals.json` whose directory is learned from a hook event, so after
+    a restart there is nothing to rehydrate FROM (`locateGrok` resolves a different file, the
+    conversation). Structural, not pending.
+  - **A remote node is resolved on its HOST or not at all.** The desktop injects `ensureRemote`,
+    which asks the host through `remoteTranscriptRefFor` — the ⌘M path's locator, jail
+    (`isSafeRemoteTranscriptPath`) and cache, reused as a second consumer rather than copied. Its
+    "could not resolve" is **terminal**: falling through to any local resolver would search THIS
+    machine for a file that only ever existed on the other one, and claude's cwd fallback would
+    happily meter an unrelated local session under the remote node's id. Remote metering is
+    claude-only, the same boundary the hook raw-listener already draws (`remote-context-tail.ts`
+    parses claude's records; the locator searches claude's roots).
+  - **Nothing negative is ever cached.** A clean miss and a failed ssh call are indistinguishable to
+    the locator, so both cache NOTHING and the next mount retries in full — a momentarily dead
+    ControlMaster must not be remembered as "this session has no transcript", or the meter stays
+    blank until the next turn anyway, which is the bug arriving by another route. The only
+    de-duplication is of **concurrent in-flight** calls (a canvas mounts dozens of remote nodes at
+    once and each resolve is an ssh exec on someone else's machine); it releases on settle, so it is
+    not a cache. **No timer** — one read at mount, the same rule Remote usage and session memory
+    follow.
+  Surfaces: Desktop full; **Server Edition** full and local-only (it runs ON the host whose
+  transcripts it reads — the legitimate asymmetry, stated the way the SSH skip is); kanban card +
+  card modal render the same `ContextMeter` from the same store and inherit it; mobile N/A (its own
+  context display, separate path). Tests: `core/context-ensure.test.ts` (routing, remote
+  fall-through, no negative cache) + `main/context-ensure-wiring.test.ts` (the shell's closure, at
+  source level, because it closes over `ptyManager`/`sshProjectManager`).
 - **Permission mode** (agents in `PERMISSION_MODE_CAPABLE` — claude, grok, **gemini**, **codex**) —
   the mode a session **starts** in (`claude --permission-mode <mode>`; Shift+Tab still cycles it at
   runtime). Membership no longer implies claude's flag spelling: **the per-agent translation lives in

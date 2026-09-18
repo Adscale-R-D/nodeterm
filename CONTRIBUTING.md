@@ -49,7 +49,12 @@ The repo is split by Electron process boundary and the split is enforced, not ad
 
 **Put new service logic in `src/core` behind `CorePlatform`, not inline in `src/main`.** That is the
 seam the Server Edition boots from; logic left in `src/main` silently does not exist there, and the
-boundary tests cannot tell you a feature is *missing*.
+boundary tests cannot tell you a feature is *missing*. This keeps happening to the same subsystem:
+the ⌘M transcript read and then the context meter's `context:ensure` both shipped desktop-only, and
+in both cases the browser cast the message into the void and the feature just looked empty. If your
+handler needs something only Electron has (an SSH ControlMaster, a native dialog), make that an
+**injected dep** whose absence is a documented degrade — see `registerTranscriptIpc` /
+`registerContextEnsureIpc` — rather than a reason to keep the whole handler in `src/main`.
 
 ## Three surfaces
 

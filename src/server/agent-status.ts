@@ -68,7 +68,7 @@ export interface WireAgentStatusOptions {
 export function wireAgentStatus(
   platform: ServerPlatform,
   opts: WireAgentStatusOptions = {}
-): { contextTail: ContextTail; geminiContextTail: ContextTail } {
+): { contextTail: ContextTail; geminiContextTail: ContextTail; codexContextTail: ContextTail } {
   const hooks = opts.hooks ?? hookServer
   // nodeId → the agent session id of whichever hook-capable CLI runs in that node (claude's, and
   // since the grok branch below, grok's)
@@ -425,5 +425,8 @@ export function wireAgentStatus(
   platform.on(IPC.ptyDestroy, (nodeId: string) => releaseNodeTails(nodeId))
   platform.on(IPC.ptyRecycle, (nodeId: string) => releaseNodeTails(nodeId))
 
-  return { contextTail, geminiContextTail }
+  // `codexContextTail` joins the two already returned so `src/server/index.ts` can register the
+  // context-meter rehydration over all three. Keeping a tail private here would mean a second
+  // instance somewhere else metering the same sessions twice.
+  return { contextTail, geminiContextTail, codexContextTail }
 }

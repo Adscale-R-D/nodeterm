@@ -93,6 +93,7 @@ import { wireAgentStatus } from './agent-status'
 import { initServerContextLink } from './context-link'
 import { createServerWorkspaceWatcher } from './workspace-external-watch'
 import { registerTranscriptIpc } from '../core/transcript-ipc'
+import { registerContextEnsureIpc } from '../core/context-ensure'
 import { IPC } from '@shared/ipc'
 import { WhisperModelStore } from '../core/speech/whisper-models'
 import { SpeechService } from '../core/speech/speech-service'
@@ -453,7 +454,7 @@ export async function startServer(
   // Set after the initial workspace load when the opt-in flag is on. The status listener is wired
   // now so the runtime, once present, consumes the exact same normalized stream as the UI/mirror.
   let canvasControl: ServerCanvasControl | null = null
-  const { contextTail, geminiContextTail } = wireAgentStatus(platform, {
+  const { contextTail, geminiContextTail, codexContextTail } = wireAgentStatus(platform, {
     onEvent: (event) => canvasControl?.onAgentEvent(event)
   })
   // The ⌘M chat view + the find-bar's transcript index. Registered HERE rather than with the rest
@@ -461,6 +462,27 @@ export async function startServer(
   // leg: the Server Edition runs ON the host whose transcripts it reads, so local resolution is
   // the complete answer (an SSH-project node is a desktop-only concept here).
   registerTranscriptIpc({ pathFor: (sessionId) => contextTail.pathFor(sessionId) })
+  // The context meter's mount-time rehydration, registered beside the read channels and for the
+  // same reason: the tails it feeds are the ones created just above. Until this landed the Server
+  // Edition had NO handler for `context:ensure` at all — the browser cast it and nothing received
+  // it, so a browser agent node's meter filled only on its next turn, exactly the desktop bug
+  // issue #813 reported for SSH nodes. No remote leg here (see registerTranscriptIpc above): this
+  // process runs on the host whose transcripts it reads, so the local locators are complete.
+  registerContextEnsureIpc({
+    tailFor: (agentId) => {
+      switch (agentId) {
+        case undefined:
+        case 'claude':
+          return contextTail
+        case 'codex':
+          return codexContextTail
+        case 'gemini':
+          return geminiContextTail
+        default:
+          return undefined
+      }
+    }
+  })
   // Deterministic hook-reply approvals (docs/hook-reply-approvals.md): the browser canvas answers a
   // held Claude permission hook here. The Server Edition runs ON the host, so a local project's
   // answer file is written right there (under os.homedir(), which the hook uses as $HOME). SSH

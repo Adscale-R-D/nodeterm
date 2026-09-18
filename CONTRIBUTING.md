@@ -202,6 +202,15 @@ lane unaffected.
   under them — and remember that clearing a dialog is not always just nulling its state (that one
   also has to release the ref its own busy-guard reads).
 
+- **An error must not name a remedy nobody measured — and the remedy needs its own test.** The
+  `unproven-target-owner` refusal told its caller *"Re-open the target node so its owner is
+  recorded, then try again"*, and re-opening is precisely the attach that records nothing
+  (ownership is recorded only on a genuine fresh spawn), so a caller that obeyed got the identical
+  refusal forever. It shipped because no test read the sentence. When you write a refusal, pin its
+  claim against the MECHANISM it describes — assert the remedy's precondition by calling the
+  function that decides it, so the copy goes red when the behaviour moves — and remember who reads
+  it: telling a language model to do something only a human can do is not advice.
+
 - **Anything path-shaped: Windows is a delivery target.** Most of this was written on
   macOS/Linux, so the recurring defect is code that is genuinely correct on POSIX —
   `split('/')`, `startsWith('/')` as an is-absolute test, a bare `fs.rename`. Use

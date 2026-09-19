@@ -1839,24 +1839,35 @@ export function TerminalNode({
   // markdown-of-output view (computed in the capture effect below) is shown as a fallback.
   const useChat = mdMode && showChat && !!status?.sessionId
   // Feed the context meter without waiting for a live hook event: after an app restart the
-  // continuing tmux session is idle and emits no event, so the main-process tailer is never
-  // re-fed. Re-runs if the sessionId changes (track is idempotent). cwd is a path fallback.
+  // continuing tmux session is idle and emits no event, so the core tailer is never re-fed.
+  // Re-runs if the sessionId changes (track is idempotent). cwd is a path fallback.
   //
-  // CLAUDE ONLY (`claudeTranscript`, not `showUsage`). The handler resolves this sessionId through
-  // claude's `resolveTranscript`, whose cwd fallback answers *the newest claude transcript for that
-  // cwd* — for a codex/gemini node that is a stranger's session, tracked on the CLAUDE tail under
-  // this node's session id, so its meter would show another agent's fill and then flap against the
-  // correct tail. The cost of the gate: a codex/gemini meter fills on the first hook event after
-  // mount instead of instantly. Their tails need no resolver (the hook envelope carries the path),
-  // so nothing else is lost. Per-agent rehydration is a follow-up task — see transcriptGates.ts.
+  // Gated on `showUsage` — the METER's own capability — and NOT on `claudeTranscript`, which still
+  // gates the find bar's transcript index one line below. That is the opposite of the rule this
+  // site used to carry, and the reason is that the thing the rule protected against moved: the
+  // handler no longer resolves every agent through claude's `resolveTranscript` (whose cwd fallback
+  // answers *the newest claude transcript for that cwd*, i.e. a stranger's session for a
+  // codex/gemini id). It now routes on `agentId` to that agent's OWN locator and tail
+  // (`core/context-ensure.ts`), so the gate can finally be the capability the feature actually
+  // needs. Both extra arguments are load-bearing, not diagnostics: `id` is how the handler learns
+  // this session runs on an SSH project's host (no local resolver can see that transcript), and
+  // `agentId` is what picks the resolver. An agent with no rehydration path (grok) is refused
+  // there, not here — one closed switch beside the tails, rather than a second list to keep in
+  // sync. See lib/transcriptGates.ts for the gate that did NOT move.
   useEffect(() => {
     const sid = status?.sessionId
-    if (claudeTranscript && sid)
-      window.nodeTerminal.context.ensure(sid, (data.cwd as string) || undefined, accountForReads)
+    if (showUsage && sid)
+      window.nodeTerminal.context.ensure(
+        sid,
+        (data.cwd as string) || undefined,
+        accountForReads,
+        id,
+        agentId
+      )
     // `accountForReads`, not `data.accountId`: the transcript this meter tails lives under the
     // account the session is RUNNING as, which for a plain terminal is only ever the observed one.
     // It can arrive after mount (the first hook event), hence its place in the deps.
-  }, [claudeTranscript, status?.sessionId, data.cwd, accountForReads])
+  }, [showUsage, status?.sessionId, data.cwd, accountForReads, id, agentId])
   const updateNodeInternals = useUpdateNodeInternals()
 
   const [searchOpen, setSearchOpen] = useState(false)

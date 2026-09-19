@@ -2612,12 +2612,27 @@ export interface ContextApi {
   /** Fires whenever a session's context fill changes. Returns unsubscribe. */
   onUpdate(listener: (usage: ContextWindowUsage) => void): () => void
   /**
-   * Ask main to start (or refresh) tracking a session's transcript so the meter populates
+   * Ask the core to start (or refresh) tracking a session's transcript so the meter populates
    * without waiting for a live hook event — e.g. on node mount after an app restart, when
    * the continuing session is idle. `cwd` is a transcript-path fallback only.
    * `accountId` scopes resolution to a managed Claude account's transcript root (default `~/.claude`).
+   *
+   * `nodeId` and `agentId` are what make this work for anything but a LOCAL CLAUDE node, and both
+   * are load-bearing rather than informational (see `core/context-ensure.ts`):
+   * - `nodeId` is the only way to learn that this session runs on an SSH project's HOST, whose
+   *   transcript no local resolver can see. Without it a remote node's meter stayed blank until
+   *   its next turn, every app restart.
+   * - `agentId` routes the resolve to THAT agent's own locator and tail. Claude's resolver falls
+   *   back to the newest claude transcript for the cwd, so resolving a codex/gemini session through
+   *   it would meter a stranger's conversation. Both omitted ⇒ the legacy local-claude behaviour.
    */
-  ensure(sessionId: string, cwd?: string, accountId?: string): void
+  ensure(
+    sessionId: string,
+    cwd?: string,
+    accountId?: string,
+    nodeId?: string,
+    agentId?: string
+  ): void
 }
 
 /**
@@ -3261,11 +3276,28 @@ export interface DeviceRevokeResult {
 /** Phone-pairing (nodeterm iOS "scan a QR" flow) bridge. */
 export interface PairingApi {
   /** Start the one-shot LAN listener; resolves with the QR payload + an SSH-reachable hint. */
-  start(): Promise<{ payload: string; sshOpen: boolean; relayPlan?: 'ok' | 'dev' | 'off' }>
+  start(): Promise<{
+    payload: string
+    sshOpen: boolean
+    relayPlan?: 'ok' | 'dev' | 'off'
+    /** false = relay-only host (Windows): no SSH key is installed and the QR waits for the relay,
+     *  not sshd (`pairingGate`). Absent from an older main process ⇒ treat as true. */
+    sshKey?: boolean
+    /** Windows only, explanation only: which authorized_keys file sshd reads for this account. */
+    windowsKeyFile?: 'administrators' | 'profile' | 'unknown'
+  }>
   /** Cancel an in-flight pairing (e.g. when the settings section unmounts). */
   stop(): Promise<void>
-  /** Fires once when pairing finishes (ok=true paired, ok=false timeout). Returns unsubscribe. */
-  onDone(cb: (result: { ok: boolean; relay?: 'ok' | 'off' | 'failed' | 'dev' }) => void): () => void
+  /** Fires once when pairing finishes (ok=true paired, ok=false timeout / relay-only mint failure).
+   *  Returns unsubscribe. */
+  onDone(
+    cb: (result: {
+      ok: boolean
+      relay?: 'ok' | 'off' | 'failed' | 'dev'
+      reason?: 'timeout' | 'relay-failed'
+      reached?: boolean
+    }) => void
+  ): () => void
   /** Live re-probe of 127.0.0.1:22, so the "SSH server is off" warning can clear the moment the
    *  user turns it on (polled by the UI only while the warning is showing). */
   probeSsh(): Promise<boolean>

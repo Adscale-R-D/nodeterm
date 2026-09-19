@@ -49,7 +49,12 @@ The repo is split by Electron process boundary and the split is enforced, not ad
 
 **Put new service logic in `src/core` behind `CorePlatform`, not inline in `src/main`.** That is the
 seam the Server Edition boots from; logic left in `src/main` silently does not exist there, and the
-boundary tests cannot tell you a feature is *missing*.
+boundary tests cannot tell you a feature is *missing*. This keeps happening to the same subsystem:
+the ⌘M transcript read and then the context meter's `context:ensure` both shipped desktop-only, and
+in both cases the browser cast the message into the void and the feature just looked empty. If your
+handler needs something only Electron has (an SSH ControlMaster, a native dialog), make that an
+**injected dep** whose absence is a documented degrade — see `registerTranscriptIpc` /
+`registerContextEnsureIpc` — rather than a reason to keep the whole handler in `src/main`.
 
 ## Three surfaces
 
@@ -197,6 +202,15 @@ lane unaffected.
   under them — and remember that clearing a dialog is not always just nulling its state (that one
   also has to release the ref its own busy-guard reads).
 
+- **An error must not name a remedy nobody measured — and the remedy needs its own test.** The
+  `unproven-target-owner` refusal told its caller *"Re-open the target node so its owner is
+  recorded, then try again"*, and re-opening is precisely the attach that records nothing
+  (ownership is recorded only on a genuine fresh spawn), so a caller that obeyed got the identical
+  refusal forever. It shipped because no test read the sentence. When you write a refusal, pin its
+  claim against the MECHANISM it describes — assert the remedy's precondition by calling the
+  function that decides it, so the copy goes red when the behaviour moves — and remember who reads
+  it: telling a language model to do something only a human can do is not advice.
+
 - **Anything path-shaped: Windows is a delivery target.** Most of this was written on
   macOS/Linux, so the recurring defect is code that is genuinely correct on POSIX —
   `split('/')`, `startsWith('/')` as an is-absolute test, a bare `fs.rename`. Use
@@ -226,6 +240,13 @@ lane unaffected.
   prompts and other user-controlled arguments would become shell syntax. `.bat`/`.ps1`, CR/LF/NUL
   arguments and lines above cmd's limit fail explicitly. Keep stdin direct: PowerShell's text
   pipeline changes Unicode and line endings under Windows PowerShell 5.1.
+
+- **The phone reaches a Windows desktop through the relay only.** Everything the iOS app sends over
+  SSH is POSIX sh plus tmux, and Windows OpenSSH hands out `cmd.exe`, so Windows pairing installs no
+  SSH key and requires remote access instead of an SSH server (`src/shared/pairing-gate.ts`). Do not
+  "fix" this by installing the key into `administrators_authorized_keys`. The phone tries SSH before
+  the relay, so a key that works locks it onto a path that cannot work. CLAUDE.md, "Remote access",
+  has the details.
 
 - **Normalize BOTH sides of a path comparison, through one function.** A marker normalized where
   it is built and matched raw where it is used is a no-op on the machine you wrote it on and a

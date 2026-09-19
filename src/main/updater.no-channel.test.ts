@@ -8,7 +8,6 @@
 // Linux .deb still degrades to the manual-download card.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import fs from 'fs'
-import os from 'os'
 import path from 'path'
 import { IPC } from '../shared/ipc'
 
@@ -64,13 +63,21 @@ vi.mock('./notifications', () => ({ retainUntilDismissed: () => {} }))
 
 import { initUpdater } from './updater'
 
-/** Write the packaged package.json `initUpdater` reads its marker out of. */
-function packageWith(marker: string | undefined): void {
-  appMock.appPath = fs.mkdtempSync(path.join(os.tmpdir(), 'nt-updater-'))
-  fs.writeFileSync(
-    path.join(appMock.appPath, 'package.json'),
-    JSON.stringify(marker === undefined ? { name: 'x' } : { name: 'x', nodeTermUpdates: marker })
-  )
+const realReadFileSync = fs.readFileSync
+
+/**
+ * Answer the packaged package.json `initUpdater` reads its marker out of — in memory, because
+ * what is under test is which marker produces which wiring, not fs. `undefined` is a normal
+ * release (no marker); `null` makes the read throw, i.e. an unreadable package.
+ */
+function packageWith(marker: string | null | undefined): void {
+  appMock.appPath = path.join(path.sep, 'fake-app-path')
+  const target = path.join(appMock.appPath, 'package.json')
+  vi.spyOn(fs, 'readFileSync').mockImplementation(((file: unknown, ...rest: unknown[]) => {
+    if (file !== target) return realReadFileSync(file as never, ...(rest as []))
+    if (marker === null) throw new Error('ENOENT: no such file or directory')
+    return JSON.stringify(marker === undefined ? { name: 'x' } : { name: 'x', nodeTermUpdates: marker })
+  }) as typeof fs.readFileSync)
 }
 
 function setPlatform(platform: string): void {
@@ -94,6 +101,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  vi.restoreAllMocks()
   vi.useRealTimers()
   setPlatform(realPlatform)
   if (realAppImage === undefined) delete process.env.APPIMAGE
@@ -195,7 +203,7 @@ describe('the paths that must not move', () => {
 
   it('an unreadable packaged package.json still behaves like a release', () => {
     setPlatform('darwin')
-    appMock.appPath = path.join(os.tmpdir(), 'nt-updater-missing')
+    packageWith(null)
     initUpdater()
     expect(autoUpdater.checkForUpdates).toHaveBeenCalledTimes(1)
   })

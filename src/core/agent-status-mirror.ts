@@ -168,6 +168,18 @@ export interface MirrorSettings {
   autoSupported?: boolean
   /** Managed accounts usable on THIS host; dirs are absolute on that host. */
   claudeAccounts?: { id: string; dir: string }[]
+  /**
+   * Which values THIS host's `codex` accepts for `--ask-for-approval`, read from its own `--help`.
+   * Absent = not probed / not knowable for this host, which means "use `on-request` and `never`
+   * only" — the two values every codex from 0.146.0 to 0.154.0 takes.
+   *
+   * A reader must not emit a value that is not in this list. `untrusted` was removed in codex
+   * 0.149.0 and clap EXITS on an unknown value, so a phone that launches Manual-mode Codex from a
+   * hardcoded table gets a dead pane with the CLI's usage error in it (issue #785). It is a
+   * per-agent, per-host fact for the same reason `autoSupported` is: it answers for *codex* on
+   * *this* host and generalizes to neither another agent nor another machine.
+   */
+  codexApprovalValues?: string[]
 }
 
 export interface MirrorFile {

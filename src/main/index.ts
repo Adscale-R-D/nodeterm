@@ -255,8 +255,10 @@ import { registerSpeechIpc } from '../core/speech/register-ipc'
 import { initClaudeAccounts } from './claude-accounts'
 import { initCodexAccounts } from './codex-accounts'
 import { claudeCliCaps, registerClaudeCliIpc, type ClaudeCliCaps } from '../core/claude-cli'
+import type { CodexCliCaps } from '../shared/types'
 import { registerGrokCliIpc } from '../core/grok-cli'
 import { refreshCodexIdentityCaps, registerCodexIdentityIpc } from '../core/codex-identity-caps'
+import { codexCliCaps, registerCodexCliIpc } from '../core/codex-cli'
 import {
   bindCodexThreadIdentity,
   setCodexThreadIdentityAuthSecret,
@@ -1385,6 +1387,9 @@ app.whenReady().then(async () => {
   // the desktop and not in the browser, with nothing to say which.
   registerGrokCliIpc()
   registerCodexIdentityIpc()
+  // What THIS machine's codex accepts for `--ask-for-approval`. Lazy + memoized inside the probe,
+  // so registering it costs nothing until the first Codex launch line asks.
+  registerCodexCliIpc()
   // Warm the `claude --version` probe now (it spawns a login shell + node, ~sub-second) so the
   // renderer's first `claude.cliCaps()` — awaited on the launch path of a cold-restored agent
   // node — resolves from cache instead of racing the probe into a conservative "no auto".
@@ -2066,11 +2071,25 @@ app.whenReady().then(async () => {
       void flushAgentStatusMirror()
     })
     .catch(() => {})
+  // codex's own probe, on the same re-flush plumbing and for the reason CLAUDE.md gives: a gate fed
+  // by a version probe belongs to the agent it probes. This one publishes the host's
+  // `--ask-for-approval` vocabulary so a phone-launched Codex node cannot send a value this CLI
+  // removed (issue #785).
+  let localCodexCaps: CodexCliCaps | undefined
+  void codexCliCaps()
+    .then((c) => {
+      localCodexCaps = c
+      void flushAgentStatusMirror()
+    })
+    .catch(() => {})
   setMirrorSettingsProvider((): MirrorSettings => {
     const s = settingsStore.get()
     return {
       claudePermissionMode: s.claudePermissionMode,
       autoSupported: localClaudeCaps?.autoPermissionMode === true,
+      ...(localCodexCaps?.approvalValues
+        ? { codexApprovalValues: localCodexCaps.approvalValues }
+        : {}), // unprobed ⇒ absent ⇒ the reader uses the baseline vocabulary
       claudeAccounts: (s.claudeAccounts ?? [])
         .filter((a) => !a.host && !a.pending)
         .map((a) => ({ id: a.id, dir: claudeConfigDirFor(a.id) }))
@@ -2270,6 +2289,11 @@ app.whenReady().then(async () => {
         claudePermissionMode: s.claudePermissionMode,
         // The phone launches claude on the REMOTE host — its CLI is the gate, never the local one.
         autoSupported: sshProjectManager?.remoteAutoPermFor(projectId) === true,
+        // `codexApprovalValues` is deliberately ABSENT from an SSH slice. Same rule one agent over:
+        // the session runs the HOST's codex, there is no remote codex probe yet (claude has one, at
+        // connect), and publishing this machine's vocabulary for another machine's binary is the
+        // cross-host guess the whole gate exists to prevent. Absent ⇒ the baseline vocabulary ⇒
+        // Manual degrades honestly instead of a value the host may have removed.
         ...(home && hostKey
           ? {
               claudeAccounts: (s.claudeAccounts ?? [])

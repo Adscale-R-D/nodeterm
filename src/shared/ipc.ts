@@ -83,6 +83,7 @@ export const IPC = {
   grokTakenSessionIds: 'grok-cli:taken-session-ids',
   /** Can a node on this machine get a managed Codex identity? See core/codex-identity-caps.ts. */
   codexIdentityCaps: 'codex-identity:caps',
+  codexCliCaps: 'codex-cli:caps',
   /** main/server → renderer: a Codex node's identity mode changed ('shared' | 'plain'). The
    *  'plain' events are what make the launcher's fallback visible instead of silent. */
   codexIdentity: 'codex-identity:event',

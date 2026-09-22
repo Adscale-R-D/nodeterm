@@ -268,9 +268,21 @@ jobs:
         with:
           fetch-depth: 0 # full history + tags — notes diff against the previous release tag
 
-      # Release notes from commit subjects since the previous tag (merges + the version-bump
-      # commit filtered out). Written BEFORE the promote below, so the release is complete —
-      # assets AND notes — the moment it becomes "latest" (nodeterm.dev/releases renders these).
+      # Release notes, in two layers (issue #841). Written BEFORE the promote below, so the
+      # release is complete — assets AND notes — the moment it becomes "latest".
+      #
+      #   Layer 1  scripts/release-notes.mjs asks GitHub's own generator for the PR-resolved
+      #            list (PR number, PR title, author) and regroups it into New / Improved /
+      #            Fixed, with test/refactor/chore/ci/build collapsed at the bottom — kept, not
+      #            deleted. Every entry links its PR, and any issue its title names.
+      #   Layer 2  docs/release-notes/<TAG>.md, a hand-written Highlights block reviewed in the
+      #            release PR, placed at the top. ABSENT FILE ⇒ THE GROUPED LIST ALONE. No
+      #            release is ever blocked waiting for prose, and nobody has to be in the loop.
+      #
+      # DEGRADES, NEVER FAILS: if the generator throws for any reason (gh api down, a body
+      # shape we do not parse, a missing node), the step falls back to EXACTLY the plain
+      # `git log` list this release used to publish. A release that cannot publish because
+      # prose generation broke would be strictly worse than the list we are replacing.
       - name: Generate release notes
         env:
           GH_TOKEN: ${{ github.token }}
@@ -278,12 +290,16 @@ jobs:
           tag="${GITHUB_REF_NAME}"
           prev=$(git describe --tags --abbrev=0 "${tag}^" 2>/dev/null || true)
           if [ -n "$prev" ]; then range="${prev}..${tag}"; else range="${tag}"; fi
-          {
-            echo "## Changes${prev:+ since ${prev}}"
-            git log --no-merges --format='- %s' "$range" | grep -vE '^- chore\(release\)' | head -60
-            total=$(git log --no-merges --format='- %s' "$range" | grep -cvE '^- chore\(release\)' || true)
-            if [ "${total:-0}" -gt 60 ]; then echo "- …and $((total - 60)) more commits"; fi
-          } > notes.md
+          if ! node scripts/release-notes.mjs --tag "$tag" --prev "$prev" \
+                 --repo "$GITHUB_REPOSITORY" --out notes.md; then
+            echo "::warning::structured release notes failed; falling back to the plain commit list"
+            {
+              echo "## Changes${prev:+ since ${prev}}"
+              git log --no-merges --format='- %s' "$range" | grep -vE '^- chore\(release\)' | head -60
+              total=$(git log --no-merges --format='- %s' "$range" | grep -cvE '^- chore\(release\)' || true)
+              if [ "${total:-0}" -gt 60 ]; then echo "- …and $((total - 60)) more commits"; fi
+            } > notes.md
+          fi
           gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --notes-file notes.md
 
       - name: Promote release to latest

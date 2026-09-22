@@ -59,6 +59,16 @@ jobs:
       - name: Build bundled tmux (universal, static libevent + utf8proc)
         run: caffeinate -dims node scripts/build-tmux.mjs
 
+      # ELECTRON-BUILDER FLOOR — 26.16.1, and the `^26.16.1` range in package.json is what keeps
+      # it. Up to and including 26.16.0, createKeychain generated a random keychain password but
+      # then handed `security set-key-partition-list` the P12 password instead
+      # (app-builder-lib/out/codeSign/macCodeSign.js: random at :137, wrong one passed at :168).
+      # macOS tolerated the mismatch for years; the runner's upgrade to Darwin 27 stopped
+      # tolerating it, and every signing run died on
+      #   security: SecKeychainUnlock: The user name or passphrase you entered is not correct.
+      # — which reads exactly like a bad CSC_* secret and is not one. 26.16.1 threads the real
+      # keychain password through. Do not drop below it; note npm's `latest` dist-tag still
+      # points at 26.15.3, so `npm i electron-builder@latest` installs the broken one.
       - name: Build, sign & notarize
         run: |
           printf '%s' "$APPLE_API_KEY_B64" | base64 --decode > "$RUNNER_TEMP/notary-key.p8"
@@ -288,7 +298,19 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           tag="${GITHUB_REF_NAME}"
-          prev=$(git describe --tags --abbrev=0 "${tag}^" 2>/dev/null || true)
+          # The range starts at the last release USERS ACTUALLY GOT, not at the last tag. A
+          # platform job can fail — v0.3.8's mac job did, after the signing runner's OS upgrade —
+          # and that tag then stays a prerelease forever: never promoted, its notes never
+          # generated. Diffing the next release against it would publish a changelog containing
+          # only the handful of commits since, silently burying everything the stranded tag was
+          # carrying. /releases/latest excludes prereleases, which is exactly the question being
+          # asked, and this step runs BEFORE the promote below, so it still names the PREVIOUS
+          # release. Falls back to the last tag when there is no published release yet, and when
+          # a rerun on an already-promoted tag would otherwise diff that tag against itself.
+          prev=$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name 2>/dev/null || true)
+          if [ -z "$prev" ] || [ "$prev" = "$tag" ]; then
+            prev=$(git describe --tags --abbrev=0 "${tag}^" 2>/dev/null || true)
+          fi
           if [ -n "$prev" ]; then range="${prev}..${tag}"; else range="${tag}"; fi
           if ! node scripts/release-notes.mjs --tag "$tag" --prev "$prev" \
                  --repo "$GITHUB_REPOSITORY" --out notes.md; then

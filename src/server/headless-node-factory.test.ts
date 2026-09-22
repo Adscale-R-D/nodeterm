@@ -95,6 +95,7 @@ describe('HeadlessNodeFactory', () => {
   let factory: HeadlessNodeFactory
   let ownership: HeadlessNodeOwnership
   let codexSharedIdentity: boolean
+  let codexApprovalValues: { approvalValues: string[] | null }
 
   const settings = (): Settings => ({
     ...DEFAULT_SETTINGS,
@@ -115,6 +116,7 @@ describe('HeadlessNodeFactory', () => {
     removed = []
     publishedProjects = []
     codexSharedIdentity = false
+    codexApprovalValues = { approvalValues: ['on-request', 'never'] }
     ownership = createHeadlessNodeOwnership()
     ownership.record('term-upstream', {
       sourceNodeId: 'term-source',
@@ -159,6 +161,10 @@ describe('HeadlessNodeFactory', () => {
       // `models: []` is grok's own "no catalogue" answer (a failed/absent `grok models`), which is
       // the pre-feature behaviour: no model switching offered, never a partial list.
       grokCaps: async () => ({ sessionIdFlag: false, models: [] }),
+      // Likewise stated. The default is the CURRENT codex vocabulary (0.149.0 dropped `untrusted`),
+      // so the assembled lines below are the ones a Server Edition on a current CLI really sends;
+      // the old vocabulary gets its own case rather than being the silent default.
+      codexCaps: async () => codexApprovalValues,
       codexSharedIdentity: async () => codexSharedIdentity,
       ownership,
       stateOf: (id) => states[id],
@@ -892,7 +898,10 @@ describe('HeadlessNodeFactory', () => {
 
   it.each([
     ['claude', "claude 'do work'"],
-    ['codex', "codex 'do work' --ask-for-approval untrusted"],
+    // Manual is the resolved mode in this fixture, and on a current codex it has NO expressible
+    // value — `untrusted` was removed in 0.149.0 and clap exits on it (issue #785). The honest
+    // line is the bare one; the case below pins the old CLI, which still gets the flag.
+    ['codex', "codex 'do work'"],
     ['gemini', "gemini 'do work'"]
   ] as const)('assembles the %s launch through the shared command builder', async (agent, command) => {
     const reply = await factory.openAgent(
@@ -982,7 +991,26 @@ describe('HeadlessNodeFactory', () => {
     const id = (reply.result as { id: string }).id
     expect(pty.sends.at(-1)).toEqual({
       nodeId: id,
-      text: "nodeterm-codex 'do work' --ask-for-approval untrusted"
+      text: "nodeterm-codex 'do work'"
+    })
+  })
+
+  /**
+   * The Server Edition's Codex sessions run on THIS host's `codex`, so the host's own probe is the
+   * authority for them — not a constant, and not the desktop's. A host still on <= 0.148.0 keeps
+   * "Ask each time" working; the case above shows the same factory dropping it on a host that
+   * cannot express it. Both come out of one probe, which is the whole point of #785's fix.
+   */
+  it('keeps `untrusted` for a host whose codex still advertises it', async () => {
+    codexApprovalValues = { approvalValues: ['untrusted', 'on-request', 'never'] }
+
+    const reply = await factory.openAgent('term-source', { agent: 'codex', prompt: 'do work' }, true)
+
+    expect(reply.ok).toBe(true)
+    const id = (reply.result as { id: string }).id
+    expect(pty.sends.at(-1)).toEqual({
+      nodeId: id,
+      text: "codex 'do work' --ask-for-approval untrusted"
     })
   })
 

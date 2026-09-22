@@ -32,6 +32,8 @@ import {
   type CodexApi,
   type CodexIdentityCaps,
   UNKNOWN_CODEX_IDENTITY_CAPS,
+  type CodexCliCaps,
+  UNKNOWN_CODEX_CLI_CAPS,
   type ContextApi,
   type DownloadTicket,
   type FilesApi,
@@ -868,6 +870,14 @@ export function buildCodexApi(client: RpcClient): CodexApi {
     identityCaps: () =>
       (client.request(IPC.codexIdentityCaps) as Promise<CodexIdentityCaps>).catch(
         () => UNKNOWN_CODEX_IDENTITY_CAPS
+      ),
+    // A REAL handler server-side, unlike `identityCaps` right above it — `registerCodexCliIpc`
+    // runs in that shell for the reason spelled out there: the Server Edition's Codex sessions run
+    // on the server's own `codex`, so the browser needs that binary's real approval vocabulary.
+    // Rejection degrades to the unknown caps, i.e. the baseline vocabulary.
+    cliCaps: () =>
+      (client.request(IPC.codexCliCaps) as Promise<CodexCliCaps>).catch(
+        () => UNKNOWN_CODEX_CLI_CAPS
       ),
     onIdentity: (listener) => client.subscribe(IPC.codexIdentity, listener as Listener)
   }

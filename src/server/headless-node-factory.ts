@@ -26,10 +26,12 @@ import {
 import { assembleLaunchCommand } from '../shared/agents/launch'
 import type { AgentState, NormalizedAgentEvent } from '../shared/agents/normalize'
 import { oneLine } from '../shared/one-line'
+import { UNKNOWN_CODEX_CLI_CAPS } from '../shared/types'
 import type {
   BridgeLink,
   CanvasNodeState,
   ClaudeCliCaps,
+  CodexCliCaps,
   GrokCliCaps,
   Project,
   PtyCreateOptions,
@@ -75,6 +77,14 @@ export interface HeadlessNodeFactoryDeps {
    * be that forgotten probe, waiting for the day grok joins the set.
    */
   grokCaps(): Promise<GrokCliCaps>
+  /**
+   * codex's OWN `--help` probe, and separate from `cliCaps`/`grokCaps` for the same reason they are
+   * separate from each other. It answers which values this host's `codex` accepts for
+   * `--ask-for-approval`: the set changed between releases (`untrusted` was removed in 0.149.0) and
+   * clap EXITS on a value it does not know, so a launch line built from a table rather than from
+   * the binary is a dead session, not a degraded one — issue #785.
+   */
+  codexCaps(): Promise<CodexCliCaps>
   /** Whether this host's Codex launcher + shared app-server identity spine are ready. */
   codexSharedIdentity(): Promise<boolean>
   /** Hook-mirror lookups. A stored agentId wins; these cover a plain terminal running an agent. */
@@ -1100,6 +1110,14 @@ export class HeadlessNodeFactory {
         verb === 'open-agent' && agentId === 'codex'
           ? await this.deps.codexSharedIdentity().catch(() => false)
           : false
+      // Which `--ask-for-approval` values this host's codex has. Asked only where it can matter,
+      // right beside the other codex question. Every failure answers `null` = unknown = the
+      // baseline vocabulary, which is the launch line this factory has always produced for Auto
+      // and Bypass; only `untrusted` (gone since 0.149.0) depends on a real answer.
+      const codexCaps =
+        verb === 'open-agent' && agentId === 'codex'
+          ? await this.deps.codexCaps().catch(() => UNKNOWN_CODEX_CLI_CAPS)
+          : UNKNOWN_CODEX_CLI_CAPS
 
       const count = parseCount(args.count, verb === 'open-terminal' ? TERMINAL_LIMIT : AGENT_LIMIT)
       const created: CanvasNodeState[] = []
@@ -1151,6 +1169,7 @@ export class HeadlessNodeFactory {
               sessionIdFlagSupported,
               launchCmdOverride: settings.agentLaunchCommands?.[agentId as BuiltinAgentId],
               sharedIdentity: codexSharedIdentity,
+              approvalCaps: { codexApprovalValues: codexCaps.approvalValues },
               model: args.model
             },
             this.deps.env ?? process.env

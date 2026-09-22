@@ -86,6 +86,8 @@ import { startSessionMemoryService, sshScopePredicate } from '../core/session-me
 import { createMemoryPressureMonitor } from '../core/memory-pressure'
 import { createPtyPressureMonitor } from '../core/pty-pressure'
 import { claudeCliCaps, type ClaudeCliCaps } from '../core/claude-cli'
+import { codexCliCaps } from '../core/codex-cli'
+import type { CodexCliCaps } from '../shared/types'
 import { claudeConfigDirFor, registerClaudeAccountsSource } from '../core/claude-config-dir'
 import { presenceHub } from '../core/presence/hub'
 import { initCanvasSync } from '../core/canvas-sync'
@@ -434,11 +436,25 @@ export async function startServer(
       void flushAgentStatusMirror()
     })
     .catch(() => {})
+  // Same, for codex — its `--ask-for-approval` vocabulary is its own and it changed between
+  // releases (see MirrorSettings.codexApprovalValues). Registered in BOTH shells: a probe published
+  // on the desktop and missing here would leave a phone paired to a Server Edition host building
+  // Codex launch lines from a table instead of from the binary.
+  let localCodexCaps: CodexCliCaps | undefined
+  void codexCliCaps()
+    .then((c) => {
+      localCodexCaps = c
+      void flushAgentStatusMirror()
+    })
+    .catch(() => {})
   setMirrorSettingsProvider((): MirrorSettings => {
     const s = settingsStore.get()
     return {
       claudePermissionMode: s.claudePermissionMode,
       autoSupported: localClaudeCaps?.autoPermissionMode === true,
+      ...(localCodexCaps?.approvalValues
+        ? { codexApprovalValues: localCodexCaps.approvalValues }
+        : {}), // unprobed ⇒ absent ⇒ the reader uses the baseline vocabulary
       claudeAccounts: (s.claudeAccounts ?? [])
         .filter((a) => !a.host && !a.pending)
         .map((a) => ({ id: a.id, dir: claudeConfigDirFor(a.id) }))

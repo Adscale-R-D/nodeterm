@@ -2939,6 +2939,27 @@ export const UNKNOWN_CLAUDE_CLI_CAPS: ClaudeCliCaps = {
   sessionIdFlag: false
 }
 
+/**
+ * What the LOCAL `codex` binary can do, read from its own `--help` — see `core/codex-cli.ts`.
+ *
+ * Separate from `CodexIdentityCaps` on purpose, because the two have OPPOSITE Server Edition
+ * answers: shared identity is declined there deliberately (a constant `false`), while the
+ * approval vocabulary must be probed for real — the server's own machine is the one that runs its
+ * Codex sessions. Folding them into one bag would have made the honest answer to one question the
+ * silent absence of the other.
+ */
+export interface CodexCliCaps {
+  /** The values this `codex` advertises for `--ask-for-approval`. `null` = not probed, no codex on
+   *  PATH, or a help page we could not read — all of which mean "use the baseline vocabulary", not
+   *  "this CLI accepts nothing". Measured: 0.146.0–0.148.0 list `untrusted, on-request, never`;
+   *  0.149.0+ list `on-request, never`. */
+  approvalValues: string[] | null
+}
+
+/** The answer before the probe has run, and for any surface that cannot speak for the CLI that will
+ *  actually run the session (a relay tab, an SSH host). */
+export const UNKNOWN_CODEX_CLI_CAPS: CodexCliCaps = { approvalValues: null }
+
 /** Whether a Codex node launched on this machine right now would get a managed shared identity.
  *  Fed by core/codex-identity-caps.ts; the unknown answer is `false`, i.e. plain `codex`. */
 export interface CodexIdentityCaps {
@@ -2980,6 +3001,9 @@ export interface CodexApi {
   /** Would a Codex node launched right now get a managed shared identity on this machine?
    *  Never rejects — the unknown answer is `{ shared: false }`, i.e. plain `codex`. */
   identityCaps(): Promise<CodexIdentityCaps>
+  /** What the local Codex CLI accepts, so a launch line only carries flag values this binary
+   *  actually has. Never rejects — the unknown answer is `UNKNOWN_CODEX_CLI_CAPS`. */
+  cliCaps(): Promise<CodexCliCaps>
   /** Fires when a Codex node's launcher reports its identity mode. `plain` is the fallback, and
    *  this event is what stops that fallback being silent. Returns unsubscribe. */
   onIdentity(listener: (e: CodexIdentityEvent) => void): () => void

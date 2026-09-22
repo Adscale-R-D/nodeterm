@@ -523,6 +523,7 @@ const api: NodeTerminalApi = {
   },
   codex: {
     identityCaps: () => ipcRenderer.invoke(IPC.codexIdentityCaps),
+    cliCaps: () => ipcRenderer.invoke(IPC.codexCliCaps),
     onIdentity: (listener) => {
       const handler = (_e: unknown, payload: Parameters<typeof listener>[0]) => listener(payload)
       ipcRenderer.on(IPC.codexIdentity, handler)

@@ -1660,7 +1660,8 @@ else, and its context links must keep classifying across restarts).
   `src/shared/agents/approval-mode.ts`** (`approvalFlags` / `modeSupported`), which is also where
   `withPermissionMode` now lives — it moved one layer up out of `config.ts` to break a cycle.
   gemini = `--approval-mode default|auto_edit|yolo|plan`, codex = `--ask-for-approval
-  untrusted|on-request|never`. Two rules the mapping exists to enforce: a mode the CLI **cannot
+  on-request|never` (and `untrusted` too, but only on a codex that still has it — see the next
+  paragraph). Two rules the mapping exists to enforce: a mode the CLI **cannot
   express emits NO flag**, never a substituted nearest match (codex has no `plan` and no
   edit-specific mode; **gemini has no `auto`** — nothing in its vocabulary means "approve most things
   but not edits", and since `auto` is the DEFAULT mode, mapping it to `auto_edit` would have switched
@@ -1671,10 +1672,40 @@ else, and its context links must keep classifying across restarts).
   ask" under an "Ask each time" label. **codex is the first agent where `manual` emits a flag.** The
   UI copy is DERIVED from the mapping (`permissionModeAgentIds` / `permissionModeAgentsLabel` /
   `unsupportedModesNote` / `bypassSandboxCaveat`) so a sentence cannot drift from what the table
-  does — so the note now reads "Auto has no Gemini equivalent…" beside codex's two gaps, and the
+  does — so the note now reads "Auto has no Gemini equivalent…" beside codex's gaps, and the
   residual wart is only that `auto` and `manual` land on the same gemini policy (the *prompting* one).
   `--sandbox` is a separate axis and deliberately untouched (`--ask-for-approval never`
   still sandboxes).
+  **AN AGENT'S VOCABULARY IS NOT A CONSTANT — codex's moved, and the table is gated on a probe of
+  the binary in front of us (#785).** Measured release by release on the published linux-x64
+  binaries: 0.146.0 / 0.147.0 / 0.148.0 advertise `untrusted, on-request, never`; **0.149.0**
+  through 0.154.0 advertise `on-request, never`. clap does not ignore a value it does not know, it
+  prints `error: invalid value 'untrusted'` and **exits**, so a Manual-mode Codex node launched from
+  the pinned table died at the prompt and left the pane at a bare shell. The gate is codex's OWN and
+  sits beside claude's, never inside it (a gate fed by `claude --version` belongs to claude):
+  **`core/codex-cli.ts`** reads `codex --help` once per app run — FEATURE-detected, not
+  version-compared, because a floor guesses about builds that are not on npm — parses the option's
+  own slice with `codexApprovalValuesFrom` (the neighbouring `-s, --sandbox` carries its own
+  `[possible values: …]` two lines up, and a page-wide scan emits `--ask-for-approval read-only`),
+  and publishes `CodexCliCaps` over `codex.cliCaps()`, registered by **both** shells. Every emitter
+  threads it as `ApprovalCaps` — `approvalFlags` / `modeSupported` / `withPermissionMode` /
+  `unsupportedModesNote` all take an optional trailing `caps`, and the **omitted** form resolves to
+  the BASELINE `['on-request','never']`, the two values every measured codex accepts. That default
+  is the design: a call site that forgets to thread its probe result loses a mode, never a launch.
+  On 0.149.0+ `modeSupported('codex','manual')` is **false** and the derived note says so —
+  measured before concluding it: `-a unless-trusted` is refused, `-c approval_policy=untrusted`
+  fails config load, and `--approve-for-me` routes approvals through *automatic* review. **Remote is
+  unknown, never guessed**: an SSH node runs the HOST's codex and there is no remote codex probe yet
+  (claude has one, at connect), so `codexApprovalCaps(ssh)` and the mirror's SSH slice publish
+  nothing and fall to the baseline. Same for a relay tab (the guest's machine) — its stub answers
+  unknown on purpose. Three surfaces: **Desktop** and **Server Edition** both probe their own
+  machine (the server's `registerCodexCliIpc` is REAL, unlike its deliberately-false
+  `registerCodexIdentityIpc`); **Mobile** gets the vocabulary as `MirrorSettings.codexApprovalValues`
+  — the desktop/server now publish it, the iOS reader is the follow-up. The app-server **usage
+  tier** (`usage/codex-usage.ts`) carried the same dead `-a untrusted` and silently returned null on
+  every current CLI; it is now `-a never` with **no probe**, because `never` is in both vocabularies
+  (measured against 0.148.0 / 0.151.0 / 0.154.0) and `-s read-only` is what actually guards the
+  user's files.
   `settings.claudePermissionMode` (global, default **`auto`** — a behavior change for existing
   users, who previously got a prompt per action) is overridden per project by
   `project.defaultPermissionMode` (persisted to `.nodeterm/project.json`, so a `bypassPermissions`

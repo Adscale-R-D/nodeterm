@@ -28,6 +28,7 @@ import { mintFreeGrokSessionId } from '@shared/agents/grok-session-mint'
 import { projectLaunchInfoNow } from './projectLaunchInfo'
 import { isAgentEnabled, launchableDefaultAgent } from './agentAvailability'
 import { codexSharedIdentity } from './codexIdentity'
+import { codexApprovalCaps } from './codexCli'
 import { folderTitle } from '../lib/explorerCreate'
 import { sshHostKey } from '@shared/ssh'
 import { normalizeNodeIcon } from '@shared/node-icon'
@@ -708,6 +709,10 @@ export function createAgentNode(
       // machine actually has one — otherwise the bare CLI, byte-identical to before. `codexSharedIdentity`
       // folds in the SSH answer (a host has no launcher installed yet, so a remote node stays bare).
       sharedIdentity: codexSharedIdentity(ssh),
+      // Which `--ask-for-approval` values this node's codex actually has. Same `ssh` truthiness as
+      // the line above, and for a related reason: a remote session runs the HOST's codex, so the
+      // local probe must not speak for it (it falls back to the baseline vocabulary instead).
+      approvalCaps: codexApprovalCaps(ssh),
       // A model picked at creation (e.g. Transfer-to-agent-with-model). `withAgentModel` appends
       // `--model <value>` for a switch-capable agent and no-ops otherwise, so the line stays
       // byte-identical when no model is chosen.

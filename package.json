@@ -183,7 +183,7 @@
     "@xterm/xterm": "^5.5.0",
     "@xyflow/react": "^12.11.6",
     "electron": "^42.11.3",
-    "electron-builder": "^26.15.3",
+    "electron-builder": "^26.16.1",
     "electron-vite": "^5.0.0",
     "esbuild": "^0.28.2",
     "jsdom": "^30.0.1",

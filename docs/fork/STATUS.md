@@ -31,7 +31,23 @@ Upstream rebuilt Server-Edition canvas control, and it replaced our implementati
   a headless host.
 - **Now (upstream's):** `src/server/headless-node-factory.ts` creates and mutates nodes **directly
   against the WorkspaceStore** and publishes through `canvas-sync`, so attached tabs converge.
-  **No browser tab is required.** Strictly better here.
+  **No browser tab is required.**
+
+**It is tab-free but NARROWER, and that trade is the headline.** Our retired bridge served all 25
+verbs whenever a tab happened to be attached; the headless runtime serves **13**, always. Measured
+on this host, not read off a doc:
+
+| Served headless (Server Edition v1) | Refused headless (`control-unsupported-on-this-edition`) |
+|---|---|
+| `open-project` `open-terminal` `open-agent` `close` `link` `group` `rename` `color` `send` `reply` `notify` `sticky` `settings` | `list` `board` `assign` `verify` `spawn-team` `arrange` `align` `move` `ungroup` `open-claude` `open-worktree` `close-worktree` `branch` `write` `show-*` `open-browser` `browser` |
+
+Consequences an orchestrator must plan around:
+- **`open-claude` is gone — use `open-agent --agent claude`** (v1 takes `claude|codex|gemini`).
+- **No `list` and no `board`.** An agent cannot read the canvas or the kanban board here at all, so
+  it cannot discover node ids it did not create. It knows only what its own calls returned.
+- **No `verify` and no `spawn-team`.** A review panel or a team has to be assembled by hand from
+  `open-agent` + `link` + `group`, and there is no `arrange`/`align` to tidy it.
+- SSH: v1 creates **local sessions only** (`project-target-ssh-unsupported`).
 
 ### It is behind a flag, default OFF
 
@@ -45,8 +61,10 @@ runs as — `open-terminal --cmd <command>` is executed in a PTY this process sp
 user's environment, files and credentials."* Hook auth, verified node identity and per-project
 capability gates still decide **which** agent may ask, not **what** may be asked for.
 
-If the verbs suddenly refuse with `control-unsupported-on-this-edition`, the flag is the first
-thing to check — that is exactly what OFF looks like.
+If **every** verb refuses with `control-unsupported-on-this-edition`, check the flag — that is what
+OFF looks like. If only SOME refuse with that name, it is the v1 verb set above, and no flag will
+change it. The boot log distinguishes them: with the flag on, the server prints a one-line banner
+naming the surface it grants.
 
 ### The headless ownership rule — new, and it will surprise you
 
@@ -68,7 +86,8 @@ Still true from before: the session must be **nodeterm-spawned** (`NODETERM_CANV
 env). A Claude started from a plain SSH shell sees the skill but the CLI refuses — deliberate, so
 the CLI stays inert in ordinary terminals.
 
-**New/changed verb surface worth knowing:**
+**New/changed verb surface worth knowing.** Everything below is upstream's CLI contract; on this
+host only the 13 verbs in §2 reach it, so treat the rest as desktop-only until v2:
 
 - **`close --node <id,id>`** takes a **comma list**, confirmed in ONE dialog. Close a finished wave
   in a single call — one call per node asked the user once per node and refused every call after

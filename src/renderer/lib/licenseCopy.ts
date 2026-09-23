@@ -1,4 +1,5 @@
-import type { LicenseDetail } from '@shared/types'
+import type { LicenseDetail, LicenseStatus } from '@shared/types'
+import { machineNoun, thisMachine, thisMachineCap } from './machineName'
 
 /**
  * Settings → License wording, derived from the data in ONE place so a sentence cannot promise
@@ -54,12 +55,12 @@ export function licenseSentence(detail: LicenseDetail | null): string {
     if (detail.error === 'inactive') {
       // A server ANSWER, not a failure to look. Pro is verified locally so it still works right
       // now, and saying "unaffected" would promise it keeps working — which it will not.
-      return 'This license is not active, so there is no key or device count to show — and Pro on this Mac will stop when its current entitlement expires.'
+      return `This license is not active, so there is no key or device count to show — and Pro on ${thisMachine()} will stop when its current entitlement expires.`
     }
     if (detail.error === 'unauthorized') {
-      // Also an answer: the server refused this Mac's entitlement. It may recover on the next
+      // Also an answer: the server refused this machine's entitlement. It may recover on the next
       // refresh, hence "may" — but it is not the "nothing changed" story the codes below tell.
-      return 'This Mac is not authorized on this license, so the key and device count are unavailable — and Pro here may stop when its current entitlement expires.'
+      return `${thisMachineCap()} is not authorized on this license, so the key and device count are unavailable — and Pro here may stop when its current entitlement expires.`
     }
     if (detail.error === 'offline' || detail.error === 'network' || detail.error === 'disabled') {
       // Deliberately not "could not reach the server": `disabled` is a build that never asked.
@@ -75,7 +76,9 @@ export function licenseSentence(detail: LicenseDetail | null): string {
   if (detail.source === 'apple') {
     // No keygen call was made for this license, so `used`/`seats` are zeros meaning "not
     // applicable". Printing them would read as a cap that is somehow both empty and full.
-    return 'Pro on this Mac comes from the App Store subscription on your paired phone, so there is no license key or device count to show here.'
+    // Say where the term actually lives. We can neither renew, extend nor cancel an App Store
+    // subscription, and a user who wants to know when it renews has only one place to look.
+    return `Pro on ${thisMachine()} comes from the App Store subscription on your paired phone, so there is no license key or device count to show here. That subscription is managed by Apple, not by nodeterm: to see when it renews or to cancel it, open the App Store on that phone and go to Subscriptions in your account.`
   }
   if (detail.source === 'free') {
     // A defensive value. Say only what is certain — where it came from is not.
@@ -94,12 +97,33 @@ export function licenseSentence(detail: LicenseDetail | null): string {
     if (detail.used === detail.seats) {
       return `All ${detail.seats} devices are in use. Release the others below to free them up.`
     }
-    return `${detail.used} of ${detail.seats} devices in use — this Mac and each paired phone counts as a device.`
+    return `${detail.used} of ${detail.seats} devices in use — ${thisMachine()} and each paired phone counts as a device.`
   }
 
   // A clean read that stated no source (only reachable by merging a release reply over an empty
   // detail). The counts may be real, but with no source there is no sentence they support.
   return ''
+}
+
+/**
+ * The one-line Pro status at the top of Settings → License.
+ *
+ * It prints a date ONLY from `termEndsAt` — the subscription term the server stated — and never from
+ * `expiresAt`. That field is the entitlement token's expiry: a 7-day offline grace window re-minted
+ * every 6 h. Rendered as "active until", it told a customer on a yearly App Store subscription that
+ * Pro ended a week later (issue #800). No other date may stand in for a missing term: not the token's,
+ * not one computed from the tier, not the grace window under another label.
+ *
+ * No term ⇒ no date. That covers null (a lifetime entitlement, a license without an expiry, a server
+ * that predates the field) and a term already in the past (a stored term from before an offline
+ * stretch; the renewal it missed is real, the date it would print is not).
+ */
+export function proStatusLine(status: LicenseStatus, now: number = Date.now()): string {
+  const term = status.termEndsAt
+  if (typeof term !== 'number' || !Number.isFinite(term) || term <= 0 || term * 1000 <= now) {
+    return 'Pro — active.'
+  }
+  return `Pro — active. Current term runs through ${new Date(term * 1000).toLocaleDateString()}.`
 }
 
 /**
@@ -128,7 +152,7 @@ export function canUseKeyElsewhere(detail: LicenseDetail | null): boolean {
 
 /**
  * Is this reason code a REFUSAL of the release (about the license), rather than a failure of the
- * call (about the network / this Mac's standing)?
+ * call (about the network / this machine's standing)?
  *
  * The store asks this to decide what may be merged onto `detail`, and the panel's release note is
  * the complement of it. One definition, because two copies of "which codes are refusals" is
@@ -154,7 +178,7 @@ export function isReleaseRefusal(code: string | null | undefined): boolean {
 export function releaseFailureSentence(code: string | null | undefined): string {
   if (!code || isReleaseRefusal(code)) return ''
   if (code === 'unauthorized') {
-    return 'Could not release the other devices — this Mac is not authorized on this license. Nothing was released.'
+    return `Could not release the other devices — ${thisMachine()} is not authorized on this license. Nothing was released.`
   }
   if (code === 'inactive') {
     return 'Could not release the other devices — this license is not active. Nothing was released.'
@@ -179,7 +203,7 @@ export function activationErrorSentence(code: string | null | undefined): string
   if (code === 'seat_limit') {
     // The one code this feature was built around. The remedy lives on a machine that HAS Pro —
     // this one does not, so "release devices here" would be advice the user cannot follow.
-    return 'This license already has all its devices in use. On a Mac (or phone) where Pro is active, open Settings → License and choose “Release other devices”, then activate here again.'
+    return `This license already has all its devices in use. On a ${machineNoun()} (or phone) where Pro is active, open Settings → License and choose “Release other devices”, then activate here again.`
   }
   if (code === 'suspended') {
     return 'This license has been suspended, so it cannot be activated. Get in touch and we will sort it out.'

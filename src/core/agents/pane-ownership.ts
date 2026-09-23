@@ -34,11 +34,8 @@
  * This is scoped to tmux-pane messaging ownership but is intentionally feature-neutral: S8 PR 4's
  * BrowserControlLedger and messaging PR 7's deliver-on-idle queue want the same "who really spawned
  * this node" answer and can consume `paneOwnerProject` directly. It lives in `src/core` (no
- * electron, no main import) so it ships on both shells — and as of 2026-08-17 BOTH shells read it:
- * agent messaging moved to core (`agent-messaging-boot.ts`) and the Server Edition now delivers
- * `send`/`reply`/`notify` under this same ownership gate. Being here already is why that move was a
- * wiring change rather than a security rewrite; the sentence above was written in anticipation and
- * turned out to be the load-bearing decision.
+ * electron, no main import) so it ships on both shells; the opt-in Server Edition control runtime
+ * now records and reads it through the same PtyManager and messaging service as desktop.
  */
 
 /** nodeId → owning projectId (machine-local entry id), for panes freshly spawned THIS run. */

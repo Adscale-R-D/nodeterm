@@ -31,7 +31,7 @@ import {
   OPEN_PROJECT_LOCAL_ONLY,
   OPEN_PROJECT_CALLER_UNRESOLVED,
   OPEN_PROJECT_GRANT_CAP
-} from './project-grants'
+} from '../core/project-grants'
 
 beforeEach(() => clearAll())
 
@@ -72,7 +72,7 @@ describe('the grant ledger is session-scoped (P3)', () => {
   it('the module is pure: no fs, no electron, no persistence path to write through', () => {
     // Structural, in the no-electron.test.ts style: the P3 claim "never persisted" is a property
     // of the SOURCE — an in-memory Map with no import that could reach a disk or the shell.
-    const src = fs.readFileSync(path.join(__dirname, 'project-grants.ts'), 'utf8')
+    const src = fs.readFileSync(path.join(__dirname, '../core/project-grants.ts'), 'utf8')
     expect(src).not.toMatch(/from ['"]electron(\/[^'"]*)?['"]|require\(['"]electron/)
     expect(src).not.toMatch(/from ['"](node:)?fs['"]|require\(['"](node:)?fs['"]\)/)
     expect(src).not.toMatch(/from ['"](node:)?child_process['"]/)
@@ -374,13 +374,10 @@ describe('main wiring (structural) — the wrapper records, consumes and clears 
 
   it('consumes the ledger per-CALLER and gates before forwarding to the renderer', () => {
     // The gate reads isGranted(nodeId, …) — the verified caller of THIS request — never a global
-    // or target-derived key, and it runs inside the wrapper BEFORE the request is forwarded to the
-    // renderer. The forward is `forwardControlToCanvas` (core/agents/canvas-control-bridge.ts): the
-    // two async hops moved into core so both shells forward identically, and this pin moved with
-    // them. The RULE is unchanged and is what matters here — gate first, forward second.
+    // or target-derived key, and it runs inside the wrapper before webContents.send.
     expect(src).toMatch(/granted: projectGrantedTo\(nodeId, args\.project\)/)
     const gateAt = src.indexOf('gateProjectTarget({')
-    const forwardAt = src.indexOf('forwardControlToCanvas(', gateAt)
+    const forwardAt = src.indexOf('target.webContents.send(IPC.agentControl', gateAt)
     expect(gateAt).toBeGreaterThan(-1)
     expect(forwardAt).toBeGreaterThan(gateAt)
     // The target's SSH/existence meta comes from main's own store, never the request.

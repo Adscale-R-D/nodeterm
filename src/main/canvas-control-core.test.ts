@@ -7,18 +7,36 @@ import {
   buildCanvasSkillBody,
   CONTROL_SHIM_SCRIPT,
   CONTROL_UNREACHABLE_MSG
-} from '../core/agents/canvas-control-core'
+} from '../core/canvas-control-core'
 import {
   CODEX_SANDBOX_BLOCKED_LINE,
   CODEX_SANDBOX_RETRY_LINE
 } from '../core/agents/hook-sandbox-hint-sh'
 import { RETRYABLE } from '../core/agents/agent-message-decide'
-import { PROJECT_TARGETABLE_VERBS } from './project-grants'
+import { PROJECT_TARGETABLE_VERBS } from '../core/project-grants'
 import { DRY_RUN_VERBS } from '../shared/control-verbs'
+import {
+  SETTINGS_VERB_FORBIDDEN,
+  SETTINGS_VERB_KEYS,
+  SETTINGS_VERB_KEY_LIST,
+  readSettingsValue
+} from '../shared/settings-verb'
+import { decideControlConfirm, isWaivableVerb } from '../shared/control-confirm'
+import { DEFAULT_SETTINGS } from '../shared/types'
+import { serverSettingsControl } from '../server/settings-control'
+import {
+  REPORT_CAP_PER_DAY,
+  REPORT_CAP_PER_RUN,
+  REPORT_LABEL
+} from '../core/github/report-issue-core'
 import { STRICT_CONTROL_VERBS } from '../core/agents/node-identity-policy'
 import { BROWSER_ACTION_KEYS } from '../core/browser-verb'
 import { BROWSER_RETRYABLE, BROWSER_OUTCOME_LABEL } from '../core/browser-outcomes'
 import { BROWSER_CAPABILITY_OFF_MESSAGE } from './browser-drive'
+import {
+  offScreenDisposition,
+  controlVerbSetsForTests
+} from '../shared/control-off-screen'
 
 describe('parseControlRequest', () => {
   it('accepts known verbs', () => {
@@ -161,6 +179,20 @@ describe('parseControlRequest', () => {
     expect(isDestructiveVerb('rename')).toBe(false)
   })
 
+  it('color requires --node and --color, and is metadata-only', () => {
+    expect(parseControlRequest('color', {})).toEqual({
+      error: 'color requires --node <id,id>'
+    })
+    expect(parseControlRequest('color', { node: 'n1,n2' })).toEqual({
+      error: 'color requires --color'
+    })
+    expect(parseControlRequest('color', { node: 'n1,n2', color: '#32d74b' })).toEqual({
+      verb: 'color',
+      args: { node: 'n1,n2', color: '#32d74b' }
+    })
+    expect(isDestructiveVerb('color')).toBe(false)
+  })
+
   it('ungroup requires --group; move requires --nodes; neither is destructive', () => {
     expect(parseControlRequest('ungroup', {})).toEqual({ error: 'ungroup requires --group <id>' })
     expect(parseControlRequest('ungroup', { group: 'g1' })).toEqual({ verb: 'ungroup', args: { group: 'g1' } })
@@ -208,9 +240,14 @@ describe('parseControlRequest', () => {
 
   it('instructions cover the verb set and the confirm caveat', () => {
     const body = buildCanvasControlInstructions('/tmp/nodeterm.sh')
-    for (const verb of ['list', 'open-agent', 'spawn-team', 'group', 'ungroup', 'move', 'arrange', 'rename', 'write', 'close', 'board', 'assign']) {
+    for (const verb of ['list', 'open-agent', 'spawn-team', 'group', 'ungroup', 'move', 'arrange', 'rename', 'color', 'write', 'close', 'board', 'assign']) {
       expect(body).toContain(verb)
     }
+    expect(body).toContain('group --nodes <id,id> [--label L] [--color C]')
+    expect(body).toContain('color --node <id,id> --color C')
+    const skill = buildCanvasSkillBody('/tmp/nodeterm.sh')
+    expect(skill).toContain('group --nodes <id,id> [--label "Frontend Team"] [--color C]')
+    expect(skill).toContain('color --node <id,id> --color C')
     expect(body.toLowerCase()).toContain('confirm')
   })
 
@@ -263,10 +300,10 @@ describe('parseControlRequest', () => {
     expect(parseControlRequest('reply', { node: 'n1' })).toEqual({ error: 'reply requires --text' })
   })
 
-  it('the shim maps a bare positional onto arg.node for send/reply/sticky too', () => {
+  it('the shim maps a bare positional onto arg.node for color/send/reply/sticky too', () => {
     // The positional list is a case pattern inside CONTROL_SHIM_SCRIPT; send/reply/sticky take the
-    // same "first bare word is the node" convenience write/close/rename/branch already have.
-    expect(CONTROL_SHIM_SCRIPT).toContain('write|close|rename|branch|send|reply|sticky)')
+    // same "first bare word is the node" convenience write/close/rename/color/branch already have.
+    expect(CONTROL_SHIM_SCRIPT).toContain('write|close|rename|color|branch|send|reply|sticky)')
   })
 
   it('sticky requires --node plus exactly one of --text/--append, and is not destructive', () => {
@@ -386,6 +423,18 @@ describe('parseControlRequest', () => {
     }
   })
 
+  it('both agent-facing texts say an ERRORED station does not release its dependents (#521)', () => {
+    for (const body of [buildCanvasSkillBody('/x/shim.sh'), buildCanvasControlInstructions('/tmp/nodeterm.sh')]) {
+      // The contract changed under `--after`: "gone idle" no longer releases a dependent, because
+      // a station whose turn died on an API error reaches idle IMMEDIATELY. A text still promising
+      // the old rule tells an orchestrator its chain launched on something that produced nothing.
+      expect(body.toLowerCase()).toContain('successfully')
+      expect(body).toContain('LAST TURN ERRORED')
+      // And a way out, or the orchestrator is told it is stuck without being told what to do.
+      expect(body.toLowerCase()).toMatch(/nudge|retry/)
+    }
+  })
+
   it('both agent-facing texts document the sticky verb', () => {
     for (const body of [buildCanvasSkillBody('/x/shim.sh'), buildCanvasControlInstructions('/tmp/nodeterm.sh')]) {
       expect(body).toContain('`sticky --node')
@@ -425,6 +474,42 @@ describe('parseControlRequest', () => {
       expect(body.toLowerCase()).toContain('queued')
       expect(body).not.toMatch(/busy target answers `targetBusy` instead/i)
       expect(body).not.toMatch(/delivered only\s+when the target is verifiably\s+idle/i)
+    }
+  })
+
+  it('both agent-facing texts say `close` takes a COMMA LIST, confirmed in ONE dialog', () => {
+    for (const body of [buildCanvasSkillBody('/x/shim.sh'), buildCanvasControlInstructions('/tmp/nodeterm.sh')]) {
+      // The grammar exists on both surfaces now (the desktop used to read the whole flag as one
+      // id), and an orchestrator that does not know it closes a finished wave one call at a time —
+      // which is one dialog per node, with every call after the first refused while a dialog is
+      // open. That was the reported pain; the text is what makes the fix reachable.
+      expect(body).toContain('close --node <id,id>')
+      expect(body.toUpperCase()).toContain('COMMA LIST')
+      expect(body.toUpperCase()).toContain('ONE dialog'.toUpperCase())
+      // …and that a bad id refuses the WHOLE list, so a caller does not have to guess which of its
+      // fourteen nodes survived.
+      expect(body).toMatch(/refuses the whole request/i)
+    }
+  })
+
+  it('the skill tells an agent NOT to retry a denial in the hope the dialog is off', () => {
+    // A user may waive a verb's dialog (for the session, or permanently). The verb then just
+    // applies, and the caller cannot tell which happened — so the one behaviour to rule out
+    // explicitly is re-sending a `denied by user` request to see whether it lands this time.
+    const body = buildCanvasSkillBody('/x/shim.sh')
+    expect(body).toMatch(/never re-send a `denied by user` request/i)
+    // And "a confirmation is already pending" must not read as an invitation to spin.
+    expect(body).toContain('a confirmation is already pending')
+    expect(body).toMatch(/do not spin/i)
+  })
+
+  it('both agent-facing texts state the Server creator-ownership and inert-boot contract', () => {
+    for (const body of [buildCanvasSkillBody('/x/shim.sh'), buildCanvasControlInstructions('/tmp/nodeterm.sh')]) {
+      expect(body).toContain('ownership is fail-closed')
+      expect(body).toContain('verified node identity')
+      expect(body).toContain('current server run')
+      expect(body).toMatch(/never[\s\S]*auto-adopted[\s\S]*relaunched[\s\S]*controlled at boot/)
+      expect(body).toContain('before any partial mutation')
     }
   })
 
@@ -477,6 +562,122 @@ describe('parseControlRequest', () => {
       // Server Edition has no browser control.
       expect(lower).toContain('server edition')
     }
+  })
+
+  it('both bodies teach WHEN to file a report, with the caps rendered from the real constants', () => {
+    for (const body of [buildCanvasSkillBody('/x/shim.sh'), buildCanvasControlInstructions('/tmp/nodeterm.sh')]) {
+      expect(body).toContain('`report-issue --kind <code> --title <one line> --body <text> [--dry-run]`')
+      // The caps are RENDERED, so tuning either constant without moving the prose reddens here —
+      // an agent that believes a stale limit retries into a refusal it was told would not happen.
+      expect(body).toContain(`${REPORT_CAP_PER_RUN} reports per nodeterm run`)
+      expect(body).toContain(`${REPORT_CAP_PER_DAY} per day`)
+      expect(body).toContain(`\`${REPORT_LABEL}\``)
+      // The load-bearing half is WHEN, not the flags: the three non-cases must be named, or an
+      // agent files its own mistakes into a public tracker.
+      expect(body).toMatch(/DO NOT FILE for your own mistakes/)
+      expect(body).toMatch(/for a failing\s+test/)
+      expect(body).toMatch(/FILE WHEN the thing you could not do is a gap in the product/)
+      // Duplicate suppression is automatic; telling an agent to check first would have it burn a
+      // turn searching and then file anyway when the search came back empty.
+      expect(body).toMatch(/Do not check first and do not search for duplicates/)
+      expect(body).toMatch(/Keep `--kind` STABLE/)
+      // Default-off, and the refusal names are the agent's whole vocabulary for giving up.
+      expect(body).toMatch(/Off by\s+default/)
+      for (const refusal of ['report-disabled', 'report-no-repo', 'report-scope-missing', 'report-cap-run', 'report-cap-day']) {
+        expect(body, `refusal ${refusal} documented`).toContain(`\`${refusal}\``)
+      }
+      // The no-repo refusal must not read as an invitation to find another repository.
+      expect(body).toMatch(/do NOT file it somewhere\s+else/)
+      expect(body).toMatch(/Server Edition refuses this verb by name/)
+    }
+  })
+
+  it('both bodies document `settings` from the REAL allowlist and state that every change asks', () => {
+    for (const body of [buildCanvasSkillBody('/x/shim.sh'), buildCanvasControlInstructions('/tmp/nodeterm.sh')]) {
+      // Walked off the table, so a key added to or dropped from the allowlist reddens here unless
+      // the text moves with it.
+      for (const key of SETTINGS_VERB_KEY_LIST) {
+        expect(body, `settings key ${key} documented`).toContain(`\`${key}\` (${SETTINGS_VERB_KEYS[key].scope}`)
+      }
+      expect(body).toContain('`settings --set <key> --value <value> [--project <id>]`')
+      expect(body).toMatch(/user ALWAYS\s+confirms, every time/)
+      expect(body).toMatch(/no "don't ask again" covers this verb/)
+      expect(body).toMatch(/`denied by user` is FINAL/)
+      // The keys a human decides are named as unreachable, not merely "not listed".
+      expect(body).toMatch(/permission modes, accounts and credentials, node identity, browser\s+control, telemetry, keybindings, confirm waivers/)
+      expect(body).toMatch(/Server Edition reads settings but refuses every `--set`/)
+      // The messaging line now names the way to ask for the switch, instead of implying there is none.
+      expect(body).toContain('`--set agentMessaging --value true`')
+    }
+  })
+
+  it('the settings text\'s claims are true of the MECHANISM, not only present in the prose', () => {
+    // "no don't ask again covers this verb" — ask the waiver table, with every waiver shape set.
+    expect(isWaivableVerb('settings')).toBe(false)
+    expect(
+      decideControlConfirm({
+        verb: 'settings',
+        sessionWaived: new Set(['settings']),
+        persisted: { always: ['settings'], projects: { p: ['settings'] }, bypassMode: true },
+        projectId: 'p',
+        permissionMode: 'bypassPermissions',
+        permissionModeSource: 'global'
+      }).skip
+    ).toBe(false)
+    // "one dialog at a time" rides the shared confirm-gated set.
+    expect(isDestructiveVerb('settings')).toBe(true)
+    // "permission modes, accounts and credentials, node identity, browser control, telemetry,
+    // keybindings, confirm waivers … can never be changed from here" — one real key per named class.
+    for (const key of [
+      'claudePermissionMode',
+      'defaultPermissionMode',
+      'claudeAccounts',
+      'modelGateway',
+      'hookIdentityStrict',
+      'agentBrowserControl',
+      'telemetryEnabled',
+      'keybindings',
+      'controlConfirmWaivers'
+    ]) {
+      const r = parseControlRequest('settings', { set: key, value: 'true' })
+      expect(r, key).toEqual({ error: expect.stringContaining('settings-key-forbidden') })
+    }
+    // …and main refuses EVERY member of the set, not only the sample the prose names: a literal list
+    // above can shrink without reddening anything.
+    for (const key of SETTINGS_VERB_FORBIDDEN) {
+      expect(parseControlRequest('settings', { set: key, value: 'true' }), key).toEqual({
+        error: expect.stringContaining('settings-key-forbidden')
+      })
+    }
+    // "Server Edition reads settings but refuses every --set" — ask the server handler itself.
+    const serverDeps = {
+      persistedCanvases: () => [{ id: 'p', nodes: [{ id: 'n' }] }],
+      capabilityProjectFor: () => ({}),
+      projectName: () => 'p',
+      settings: () => DEFAULT_SETTINGS
+    }
+    for (const key of SETTINGS_VERB_KEY_LIST) {
+      const value = SETTINGS_VERB_KEYS[key].type.kind === 'boolean' ? 'true' : '300'
+      expect(serverSettingsControl(serverDeps, 'n', { set: key, value }).ok, key).toBe(false)
+    }
+    expect(serverSettingsControl(serverDeps, 'n', {}).ok).toBe(true)
+    // "A project key reads as what is in effect RIGHT NOW" — a file true nobody here confirmed is off.
+    expect(
+      readSettingsValue('agentMessaging', DEFAULT_SETTINGS, { id: 'p', name: 'p', agentMessaging: true })
+    ).toMatchObject({ value: false })
+  })
+
+  it('parseControlRequest runs the settings allowlist, so main refuses a forbidden key by name', () => {
+    expect(parseControlRequest('settings', { set: 'claudePermissionMode', value: 'bypassPermissions' })).toEqual({
+      error: expect.stringContaining('settings-key-forbidden: "claudePermissionMode"')
+    })
+    expect(parseControlRequest('settings', { get: 'fontSize' })).toEqual({
+      error: expect.stringContaining('settings-key-not-allowed: "fontSize"')
+    })
+    expect(parseControlRequest('settings', { set: 'agentMessaging', value: 'true' })).toEqual({
+      verb: 'settings',
+      args: { set: 'agentMessaging', value: 'true' }
+    })
   })
 
   // The consent sentence is a contract string owned by browser-drive.ts (main). The doc must carry
@@ -605,7 +806,7 @@ describe('open-project + --project docs land with the dispatch (issue #338, spec
   })
 
   it('every --project-targetable verb line documents the flag — walked off the REAL set', () => {
-    // The drift alarm walks PROJECT_TARGETABLE_VERBS (src/main/project-grants.ts) rather than a
+    // The drift alarm walks PROJECT_TARGETABLE_VERBS (src/core/project-grants.ts) rather than a
     // re-typed list: a fourth verb joining the set without its doc line goes red here, and a doc
     // line dropping the flag goes red too.
     for (const [name, body] of bodies) {
@@ -628,6 +829,18 @@ describe('open-project + --project docs land with the dispatch (issue #338, spec
     }
   })
 
+  it('tells the agent that opened nodes AND --after stations are already linked — nothing to `link`', () => {
+    for (const [name, body] of bodies) {
+      expect(body, name).toMatch(/roped to each (listed )?station/)
+      expect(body, name).toMatch(/dashed while it waits/)
+      expect(body, name).toMatch(/already\s+linked/)
+      expect(body, name).toMatch(/nothing to `link`/)
+      // Only the skill body carries the orchestration recipe, so only it has the step-5 sentence
+      // that had to stop saying an unopened station is unlinked — an `--after` station is linked.
+      if (name === 'skill') expect(body, name).toMatch(/neither opened nor named in `--after`/)
+    }
+  })
+
   it('the orchestration recipe gains the multi-repo pattern', () => {
     for (const [name, body] of bodies) {
       expect(body, name).toContain('one project per repository')
@@ -644,7 +857,7 @@ describe('the --project clause tells the truth about travel (review #363 I-1 + M
     ['instructions', buildCanvasControlInstructions('/x/shim.sh')]
   ]
 
-  it('no-travel is promised ONLY for a returned id; own id is documented as flag-omitted (travel included)', () => {
+  it('no open switches the view — the own-id "travel included" claim is GONE from both bodies', () => {
     for (const [name, body] of bodies) {
       // The clause slice: from the `--project` flag doc to the open-project entry that follows
       // it in both bodies — anchored, so a caveat cannot drift into another paragraph (the
@@ -654,22 +867,108 @@ describe('the --project clause tells the truth about travel (review #363 I-1 + M
       expect(start, `${name}: clause start`).toBeGreaterThan(-1)
       expect(end, `${name}: clause before the open-project entry`).toBeGreaterThan(start)
       const clause = body.slice(start, end)
-      // Own id ≡ the flag omitted, view switch included — the REAL behavior (Canvas.tsx's
-      // own-id leg falls through to the legacy path, travel included; pinned in
-      // control-open-project.source.test.ts). The doc must say the same, not more.
+      // Own id ≡ the flag omitted — still true, and still the whole of what that leg promises.
       expect(clause, name).toMatch(/behaves exactly as if the flag\s+were omitted/)
-      expect(clause, name).toMatch(/view switch\s+included/)
-      // The no-travel promise exists only attached to the RETURNED id…
-      expect(clause, name).toMatch(
-        /returned to YOU\s+in this session, which never switches the\s+user'?s view/
-      )
-      // …and the old universal phrasing ("without switching the user's view", said of the whole
-      // flag) is gone from the body entirely.
+      // THE STALE CLAIM. Passing your own id (or omitting the flag) used to switch the user's
+      // view to your project; it no longer does — an open whose own project is not on screen is
+      // written COLD into it (lib/coldOpen, `canColdOpen`). A body still promising a view switch
+      // describes a product that no longer exists, and an orchestrator reading it would expect
+      // the user to be looking at what it opened.
+      expect(body, name).not.toMatch(/view switch\s+included/)
+      expect(body, name).not.toMatch(/a normal open, view switch/)
+      // The old universal phrasing ("without switching the user's view", said of the whole flag)
+      // stays gone too — the promise now belongs to EVERY open, stated in its own sentence.
       expect(body, name).not.toMatch(/without switching/)
       // M-3: the do-not-poll caveat and the refusal rule live in the clause ITSELF — dropping
       // them here while the recipe's copy survives is red.
       expect(clause, name).toMatch(/do not poll/)
       expect(clause, name).toContain('any other id is refused')
     }
+  })
+
+  it('both bodies document the OWN-project cold open: never switches the view, queued, closed case', () => {
+    // The behaviour change this test exists for. All four facts an orchestrator acts on:
+    // (1) an open never moves the user, (2) a node opened into a project they are not viewing
+    // starts when they next view it, (3) the reply says so via `queued`, (4) a CLOSED project is
+    // still written into and the tab is NOT reopened.
+    for (const [name, body] of bodies) {
+      expect(body, `${name}: never switches the view`).toMatch(
+        /open NEVER switches the user'?s view|OPEN NEVER SWITCHES THE USER'?S VIEW/i
+      )
+      expect(body, `${name}: cold`).toMatch(/cold/i)
+      expect(body, `${name}: queued`).toContain('queued')
+      expect(body, `${name}: closed project`).toMatch(/closed/i)
+      expect(body, `${name}: tab not reopened`).toMatch(/not reopened/i)
+    }
+  })
+
+  it('both bodies say the DISPLAY verbs do not switch the view either — and are never queued', () => {
+    // The second half of the same promise, and the half an agent meets most often: a skill that
+    // renders its report as HTML reaches for `show-web` every time it finishes. Two facts it acts
+    // on, and the second is why these are not folded into the cold-open sentence: the node is
+    // COMPLETE when placed, so a caller told "queued" would wait for something that has already
+    // happened. The `offCanvas` field is what it reads instead.
+    for (const [name, body] of bodies) {
+      const start = body.indexOf('`show-image')
+      const end = body.indexOf('`group --nodes', start)
+      expect(start, `${name}: the display-verb entries`).toBeGreaterThan(-1)
+      expect(end, `${name}: the group entry after them`).toBeGreaterThan(start)
+      const clause = body.slice(start, end)
+      expect(clause, `${name}: never switches the view`).toMatch(/never switch(es)? the user'?s view/i)
+      expect(clause, `${name}: names the field`).toContain('offCanvas')
+      // THE STALE CLAIM the split exists to prevent: a display verb reported as queued.
+      expect(clause, `${name}: not queued`).toMatch(/nothing (here )?is (ever )?\`?queued/i)
+    }
+  })
+
+  it('both bodies render the OFF-SCREEN table, and render it from the table', () => {
+    // CLAUDE.md's rule for this subsystem: derive, never re-type — "a doc line with no such test
+    // is a plan, not a fact". The two sides of the table have OPPOSITE consequences for a caller
+    // (act, or ask the human and stop), so a verb documented on the wrong side is worse than one
+    // documented nowhere: an orchestrator would report as done a `close` that never happened.
+    const sets = controlVerbSetsForTests()
+    const answered = [
+      ...sets.storeAnswered,
+      ...sets.coldOpenable,
+      ...sets.offCanvas,
+      ...sets.storedNode
+    ]
+    for (const [name, body] of bodies) {
+      expect(body, `${name}: the promise`).toMatch(/NO VERB EVER SWITCHES THE USER'S VIEW/)
+      const start = body.indexOf("NO VERB EVER SWITCHES THE USER'S VIEW")
+      const end = body.indexOf('Messaging outcomes', start)
+      expect(end, `${name}: the messaging block after it`).toBeGreaterThan(start)
+      const clause = body.slice(start, end)
+      for (const v of answered) {
+        expect(clause, `${name}: ${v} is answered off screen`).toContain(v)
+        expect(offScreenDisposition(v).kind, v).not.toBe('refuse')
+      }
+      // Every refused verb is named AND carries its own reason — a bare list would tell an agent
+      // that `branch` and `arrange` fail for the same cause, and they do not.
+      for (const v of ['group', 'ungroup', 'move', 'arrange', 'align', 'verify', 'spawn-team', 'branch', 'open-worktree', 'close-worktree', 'browser']) {
+        const d = offScreenDisposition(v)
+        expect(d.kind, v).toBe('refuse')
+        if (d.kind !== 'refuse') continue
+        expect(clause, `${name}: ${v}'s reason`).toContain(`${v}: ${d.why}`)
+      }
+      // What the caller must DO about a refusal. Without this an agent retries on a timer against
+      // a project the user may not open for hours.
+      expect(clause, `${name}: what to do`).toMatch(/Ask the user to open it/)
+      expect(clause, `${name}: do not retry on a timer`).toMatch(/do not\s+retry it on a timer/)
+      expect(clause, `${name}: do not report done`).toMatch(/do not report the action as done/)
+    }
+  })
+
+  it('the off-screen table never claims a verb is BOTH answered and refused', () => {
+    // The rendering reads two sources; a verb added to a set without being removed from
+    // OFF_SCREEN_REFUSALS would appear on both sides of the same paragraph.
+    const sets = controlVerbSetsForTests()
+    const answered = new Set([
+      ...sets.storeAnswered,
+      ...sets.coldOpenable,
+      ...sets.offCanvas,
+      ...sets.storedNode
+    ])
+    for (const v of answered) expect(offScreenDisposition(v).kind, v).not.toBe('refuse')
   })
 })

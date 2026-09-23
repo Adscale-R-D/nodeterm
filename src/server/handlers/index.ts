@@ -7,8 +7,9 @@ import { GitService } from '../../core/git-service'
 import { generateCommitMessage } from '../../core/commit-message'
 import { registerFsHandlers } from '../../core/fs-handlers'
 import { claudeCliCaps, registerClaudeCliIpc } from '../../core/claude-cli'
+import { registerGrokCliIpc } from '../../core/grok-cli'
 import { registerCodexIdentityIpc } from '../../core/codex-identity-caps'
-import { UNKNOWN_CODEX_IDENTITY_CAPS } from '@shared/types'
+import { registerCodexCliIpc } from '../../core/codex-cli'
 import { startUsageService } from '../../core/usage/usage-service'
 import { registerClaudeAccountsIpc } from '../../core/claude-accounts-service'
 import { codexUsageAccounts } from '../../core/codex-accounts-core'
@@ -71,25 +72,22 @@ export function registerCoreHandlers(
   // The browser needs the same `--permission-mode auto` version gate as desktop: the server's own
   // claude CLI is the one that will run the terminal nodes. Warm it so the first call is cached.
   registerClaudeCliIpc()
+  // Invariant 11 for probes: registered in BOTH shells, or session-id minting silently works on
+  // the desktop and not in the browser, with nothing to say which.
+  registerGrokCliIpc()
+  // The codex CLI's own approval vocabulary, and this one is registered FOR REAL rather than
+  // stubbed. `registerCodexIdentityIpc` below declines a shared app-server on purpose; this is the
+  // opposite case, and the distinction matters — the Server Edition's Codex sessions run on THIS
+  // machine, on THIS `codex`, so the browser must be told what that binary accepts. A constant
+  // here would silently drop "Ask each time" for a Server Edition user on codex <= 0.148.0 and
+  // hand a later codex a value it removed: exactly the "a stub compiles fine while doing nothing"
+  // failure the three-surfaces rule warns about.
+  registerCodexCliIpc()
   void claudeCliCaps()
 
-  // ---- Codex shared identity: a DELIBERATE degrade, not an omission ----------------------------
-  // The Server Edition answers "no shared identity", so every Codex node here launches the bare
-  // `codex` it always did — a working node with its own app-server, just without the shared one.
-  //
-  // The secret question that used to block this is ANSWERED: src/server/index.ts arms
-  // `hookServer.setNodeAuthSecret(await loadOrCreateNodeAuthSecret())` at boot, which on a headless
-  // host is raw 0600 bytes in the data dir — a decision taken explicitly, not quietly (see
-  // src/core/agents/node-auth-secret.ts). As of S6 PR 5 the same boot path also calls
-  // `setCodexThreadIdentityAuthSecret(secret)`, so a MANAGED Codex account's thread→node→account
-  // ownership records sign and verify on this headless host instead of throwing "identity
-  // authentication is unavailable" (the carried PR-2 obligation). What stays deliberately absent
-  // here is the shared-app-server plumbing (`refreshCodexIdentityCaps()` + the two
-  // `setCodexThread*Handler` registrations src/main/index.ts makes): the Server Edition answers "no
-  // shared identity" so its Codex nodes launch the bare `codex` — a working node with its own
-  // app-server, just without the shared one. Arming the record secret is orthogonal to that
-  // degrade: it never launches an app-server, it only lets the record layer sign.
-  registerCodexIdentityIpc(() => UNKNOWN_CODEX_IDENTITY_CAPS)
+  // The answer is populated after server node identity is armed. Early browser callers wait for
+  // that refresh instead of being pinned to a false "plain Codex" answer for the whole app run.
+  registerCodexIdentityIpc()
 
   // Managed CLAUDE accounts (issue #313). The lifecycle is core, so a browser-only deployment can
   // create, log into and remove them exactly as the desktop does — env injection, the transcript

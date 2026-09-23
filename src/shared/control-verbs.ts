@@ -2,7 +2,7 @@
 // set. Read the second half of that sentence literally — see WHAT THIS SET DOES NOT DO below.
 //
 // IN `src/shared` BECAUSE IT HAS TWO SIDES, and that is the whole point of this file existing.
-// The set was defined in `src/main/canvas-control-core.ts` and the gate it describes lives in the
+// The set was defined in `src/core/canvas-control-core.ts` and the gate it describes lives in the
 // renderer (`Canvas.tsx`'s `switch (verb)`), which cannot import from `src/main` — `tsconfig.web`
 // includes only `src/renderer`, `src/shared` and the preload types. So the set stayed a
 // security-shaped constant imported by nothing but its own unit test, while
@@ -38,7 +38,17 @@
 // `open-project` (issue #338): create/adopt/first-attach all raise a human confirm (spec B2 +
 // Q1), and its early-handled block in Canvas.tsx reads `isDestructiveVerb(verb)` before its
 // `confirmBusy()` refusal exactly as write/close's cases do — the drift alarm covers all three.
-export const DESTRUCTIVE_VERBS: ReadonlySet<string> = new Set(['write', 'close', 'open-project'])
+//
+// `settings` (@shared/settings-verb): its `--set` raises a human confirm from an early-handled
+// block that reads this set for its `confirmBusy()` refusal. Not destructive in the literal sense —
+// a settings change is reversible — but it can GRANT a capability, and one dialog at a time is the
+// rule for every dialog an agent can raise. Its `--get` reads and never reaches the confirm.
+export const DESTRUCTIVE_VERBS: ReadonlySet<string> = new Set([
+  'write',
+  'close',
+  'open-project',
+  'settings'
+])
 
 /**
  * Does this verb's dispatch case take its `confirmBusy()` refusal from the shared set?
@@ -75,7 +85,13 @@ export const DRY_RUN_VERBS: ReadonlySet<string> = new Set([
   'open-claude',
   'open-agent',
   'spawn-team',
-  'open-worktree'
+  'open-worktree',
+  // Not a spawn verb, and the only member that is not — but it fits the asymmetry the set exists
+  // for better than any of them: a report is PUBLISHED, and publishing is the one mutation here
+  // that cannot be undone at all. A dry run returns the exact redacted text that would be filed,
+  // which is also the only way a human can inspect what this project would send before it sends
+  // anything.
+  'report-issue'
 ])
 
 /**

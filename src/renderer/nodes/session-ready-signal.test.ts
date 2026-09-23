@@ -47,22 +47,57 @@ describe('where readiness is published (source pins)', () => {
   it('only a REAL teardown clears it — a park keeps the session typeable by name', () => {
     // The park branch returns before this line; a parked tmux session is still addressable by
     // `sendText`, so clearing there would strand a launch that could have been delivered.
-    expect(src).toMatch(/life\.dead = true[\s\S]{0,600}?setSessionReady\(id, false\)/)
+    expect(src).toMatch(/life\.dead = true[\s\S]{0,1800}?setSessionReady\(id, false\)/)
     // Exactly three publish sites: mount (adopt-or-not), settle, teardown. A fourth means
     // somebody has taught another path to claim readiness it cannot vouch for.
     expect(src.match(/setSessionReady\(/g)?.length).toBe(4) // 3 call sites + the definition
   })
 })
 
+describe('an offscreen release keeps a tmux-backed session READY (source pins)', () => {
+  it('the teardown clears readiness only when the session itself is going away', () => {
+    // MEASURED (2026-09-02, scratch Server Edition, hook POSTs): an armed node released offscreen
+    // — PTY client detached, tmux session alive and typeable by name — reported not-ready, so its
+    // dependency going `done` delivered nothing, the badge claimed the terminal "has not started
+    // yet", and only a camera travel (revive) ever fired the launch. The release is a viewer
+    // teardown, not a session teardown, so it must not withdraw the fact the gate asks about.
+    expect(src).toMatch(
+      /life\.dead = true[\s\S]{0,1800}?if \(!\(offscreenDownRef\.current && sessionPersistent\)\) setSessionReady\(id, false\)/
+    )
+  })
+
+  it('a PLAIN-SHELL armed node is not released at all — there the release kills the shell', () => {
+    // Fifth lever behind issue #126's rule: the pure predicate decides, the node only asks it, on
+    // the same retry cadence the live-work deferral uses.
+    expect(src).toMatch(
+      /shouldDeferReleaseForHeldLaunch\(\{[\s\S]{0,200}?tmuxBacked: sessionPersistentRef\.current,[\s\S]{0,120}?armed: armedRef\.current/
+    )
+  })
+})
+
 describe('an ARMED node does not cold-start its agent under the hold (source pins)', () => {
   it('the cold-restore relaunch is gated on there being no pendingLaunch', () => {
-    // A first open is `fresh` by definition, so without this every `--after` / `verify` node
+    // A first open is a cold start by definition, so without this every `--after` / `verify` node
     // launched a bare CLI on mount — and Canvas's held launch then arrived as TEXT typed into
     // the session the hold existed to prevent.
-    // Matched inside the condition rather than as one literal line: the branch also carries the
-    // `paused` gate (shouldColdResume), and the two guards are independent refusals that must
-    // both survive a reformat.
-    expect(src).toMatch(/fresh &&\s*\n?\s*agentId &&\s*\n?\s*canResume\(agentId\) &&\s*\n?\s*!data\.pendingLaunch/)
+    //
+    // The four refusals now live in ONE predicate (`canColdRestore`) because the late cold-start
+    // check asks the same question before spending two probe round trips — so this pins the
+    // predicate's contents rather than the branch's old inline shape. `!data.pendingLaunch` and
+    // `shouldColdResume` are independent refusals and must both survive a reformat.
+    expect(src).toMatch(
+      /const canColdRestore =\s*\n?\s*!!agentId && canResume\(agentId\) && !data\.pendingLaunch && shouldColdResume\(pausedNow\)/
+    )
+    // …and the relaunch branch is the one that reads it.
+    expect(src).toContain('} else if (coldStart && canColdRestore) {')
+  })
+
+  it('the LATE cold-start check refuses the same node an armed hold would', () => {
+    // Same reason, one layer earlier: an armed node must not even pay the probe, and it must
+    // certainly not be handed a relaunch behind the hold's back.
+    expect(src).toMatch(
+      /if \(!fresh && freshUnverified && !data\.initialCommand && canColdRestore\) \{/
+    )
   })
 })
 
@@ -70,7 +105,11 @@ describe('the QUEUED badge carries the delivery state (source pins)', () => {
   it('the badge reads the store and renders the warning variant plus the shared tooltip', () => {
     expect(src).toContain("useLaunchDelivery((s) => s.byId[id])")
     expect(src).toContain('term-node__status--queued-warn')
-    expect(src).toContain('launchTooltip(launchDelivery, pendingWaitingOn, pendingLaunch.command)')
+    // `pendingErroredOn` is the fourth argument since #521 — an errored upstream is idle, so
+    // without it the tooltip would promise a wait that never ends.
+    expect(src).toContain(
+      'launchTooltip(launchDelivery, pendingWaitingOn, pendingLaunch.command, pendingErroredOn)'
+    )
   })
 
   it('the manual ▶ disarms only on a delivery that landed', () => {
@@ -80,5 +119,16 @@ describe('the QUEUED badge carries the delivery state (source pins)', () => {
       /pty\.sendText\(id, pendingLaunch\.command\)\.then\(\(ok\) => \{[\s\S]{0,600}?if \(ok\)[\s\S]{0,300}?pendingLaunch: undefined/
     )
     expect(src).toMatch(/else \{[\s\S]{0,200}?markFailed\(id, 1\)/)
+  })
+})
+
+describe('the eye button hides cards AND connections (source pins)', () => {
+  it('is offered on every terminal node — a plain terminal has ropes too — and says what it hides', () => {
+    expect(src).toContain("'Hide cards & connections'")
+    expect(src).toContain("'Show cards & connections'")
+    expect(src).not.toContain("'Hide subagent/loop cards'")
+    // The button no longer requires a fan-out-capable agent; only the user's header-button
+    // visibility setting gates it.
+    expect(src).toMatch(/\{!isHidden\('hide-fanout', hiddenHeaderButtons\) && \(\s*<Tooltip label=\{hideFanout \? 'Show cards & connections'/)
   })
 })

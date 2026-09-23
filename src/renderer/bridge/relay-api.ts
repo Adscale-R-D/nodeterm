@@ -131,23 +131,30 @@ export function buildRelayApi(connectionId: string, transport?: FrameTransport):
     dialog: (() => {
       mountPickerRoot()
       const startDir = '/' // navigable up/down from the host root; no cross-call memory in v1
+      // "New folder" writes through the HOST's `fs.mkdir`/`fs.exists` (same core handlers, reached
+      // over the relay), so the folder is created on the machine whose path the picker returns.
+      const write = { mkdir: files.fs.mkdir, exists: files.fs.exists }
       return {
-        selectFolder: () => openDirectoryPicker({ mode: 'folder', startDir, list: files.fs.list }),
+        selectFolder: () =>
+          openDirectoryPicker({ mode: 'folder', startDir, list: files.fs.list, write }),
         selectFile: () => openDirectoryPicker({ mode: 'file', startDir, list: files.fs.list })
       }
     })(),
 
     // ── Deferred over the relay in v1 — documented degrades (a clean refusal, not a wrong-machine
     //    silent no-op): ──
-    // `chat` is now just readTranscript (the SDK chat node was removed). It has no relay builder:
-    // reading a transcript over the relay would read THIS machine's transcript, not the host's, so
-    // refuse with E_UNSUPPORTED instead. contextLink / transcripts / handoff stay LOCAL by way of
+    // `chat` is now just readTranscript + transcriptExists (the SDK chat node was removed). It has
+    // no relay builder: reading a transcript over the relay would read THIS machine's transcript,
+    // not the host's, so `readTranscript` refuses with E_UNSUPPORTED instead. `transcriptExists`
+    // takes the stub's `'unknown'` for the same reason and the opposite shape — its consumer acts
+    // on a NEGATIVE, so answering about the wrong machine would drop a live conversation's
+    // `--resume`; `unknown` is exactly "we could not look", i.e. resume as before. contextLink / transcripts / handoff stay LOCAL by way of
     // `...local` (a v1 degrade: they read/write on this machine, not the host). boardLog is now
     // bridged to the host (see above) — it no longer rides `...local`.
     chat: stub.chat,
     // Agent canvas-control (`agent:control`) is not wired over the relay; inert no-ops rather than a
     // local subscription that never carries the host's events. This no longer "matches the Server
-    // Edition" — that edition wires control for real now (`core/agents/canvas-control-bridge.ts`),
+    // Edition" — that edition runs control HEADLESS now (`src/server/canvas-control.ts`),
     // because a browser tab there IS the canvas the host's agents belong to. A relay tab is not: it
     // is THIS machine viewing another host's sessions, so a host agent's `open-claude` would land on
     // the guest's own canvas, in the guest's own projects, on a filesystem the host cannot see.

@@ -17,16 +17,23 @@ import { IPC } from '../../shared/ipc'
 import type { GitHubControlApi, GitHubIssuesApi } from '../../shared/github-issues'
 import {
   UNKNOWN_CLAUDE_CLI_CAPS,
+  UNKNOWN_GROK_CLI_CAPS,
   type BoardLogApi,
   type LogApi,
   type LogRecord,
   type BoardLogReadResult,
   type ChatTranscriptResult,
+  type TranscriptPresence,
   type ClaudeApi,
   type ClaudeCliCaps,
+  type GrokApi,
+  type GrokCliCaps,
+  type ClaudeSkillShareResult,
   type CodexApi,
   type CodexIdentityCaps,
   UNKNOWN_CODEX_IDENTITY_CAPS,
+  type CodexCliCaps,
+  UNKNOWN_CODEX_CLI_CAPS,
   type ContextApi,
   type DownloadTicket,
   type FilesApi,
@@ -53,6 +60,7 @@ import {
   type WorkspaceApi
 } from '../../shared/types'
 import type { PeerIdentity } from '../../shared/presence'
+import type { PaneOwner } from '../../shared/agents/pane-owner-predicate'
 import { buildStubApi } from './stubs'
 import { mountPickerRoot, openDirectoryPicker } from './dialog-picker'
 import { encodePcmForWire } from './speech-encode'
@@ -237,6 +245,16 @@ export function buildRealApi(
     generateGroupName: () => Promise.resolve(AI_NAMING_UNAVAILABLE),
     capture: (persistKey, full) =>
       client.request(IPC.ptyCapture, persistKey, full).catch(() => '') as Promise<string>,
+    // Documented degrade, not a stub with a hole in it: SSH PROJECTS are desktop-only (the whole
+    // `sshProject` surface is `U(...)`-stubbed here), so no browser session ever holds a remote
+    // ControlMaster to attach early over. `false` = "never attach early" = the pre-feature wait,
+    // which is exactly right for a shell that cannot produce the question.
+    remoteSessionConfirmed: () => Promise.resolve(false),
+    // REAL, unlike `remoteSessionConfirmed` above: the server runs on the machine whose tmux it is
+    // reading, so the local leg of this probe is exactly right there. Fail-open to `null` = "could
+    // not tell", the same answer every other failure path gives.
+    sessionAge: (persistKey) =>
+      client.request(IPC.ptySessionAge, persistKey).catch(() => null) as Promise<number | null>,
     readScrollback: (persistKey) =>
       client.request(IPC.ptyReadScrollback, persistKey) as Promise<string>,
     sendText: (persistKey, text, opts) =>
@@ -250,6 +268,11 @@ export function buildRealApi(
     // shell yet" and gives up on its own deadline.
     paneCommand: (persistKey) =>
       client.request(IPC.ptyPaneCommand, persistKey).catch(() => null) as Promise<string | null>,
+    // A REAL implementation, not a stub: core registers the handler, so the server this browser is
+    // served from answers it. The hibernation exit fails CLOSED on a null, so a stub here would
+    // have silently switched Eco off for the whole Server Edition rather than degrade it.
+    paneOwner: (persistKey) =>
+      client.request(IPC.ptyPaneOwner, persistKey).catch(() => null) as Promise<PaneOwner | null>,
     terminateForeground: (persistKey, expectedAgentId) =>
       client.request(IPC.ptyTerminateForeground, persistKey, expectedAgentId).catch(() => false) as Promise<boolean>,
     // No server handler — the session-name poll degrades to no adopted name. A PRE-EXISTING gap,
@@ -295,13 +318,14 @@ export function buildRealApi(
     onMigrated: (cb) => client.subscribe(IPC.workspaceMigrated, cb as Listener),
     // REAL: core broadcasts IPC.workspaceCorruptRecovered from the load path (workspace-store.ts).
     onCorruptRecovered: (cb) => client.subscribe(IPC.workspaceCorruptRecovered, cb as Listener),
-    // Deliberate degrade: the external-change WATCHER (core/workspace-watcher.ts) is only started
-    // by the desktop shell (src/main/index.ts), so the server never broadcasts
-    // IPC.workspaceExternalChange and there is nothing to subscribe to. Effect in the browser:
-    // an outside edit (git pull / a teammate's push) is not picked up until reload — no silent
-    // data loss (the store's own rev reconciliation still guards writes). Booting the watcher in
-    // src/server is the follow-up.
-    onExternalChange: () => () => {}
+    // Server Edition runs the shared WorkspaceWatcher and broadcasts outside file edits here.
+    // Remote-node adoption (the phone appending a session it started) rides it too: that IS
+    // "another device", which is what this channel means.
+    onExternalChange: (cb) => client.subscribe(IPC.workspaceExternalChange, cb as Listener),
+    // REAL: Server Edition canvas control broadcasts its own persisted bridge/rope changes here —
+    // wider than the node-only canvas:mut vocabulary, but ours, so they must not travel the
+    // outside-edit channel and end up behind the conflict bar (see server/canvas-control.ts).
+    onServerChange: (cb) => client.subscribe(IPC.workspaceServerChange, cb as Listener)
   }
 
   // REAL: WorkspaceStore (core) registers the project-settings:* channels too — same
@@ -580,8 +604,8 @@ export function buildFilesApi(
 
   const context: ContextApi = {
     onUpdate: (listener) => client.subscribe(IPC.contextUpdate, listener as Listener),
-    ensure: (sessionId, cwd, accountId) =>
-      client.cast(IPC.contextEnsure, sessionId, cwd, accountId)
+    ensure: (sessionId, cwd, accountId, nodeId, agentId) =>
+      client.cast(IPC.contextEnsure, sessionId, cwd, accountId, nodeId, agentId)
   }
 
   // Board-log: REAL over the bridge for local projects (the server routes local; SSH projects on the
@@ -635,9 +659,6 @@ export function buildAgentApi(
   | 'onUnreadClear'
   | 'answerPermission'
   | 'ackDone'
-  | 'onAgentControl'
-  | 'sendAgentControlResult'
-  | 'agentMessage'
   | 'reportHibernated'
   | 'onAgentWake'
   | 'onRemoteViewers'
@@ -646,29 +667,6 @@ export function buildAgentApi(
 > {
   return {
     onAgentStatus: (listener) => client.subscribe(IPC.agentStatus, listener as Listener),
-    // Canvas control, REAL here (it was `noopUnsub` in stubs.ts, which is why no agent on a headless
-    // host could open a node). The verbs themselves are all in `Canvas.tsx`, which is the same React
-    // in this tab as in the desktop renderer — so the browser owes exactly the preload's two
-    // members, and the server owes the forwarding (`core/agents/canvas-control-bridge.ts`).
-    //
-    // The request is UNICAST to one tab, never broadcast, and the reply is matched by `requestId` on
-    // the tab that was asked: three tabs each performing `open-claude` would be three nodes and a
-    // rev fight, so `canvas-sync` reflecting one tab's mutation to its peers is what keeps them
-    // converged — the same path a human's edit takes.
-    onAgentControl: (listener) => client.subscribe(IPC.agentControl, listener as Listener),
-    sendAgentControlResult: (payload) => client.cast(IPC.agentControlResult, payload),
-    // Agent messaging, REAL here too. It was refused on this edition because `agent-messaging.ts`
-    // lived in `src/main` — not because it needed Electron (every import was core/shared) but because
-    // its WIRING sat inline in main's boot. Both shells now boot the same core factory
-    // (`initAgentMessaging`), so this is a plain request to the same handler the desktop registers.
-    // Every gate still applies, unchanged and inside core: the per-project capability GRANT (off by
-    // default), the runtime pane-ownership check, flow budgets, and hook-server's verified-only route.
-    agentMessage: {
-      deliver: (req) =>
-        client.request(IPC.agentMessageDeliver, req) as ReturnType<
-          NodeTerminalApi['agentMessage']['deliver']
-        >
-    },
     // REAL forward: the Server Edition writes its own agent-status mirror, and the phone reads it
     // over its SSH browse path — a browser canvas hibernating a node must reach that file too.
     reportHibernated: (nodeId, on) => {
@@ -899,6 +897,14 @@ export function buildCodexApi(client: RpcClient): CodexApi {
       (client.request(IPC.codexIdentityCaps) as Promise<CodexIdentityCaps>).catch(
         () => UNKNOWN_CODEX_IDENTITY_CAPS
       ),
+    // A REAL handler server-side, unlike `identityCaps` right above it — `registerCodexCliIpc`
+    // runs in that shell for the reason spelled out there: the Server Edition's Codex sessions run
+    // on the server's own `codex`, so the browser needs that binary's real approval vocabulary.
+    // Rejection degrades to the unknown caps, i.e. the baseline vocabulary.
+    cliCaps: () =>
+      (client.request(IPC.codexCliCaps) as Promise<CodexCliCaps>).catch(
+        () => UNKNOWN_CODEX_CLI_CAPS
+      ),
     onIdentity: (listener) => client.subscribe(IPC.codexIdentity, listener as Listener)
   }
 }
@@ -910,6 +916,18 @@ export function buildClaudeApi(client: RpcClient, stub: ClaudeApi): ClaudeApi {
       (client.request(IPC.claudeCliCaps) as Promise<ClaudeCliCaps>).catch(
         () => UNKNOWN_CLAUDE_CLI_CAPS
       )
+  }
+}
+
+/** grok's probe over WS-RPC. A REAL handler server-side (`registerGrokCliIpc` runs in that shell
+ *  too), so the browser gets the same answer the desktop does — not a stub that quietly disables
+ *  session-id minting on one surface only. Rejection degrades to the fail-open caps. */
+export function buildGrokApi(client: RpcClient): GrokApi {
+  return {
+    cliCaps: () =>
+      (client.request(IPC.grokCliCaps) as Promise<GrokCliCaps>).catch(() => UNKNOWN_GROK_CLI_CAPS),
+    takenSessionIds: (cwd: string) =>
+      (client.request(IPC.grokTakenSessionIds, cwd) as Promise<string[]>).catch(() => [])
   }
 }
 
@@ -927,14 +945,28 @@ export function buildTranscriptApi(
 ): Pick<NodeTerminalApi, 'chat'> & { claudeReadTranscript: ClaudeApi['readTranscript'] } {
   return {
     chat: {
-      readTranscript: (sessionId, cwd, accountId, nodeId) =>
+      readTranscript: (sessionId, cwd, accountId, nodeId, agentId) =>
         client.request(
           IPC.chatReadTranscript,
           sessionId,
           cwd,
           accountId,
-          nodeId
-        ) as Promise<ChatTranscriptResult>
+          nodeId,
+          agentId
+        ) as Promise<ChatTranscriptResult>,
+      // A REAL implementation, not a stub: the server runs on the machine holding these
+      // transcripts, so its answer is as good as the desktop's local leg. A failed request
+      // degrades to `unknown` (never `absent`) — cold restore acts on a negative, so the wrong
+      // degrade would drop a live conversation's `--resume` because a socket blipped.
+      transcriptExists: (sessionId, accountId, nodeId) =>
+        (
+          client.request(
+            IPC.transcriptExists,
+            sessionId,
+            accountId,
+            nodeId
+          ) as Promise<TranscriptPresence>
+        ).catch(() => 'unknown' as const)
     },
     claudeReadTranscript: (sessionId, cwd, accountId, nodeId) =>
       client.request(
@@ -975,7 +1007,21 @@ export function buildClaudeAccountsApi(client: RpcClient): Pick<NodeTerminalApi,
         client.request(IPC.claudeAccountsWaitLogin, id, ctx) as Promise<{ email: string } | null>,
       cancelWaitLogin: (id) =>
         client.request(IPC.claudeAccountsCancelWait, id) as Promise<void>,
-      remove: (id, ctx) => client.request(IPC.claudeAccountsRemove, id, ctx) as Promise<void>
+      remove: (id, ctx) => client.request(IPC.claudeAccountsRemove, id, ctx) as Promise<void>,
+      link: (configDir) =>
+        client.request(IPC.claudeAccountsLink, configDir) as Promise<{
+          id: string
+          configDir: string
+          email: string | null
+        }>,
+      // Real, not a stub: the whole implementation is core, so the machine the browser is served
+      // FROM is exactly the machine whose `~/.claude/skills` the option shares (issue #643).
+      setSkillSharing: (id, enabled) =>
+        client.request(
+          IPC.claudeAccountsSetSkillSharing,
+          id,
+          enabled
+        ) as Promise<ClaudeSkillShareResult>
     }
   }
 }
@@ -1108,7 +1154,8 @@ export async function installWsBridge(): Promise<boolean> {
       const t = buildTranscriptApi(client)
       return {
         chat: t.chat,
-        claude: { ...buildClaudeApi(client, stubApi.claude), readTranscript: t.claudeReadTranscript }
+        claude: { ...buildClaudeApi(client, stubApi.claude), readTranscript: t.claudeReadTranscript },
+        grok: buildGrokApi(client)
       }
     })(),
     // Web replacement for the Electron native dialog: an in-app server-directory browser over
@@ -1116,8 +1163,18 @@ export async function installWsBridge(): Promise<boolean> {
     dialog: (() => {
       mountPickerRoot()
       const startDir = '/' // navigable up/down from root; the picker remembers nothing across calls in v1
+      // `write` is what gives folder mode its "New folder" button — the native dialog has one and
+      // the browser has no dialog at all, so without it a server folder had to exist already
+      // before it could be opened as a project. Same `fs.mkdir`/`fs.exists` the Explorer writes
+      // through, and therefore the same reach as everything else this picker already lists.
+      // Lambdas, not `api.fs.mkdir` directly: this IIFE runs while `api` is still being built.
+      const write = {
+        mkdir: (p: string) => api.fs.mkdir(p),
+        exists: (p: string) => api.fs.exists(p)
+      }
       return {
-        selectFolder: () => openDirectoryPicker({ mode: 'folder', startDir, list: api.fs.list }),
+        selectFolder: () =>
+          openDirectoryPicker({ mode: 'folder', startDir, list: api.fs.list, write }),
         selectFile: () => openDirectoryPicker({ mode: 'file', startDir, list: api.fs.list })
       }
     })()

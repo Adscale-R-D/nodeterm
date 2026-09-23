@@ -28,6 +28,7 @@ import { randomUUID } from 'crypto'
 import { renameAtomicSync } from '../../fs-atomic'
 import { buildManagedScript } from './managed-script'
 import { normalizeHookCommand } from './install-helper'
+import { buildCodexWindowsWrapper, CODEX_WINDOWS_WRAPPER_FILE } from './codex-windows-wrapper'
 import {
   computeTrustedHash,
   getCodexCanonicalTrustPath,
@@ -105,7 +106,18 @@ function isManagedCommand(command: string | undefined): boolean {
   // Separator folding comes from install-helper so the two installers can never disagree about
   // what makes an entry ours — the drift that made the JSON-settings agents duplicate on Windows
   // (#558). Only the normalizer is shared; codex's merge stays its own (the trust hash).
-  return normalizeHookCommand(command).includes(`agent-hooks/${SCRIPT_FILE_NAME}`)
+  //
+  // BOTH leaves, always, on every platform. The Windows command names `codex-hook.cmd` while every
+  // pre-#567 Windows install (and every POSIX one) names `codex.sh`, so matching only the leaf THIS
+  // platform writes would fail to recognize an entry we ourselves put there — and `mergeManagedHook`
+  // logic here would keep it and append a second one, which is #558 all over again. Matching both is
+  // also what REPAIRS a Windows hooks.json that already carries the unrunnable POSIX command: it is
+  // stripped before the fresh one is pushed, so the next app launch heals the file.
+  const c = normalizeHookCommand(command)
+  return (
+    c.includes(`agent-hooks/${SCRIPT_FILE_NAME}`) ||
+    c.includes(`agent-hooks/${CODEX_WINDOWS_WRAPPER_FILE}`)
+  )
 }
 
 function definitionHasManagedCommand(def: HookDefinition): boolean {
@@ -128,15 +140,105 @@ function removeManagedFromDefinitions(defs: HookDefinition[]): HookDefinition[] 
   })
 }
 
-// Why: form the POSIX command the SAME way for hooks.json AND the trust entry —
-// the trust hash is computed over this exact byte string, so any divergence
-// makes Codex reject the hook. The POSIX wrapper's
-// `[ -x ... ]` guard makes a missing/non-executable script a silent no-op so a
-// broken install never poisons the session with exit-127 noise.
-export function buildManagedCommand(script: string): string {
+/**
+ * `%SystemRoot%\System32\cmd.exe`, or bare `cmd` when that cannot be spelled unquoted.
+ *
+ * Unquoted is the whole constraint: quoting the program name is exactly what breaks under
+ * PowerShell (a quoted leading token is a string literal, which is #685), so a resolved path
+ * carrying a space or a shell metacharacter is unusable and the PATH lookup is the lesser evil.
+ * `windir` is the fallback name for the same value on older installs.
+ */
+export function defaultWindowsCmdExe(): string {
+  const root = process.env.SystemRoot || process.env.windir || ''
+  if (!root) return 'cmd'
+  const abs = `${root}\\System32\\cmd.exe`
+  // Deliberately a strict allow-list, not a metacharacter deny-list: anything outside a plain
+  // drive-letter path is not worth guessing at. The fallback then attempts a PATH lookup, which is
+  // what this function exists to avoid — but an unusable absolute path would run nothing at all.
+  return /^[A-Za-z]:\\[A-Za-z0-9\\._-]*$/.test(abs) ? abs : 'cmd'
+}
+
+/**
+ * The hook command, formed the SAME way for hooks.json AND the trust entry — the trust hash is
+ * computed over this exact byte string, so any divergence makes Codex reject the hook. The POSIX
+ * form's `[ -x ... ]` guard makes a missing/non-executable script a silent no-op, so a broken
+ * install never poisons the session with exit-127 noise.
+ *
+ * `platform` is the platform of the machine that will RUN codex, not the one generating the string,
+ * and it is a parameter for exactly that reason: `RemoteHooks.installCodexRemote` writes this into
+ * an SSH host's `~/.codex/hooks.json`, and that host is POSIX whatever the desktop is. A default of
+ * `process.platform` would make a Windows desktop install a `.cmd` command on a Linux server.
+ *
+ * `cmdExe` is likewise a parameter so the BODY stays a pure function of its arguments — it feeds the
+ * trust hash, and a builder that reached for the environment mid-computation would be harder to
+ * pin down. The environment is read only to compute the default, once, at the call. The install
+ * path takes that default; tests pass their own.
+ */
+export function buildManagedCommand(
+  script: string,
+  platform: NodeJS.Platform | string = process.platform,
+  cmdExe: string = defaultWindowsCmdExe()
+): string {
+  if (platform === 'win32') {
+    // Point codex at the batch wrapper written beside the script; the wrapper finds a POSIX shell
+    // and runs the very same `codex.sh` (issue #567).
+    //
+    // NAMING THE INTERPRETER is the fix for #685. #567 emitted the bare quoted wrapper path, which
+    // is what `command_runner.rs`'s COMSPEC/`cmd.exe /C` shape needs. But that is codex's FALLBACK:
+    // the hook runs in the session's shell, and `shell_detect.rs::default_user_shell_from_path`
+    // prefers PowerShell on Windows (`if cfg!(windows) { get_shell(ShellType::PowerShell) ... }`) —
+    // true at the rust-v0.153.4 tag, and measured on the shipped codex-cli 0.153.4 with a stock
+    // config and COMSPEC=cmd.exe. To PowerShell a lone quoted path is a string LITERAL: it echoes
+    // the path, exits 0 and runs nothing, so codex reports the hook `Completed` while no hook ever
+    // fired. A silent no-op is worse than the exit-1 noise #567 removed, because nothing in the UI
+    // says the badge went dark.
+    //
+    // Both interpreters are reachable, so the command must not assume either. Every piece below was
+    // measured, through the shipped codex AND from a cmd.exe parent, with the real wrapper and a
+    // stdin-consuming codex.sh:
+    //
+    //   `<abs cmd.exe>`  not bare `cmd`. PowerShell resolves a bare name against PATH, and a
+    //                    `cmd.*` planted in a shared directory earlier on PATH wins — a directory
+    //                    another principal may be able to write without any access to this user's
+    //                    profile, so this is NOT the same attacker as one who could edit the
+    //                    wrapper. Falls back to bare `cmd` only if the resolved path is not safe to
+    //                    write unquoted (see defaultWindowsCmdExe).
+    //   `/d`             skips the HKCU/HKLM Command Processor AutoRun entries. Not a security
+    //                    boundary — HKCU AutoRun and the wrapper are writable by the same user —
+    //                    but an AutoRun script's stdout would otherwise prefix every hook's output,
+    //                    and its cwd/env changes would leak into the hook.
+    //   `call`           needed under a cmd parent: it stops cmd's /C rule stripping the quote pair
+    //                    around a path holding `&`, `(` or `)`, which would otherwise be re-parsed
+    //                    as metacharacters.
+    //   trailing space   INSIDE the quotes, load-bearing, not a typo. It is what makes PowerShell
+    //                    keep the quoting when it builds cmd's native argument line — without it,
+    //                    `cmd /d /c call "<path with & or (>"` was measured Failed through the
+    //                    shipped codex and Completed from a cmd parent; with it, both run. (Direct
+    //                    check: `powershell -Command 'cmd /d /c echo "paren(x)"'` prints an
+    //                    unquoted `paren(x)`, while `"paren(x) "` keeps its quotes.)
+    //                    `cmd /s /c ""..."" `, the documented workaround, is NOT usable — PowerShell
+    //                    collapses the doubled quotes before cmd sees them (Failed).
+    //
+    // KNOWN LIMITS, all measured, none fixed here, and none of them regressions — the #567 form did
+    // not run at all under PowerShell, for any path:
+    //   - `^` in the path fails under both parents.
+    //   - `$` and a backtick fail under PowerShell (it interpolates / escapes) and work under cmd.
+    //   - `%NAME%` is expanded by both parents when that variable exists.
+    // Each needs the character in the user's own profile name, which Windows permits.
+    //
+    // ALSO MEASURED, and the reason nothing here depends on an exit code: under PowerShell codex
+    // sees the hook's exit status collapsed to 0/1 (a direct cmd parent preserves 0/1/2/37), so the
+    // exit-2 "block the prompt" convention does not survive this path. The managed script exits 0
+    // on every branch, including its bails, so no behaviour in this repo relies on the distinction.
+    const dir = script.slice(0, Math.max(script.lastIndexOf('\\'), script.lastIndexOf('/')) + 1)
+    return `${cmdExe} /d /c call "${dir}${CODEX_WINDOWS_WRAPPER_FILE} "`
+  }
   // POSIX single-quote escape so $, `, ", \ in the path are taken literally.
   const quoted = `'${script.replaceAll("'", "'\\''")}'`
-  return `if [ -x ${quoted} ]; then /bin/sh ${quoted}; fi`
+  // The `else` branch DRAINS stdin. Codex writes the hook payload there, so a bail that never reads
+  // it can EPIPE the writer mid-payload — the same reason install-helper's command carries it
+  // (#186/#187). This was the one managed command missing it.
+  return `if [ -x ${quoted} ]; then /bin/sh ${quoted}; else cat >/dev/null 2>&1 || :; fi`
 }
 
 // Pure core of the codex install: given the CURRENT parsed hooks.json (or {} for
@@ -258,10 +360,35 @@ function writeManagedScript(file: string): void {
   }
 }
 
+/** The batch entry point beside the script — Windows only; nothing else ever reads it. */
+function writeWindowsWrapper(script: string): void {
+  const dir = path.dirname(script)
+  const file = path.join(dir, CODEX_WINDOWS_WRAPPER_FILE)
+  mkdirSync(dir, { recursive: true })
+  const tmp = path.join(dir, `.${Date.now()}-${randomUUID()}.tmp`)
+  let renamed = false
+  try {
+    writeFileSync(tmp, buildCodexWindowsWrapper(), 'utf8')
+    renameAtomicSync(tmp, file)
+    renamed = true
+  } finally {
+    if (!renamed && existsSync(tmp)) {
+      try {
+        unlinkSync(tmp)
+      } catch {
+        /* best effort */
+      }
+    }
+  }
+}
+
 export function installCodexHooks(): void {
   const script = scriptPath()
   try {
     writeManagedScript(script)
+    // Order matters: the wrapper must exist before hooks.json points codex at it, or the first
+    // events after an install land on a missing file.
+    if (process.platform === 'win32') writeWindowsWrapper(script)
   } catch (e) {
     console.warn('[agent-hooks] codex script write failed', e)
     return

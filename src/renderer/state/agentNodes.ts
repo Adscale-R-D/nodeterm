@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { WORKING_STALE_MS } from '@shared/agents/stale'
 
 /**
  * Transient visualization of subagents a Claude node spawns (Task/Agent tool), keyed by the
@@ -57,6 +58,27 @@ interface AgentNodesState {
    * derived node. Cards select one at a time, by click, purely to show their resize frame.
    */
   selectedId: string | null
+  /**
+   * `settings.autoHideFinishedSubagentCards`, mirrored here by Canvas so the store stays free of
+   * the settings store.
+   *
+   * On, a card is DROPPED at the moment its subagent REPORTS done — `finish()`, and only
+   * `finish()` — rather than left `done` for the next turn boundary to take. Only a finished card
+   * is ever dropped, so #547's rule (a new turn must keep the cards of subagents that are still
+   * running) and Eco's `liveSubagents` are untouched.
+   *
+   * **`sweepStaleWorking`'s decay is deliberately NOT gated on this.** That sweep fires precisely
+   * because the end never ARRIVED (crashed CLI, killed pane, slept machine), which is the opposite
+   * of the setting's promise, and it is the one case where a visible card carries the most
+   * information: drop it and a fan-out whose subagents died silently leaves nothing on the canvas
+   * that says a subagent was ever launched. The decay keeps marking `done` and the turn boundary
+   * takes the card, exactly as it did before this setting existed. It costs Eco nothing — an
+   * absent card and a `done` card are the same answer to `liveSubagents`.
+   *
+   * Off is the default and reproduces the previous behavior exactly.
+   */
+  autoHideFinished: boolean
+  setAutoHideFinished(on: boolean): void
   select(id: string | null): void
   setPosition(id: string, offset: { x: number; y: number }): void
   setSize(id: string, size: { width: number; height: number }): void
@@ -67,8 +89,49 @@ interface AgentNodesState {
   finish(toolUseId: string, result: SubagentResult): void
   /** Append a chunk of the subagent's live transcript. */
   appendActivity(toolUseId: string, chunk: string): void
-  /** Remove all subagents spawned by a given parent node (turn/session ended, or node closed). */
+  /**
+   * Remove ALL subagents spawned by a given parent node, finished or not.
+   *
+   * For the paths where the parent itself is gone or its session has ended — node deleted, project
+   * deleted, cross-project close, orphan-session kill, `SessionEnd`. A node that no longer exists
+   * has no work left to represent, so there is nothing to preserve.
+   *
+   * **NOT for a turn boundary** — see `clearFinishedForParent` and issue #547.
+   */
   clearForParent(parentNodeId: string): void
+  /**
+   * Drop only the FINISHED subagent cards of a parent. The turn-boundary clear.
+   *
+   * Issue #547: `clearForParent` ran on every new turn on the assumption that the previous fan-out
+   * is stale by definition. That holds for a card whose subagent has finished and is false for one
+   * that has not — Claude launches subagents async, and "waiting for N background agents to finish"
+   * is exactly the state in which the user types the next prompt. The card vanished permanently
+   * (nothing rehydrates `byId`: `start()` fires only from a live `PreToolUse`, and a subagent past
+   * that emits no second one) while the agent kept working. Same permanent loss as #402, different
+   * trigger.
+   *
+   * The more expensive half is not the missing card. Eco's hibernation guard derives `liveSubagents`
+   * from this same store, so a wiped card let a parent with live background agents read as idle and
+   * get its CLI `/exit`ed — the regression #402 was raised to close.
+   *
+   * `state` already draws the line the fix needs (`'working' | 'done'`, `finish()` idempotent), so
+   * this needs no new concept. What it does need is the decay: see `sweepStaleWorking`.
+   */
+  clearFinishedForParent(parentNodeId: string): void
+  /**
+   * Mark every card still `working` past `staleMs` as done — the decay `clearFinishedForParent`
+   * depends on.
+   *
+   * Without it a subagent whose `finish()` never arrives (crashed CLI, killed pane, slept machine)
+   * pins its card forever AND pins its parent against Eco forever, which is a worse bug than the
+   * one being fixed. The number is `WORKING_STALE_MS`, imported rather than chosen: that module
+   * exists because three surfaces each invented their own timeout, and a subagent card inventing a
+   * fourth would be the same mistake in a new place.
+   *
+   * It marks done rather than deleting, so the card stays readable and the next turn boundary takes
+   * it; `finish()` landing late is a no-op on an entry that is already done.
+   */
+  sweepStaleWorking(now?: number, staleMs?: number): void
   /**
    * Drop every dragged position/size/expanded override for a parent's subagent cards, snapping
    * them back to the default packed grid (`offsetFrom`'s fallback in Canvas) at base dims — an
@@ -107,6 +170,37 @@ function loadLoopOverrides(): Overrides {
   }
 }
 
+/** Card ids belonging to one parent. */
+function cardsOf(s: AgentNodesState, parentNodeId: string): string[] {
+  return Object.keys(s.byId).filter((id) => s.byId[id].parentNodeId === parentNodeId)
+}
+
+/**
+ * Drop the given cards and everything keyed by their ids. The one removal body, so the
+ * unconditional clear and the turn-boundary clear cannot drift in what they take with them.
+ */
+function dropCards(s: AgentNodesState, ids: string[]): Partial<AgentNodesState> | AgentNodesState {
+  if (!ids.length) return s
+  const byId = { ...s.byId }
+  const activityById = { ...s.activityById }
+  const positions = { ...s.positions }
+  const sizes = { ...s.sizes }
+  const expanded = { ...s.expanded }
+  // Loop-card overrides (`loop-<pid>`) are deliberately NOT dropped here — the card outlives turns;
+  // its overrides go via clearLoop when the loop itself ends.
+  for (const id of ids) {
+    delete byId[id]
+    delete activityById[id]
+    delete positions[id]
+    delete sizes[id]
+    delete expanded[id]
+  }
+  // A card that just vanished must not stay "selected" — a later card reusing the id would come
+  // back pre-selected.
+  const selectedId = s.selectedId && ids.includes(s.selectedId) ? null : s.selectedId
+  return { byId, activityById, positions, sizes, expanded, selectedId }
+}
+
 function saveLoopOverrides(s: Overrides): void {
   try {
     const pick = <T>(m: Record<string, T>): Record<string, T> =>
@@ -124,7 +218,11 @@ export const useAgentNodes = create<AgentNodesState>((set) => ({
   byId: {},
   activityById: {},
   selectedId: null,
+  autoHideFinished: false,
   ...loadLoopOverrides(),
+
+  setAutoHideFinished: (on) =>
+    set((s) => (s.autoHideFinished === on ? s : { autoHideFinished: on })),
 
   select: (id) => set((s) => (s.selectedId === id ? s : { selectedId: id })),
 
@@ -167,6 +265,7 @@ export const useAgentNodes = create<AgentNodesState>((set) => ({
     set((s) => {
       const prev = s.byId[toolUseId]
       if (!prev || prev.state === 'done') return s
+      if (s.autoHideFinished) return dropCards(s, [toolUseId])
       // Async subagents end via a <task-notification> that carries no timing stats — fall
       // back to the card's own elapsed time so the duration doesn't vanish on completion.
       const durationMs = result.durationMs ?? Date.now() - prev.startedAt
@@ -180,27 +279,25 @@ export const useAgentNodes = create<AgentNodesState>((set) => ({
       return { activityById: { ...s.activityById, [toolUseId]: activity } }
     }),
 
-  clearForParent: (parentNodeId) =>
+  clearForParent: (parentNodeId) => set((s) => dropCards(s, cardsOf(s, parentNodeId))),
+
+  clearFinishedForParent: (parentNodeId) =>
+    set((s) => dropCards(s, cardsOf(s, parentNodeId).filter((id) => s.byId[id].state === 'done'))),
+
+  sweepStaleWorking: (now = Date.now(), staleMs = WORKING_STALE_MS) =>
     set((s) => {
-      const ids = Object.keys(s.byId).filter((id) => s.byId[id].parentNodeId === parentNodeId)
+      const stale = Object.keys(s.byId).filter(
+        (id) => s.byId[id].state === 'working' && now - s.byId[id].startedAt > staleMs
+      )
+      if (!stale.length) return s
       const byId = { ...s.byId }
-      const activityById = { ...s.activityById }
-      const positions = { ...s.positions }
-      const sizes = { ...s.sizes }
-      const expanded = { ...s.expanded }
-      // Loop-card overrides (`loop-<pid>`) are deliberately NOT dropped here — the card
-      // outlives turns; its overrides go via clearLoop when the loop itself ends.
-      for (const id of ids) {
-        delete byId[id]
-        delete activityById[id]
-        delete positions[id]
-        delete sizes[id]
-        delete expanded[id]
+      for (const id of stale) {
+        const prev = byId[id]
+        // No result to report — the completion signal is what went missing. The elapsed time is
+        // still true, and it is `finish()`'s own fallback for the async case.
+        byId[id] = { ...prev, state: 'done', durationMs: prev.durationMs ?? now - prev.startedAt }
       }
-      // A card that just vanished must not stay "selected" — a later card reusing the id would
-      // come back pre-selected.
-      const selectedId = s.selectedId && ids.includes(s.selectedId) ? null : s.selectedId
-      return { byId, activityById, positions, sizes, expanded, selectedId }
+      return { byId }
     }),
 
   tidyFanout: (parentNodeId) =>

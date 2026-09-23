@@ -4,6 +4,7 @@ import { writeFileAtomic } from './fs-atomic'
 import { platform } from './platform'
 import type { AgentId } from '@shared/agents/config'
 import type { AgentState, NormalizedAgentEvent } from '@shared/agents/normalize'
+import type { ObservedClaudeAccount } from '@shared/types'
 import { WORKING_STALE_MS, isStaleWorking } from '@shared/agents/stale'
 
 /**
@@ -41,6 +42,18 @@ export interface MirrorEntry {
   state?: AgentState
   agentId?: AgentId
   sessionId?: string
+  /**
+   * Which Claude account this node was OBSERVED running under (`NormalizedAgentEvent.account`,
+   * derived by the hook server from the payload's `transcript_path` — see `ObservedClaudeAccount`).
+   *
+   * Captured off ANY event, exactly like `agentId`/`sessionId`, and for a sharper reason than
+   * either: for a hand-launched `claude` in a plain terminal the node's `data.accountId` is
+   * undefined forever, so this label is the ONLY record of which identity the pane is on. It rides
+   * the mirror file so a reader with no canvas (the phone) can render the same account chip.
+   *
+   * A LABEL, like `stateVerified` is not: nothing may gate on it.
+   */
+  account?: ObservedClaudeAccount
   /** The agent's own session name (the `/rename` name, read from its transcript) — published by
    *  the session-name sweep so a reader with no canvas (the phone) sees the CURRENT name, not
    *  whatever the node title was when it was last open. Absent until resolved. */
@@ -155,6 +168,18 @@ export interface MirrorSettings {
   autoSupported?: boolean
   /** Managed accounts usable on THIS host; dirs are absolute on that host. */
   claudeAccounts?: { id: string; dir: string }[]
+  /**
+   * Which values THIS host's `codex` accepts for `--ask-for-approval`, read from its own `--help`.
+   * Absent = not probed / not knowable for this host, which means "use `on-request` and `never`
+   * only" — the two values every codex from 0.146.0 to 0.154.0 takes.
+   *
+   * A reader must not emit a value that is not in this list. `untrusted` was removed in codex
+   * 0.149.0 and clap EXITS on an unknown value, so a phone that launches Manual-mode Codex from a
+   * hardcoded table gets a dead pane with the CLI's usage error in it (issue #785). It is a
+   * per-agent, per-host fact for the same reason `autoSupported` is: it answers for *codex* on
+   * *this* host and generalizes to neither another agent nor another machine.
+   */
+  codexApprovalValues?: string[]
 }
 
 export interface MirrorFile {
@@ -166,6 +191,9 @@ export interface MirrorFile {
       state?: AgentState
       agentId?: AgentId
       sessionId?: string
+      /** Observed Claude account (see MirrorEntry.account). Additive — absent on old files and
+       *  on every node that has never posted a claude hook payload. */
+      account?: ObservedClaudeAccount
       /** The agent's own session name (see MirrorEntry.name). Absent until resolved. */
       name?: string
       /** Eco hibernation (see MirrorEntry.hibernated). Present = true; absent on old files. */
@@ -373,7 +401,45 @@ export interface MirrorInbox {
  * Pure reducer: fold one event into a node's entry, mirroring the renderer store's MAIN-state
  * semantics. Returns the next entry (never mutates `prev`). `now` is injected for testability.
  */
+function resolveGrokStopCancelled(ev: NormalizedAgentEvent): NormalizedAgentEvent {
+  if (
+    ev.agentId !== 'grok' ||
+    ev.kind !== 'state' ||
+    ev.state !== undefined ||
+    !ev.cancelReason ||
+    ev.subagentType !== undefined
+  ) {
+    return ev
+  }
+
+  // Grok 1.0.13's `10-hooks.md:336,348,354,384` makes this a CLOSED session-level decision.
+  // A subagent cancellation is returned above because ending its card must not end the parent
+  // session. Unknown reasons stay identity-only: guessing `done` could turn a future cancel-and-send
+  // dialect into a false completion while the agent is still working.
+  switch (ev.cancelReason) {
+    case 'user_interrupt':
+      return { ...ev, state: 'done', interrupted: true }
+    case 'permission_rejected':
+    case 'permission_cancelled':
+    case 'max_turns':
+    case 'no_progress':
+      // These end the turn, but are not an Esc/Ctrl-C. Keeping them non-interrupted makes the
+      // non-successful terminal outcome visible instead of suppressing its completion edge.
+      return { ...ev, state: 'done' }
+    case 'unknown':
+      return ev
+  }
+}
+
 export function reduceEntry(
+  prev: MirrorEntry | undefined,
+  ev: NormalizedAgentEvent,
+  now: number
+): MirrorEntry {
+  return reduceEffectiveEntry(prev, resolveGrokStopCancelled(ev), now)
+}
+
+function reduceEffectiveEntry(
   prev: MirrorEntry | undefined,
   ev: NormalizedAgentEvent,
   now: number
@@ -413,6 +479,12 @@ export function reduceEntry(
   // agentId threading). agentId is always present on a NormalizedAgentEvent.
   if (ev.agentId) next.agentId = ev.agentId
   if (ev.sessionId) next.sessionId = ev.sessionId
+  // The observed Claude account is identity too, and follows the same rule as `agentId`: written
+  // by any event that carries one, never cleared by one that does not. Only claude events carry it
+  // (hook-server), and a claude session's config dir is fixed for the life of the process — an
+  // event without the label is a codex/gemini event or a payload with no transcript_path, neither
+  // of which is evidence that this node stopped being on the account it was last seen on.
+  if (ev.account) next.account = ev.account
 
   if (ev.kind === 'state' && ev.state) {
     // An `idle` done (Claude went quiet at its prompt) is a RESCUE, not a turn end: it may only
@@ -519,6 +591,9 @@ export function buildFile(
       state: e.state,
       agentId: e.agentId,
       sessionId: e.sessionId,
+      // Spread-when-present, like `name`/`hibernated`: a node that never posted a claude payload
+      // keeps the byte-for-byte file shape it had before this field existed.
+      ...(e.account ? { account: e.account } : {}),
       ...(e.name ? { name: e.name } : {}),
       ...(e.hibernated ? { hibernated: true as const } : {}),
       updatedAt: e.updatedAt
@@ -556,12 +631,74 @@ function basename(p: string): string {
 /**
  * Map a raw hook tool invocation to a human "what it's doing now" line (spec: mobile-usage-inbox).
  * Pure; clipped to INBOX_ACTIVITY_MAX. Unknown tools fall back to "Using <tool>".
+ *
+ * TWO VOCABULARIES, one function. Claude's names are PascalCase (`Read`, `Bash`) and grok's are
+ * snake_case (`read_file`, `run_terminal_command`), so they cannot collide and no agent id is needed
+ * to tell them apart — but only while the match stays EXACT. Do not add case-folding here: `grep`
+ * and `Grep`, `write` and `Write` differ by case alone, and folding them would silently read grok's
+ * argument keys out of a claude payload.
+ *
+ * The grok names are MEASURED, not derived from the docs: `signals.json.toolsUsed` across 22 real
+ * sessions (grok 1.0.13, 2026-09-02) yields exactly fifteen. Their ARGUMENT keys are a separate
+ * question and only two were seen in captured hook payloads — `read_file.target_file` and
+ * `run_terminal_command.command`. Every other grok case below therefore names the action and stops,
+ * rather than reading a key nobody has observed: a phrase with no detail is honest, a phrase built
+ * on a guessed key renders "Editing file" forever the day the guess is wrong.
  */
 export function toolActivity(toolName: string, toolInput: Record<string, unknown> | undefined): string {
   const ti = toolInput ?? {}
   const str = (v: unknown): string => (typeof v === 'string' ? v : '')
   let out: string
   switch (toolName) {
+    // ---- grok (snake_case). MEASURED argument keys only. ----
+    case 'read_file':
+      out = `Reading ${basename(str(ti.target_file)) || 'file'}`
+      break
+    case 'run_terminal_command': {
+      const cmd = str(ti.command).replace(/\s+/g, ' ').trim()
+      out = `Running ${cmd ? clip(cmd, 60) : 'command'}`
+      break
+    }
+    case 'search_replace':
+      out = 'Editing a file'
+      break
+    case 'write':
+      out = 'Writing a file'
+      break
+    case 'list_dir':
+      out = 'Listing a directory'
+      break
+    case 'grep':
+      out = 'Searching the code'
+      break
+    case 'web_search':
+      out = 'Searching the web'
+      break
+    case 'web_fetch':
+      out = 'Fetching a page'
+      break
+    case 'todo_write':
+      out = 'Updating its plan'
+      break
+    case 'spawn_subagent':
+      out = 'Delegating to a subagent'
+      break
+    case 'get_command_or_subagent_output':
+      out = 'Checking a background task'
+      break
+    case 'kill_command_or_subagent':
+      out = 'Stopping a background task'
+      break
+    case 'search_tool':
+      out = 'Looking up an MCP tool'
+      break
+    case 'ask_user_question':
+      out = 'Asking you a question'
+      break
+    case 'exit_plan_mode':
+      out = 'Presenting a plan'
+      break
+    // ---- claude (PascalCase) ----
     case 'Edit':
     case 'Write':
     case 'MultiEdit':
@@ -600,7 +737,14 @@ export function toolActivity(toolName: string, toolInput: Record<string, unknown
       out = `Fetching ${str(ti.query) || '…'}`
       break
     default:
-      out = `Using ${toolName}`
+      // A qualified MCP name is `server__tool` — grok's own dispatcher (`use_tool`) never appears in
+      // a payload, the resolved call does (10-hooks.md). Naming the tool and its server is more use
+      // than either half alone, and it is derived from the string itself, so no vocabulary can go
+      // stale. Everything else keeps the historical "Using <tool>".
+      {
+        const mcp = /^([A-Za-z0-9_.-]+)__([A-Za-z0-9_.-]+)$/.exec(toolName)
+        out = mcp ? `Using ${mcp[2]} (${mcp[1]})` : `Using ${toolName}`
+      }
   }
   return clip(out, INBOX_ACTIVITY_MAX)
 }
@@ -1114,6 +1258,18 @@ export function onMirrorFlush(cb: (doc: MirrorFile) => void): () => void {
  * behavior. Stale entries are dropped with the SAME expiry sweep `buildFile`/`flush` apply, so a
  * "working" from a long-dead session is never resurrected.
  */
+/** Minimal shape check for a restored `account` block (see the call site's comment). */
+function isObservedAccount(a: unknown): a is ObservedClaudeAccount {
+  if (!a || typeof a !== 'object') return false
+  const o = a as Record<string, unknown>
+  return (
+    typeof o.configDir === 'string' &&
+    !!o.configDir &&
+    (o.accountId === null || typeof o.accountId === 'string') &&
+    typeof o.known === 'boolean'
+  )
+}
+
 function loadPersisted(file: string): void {
   // Only seed empty memory — never clobber a live session (init runs once at boot, but guard so a
   // stray re-init can't wipe in-flight state).
@@ -1141,6 +1297,11 @@ function loadPersisted(file: string): void {
           state: e.state,
           agentId: e.agentId,
           sessionId: e.sessionId,
+          // Identity survives the restart like agentId/sessionId does — for a hand-launched
+          // claude it is the only record there is. SHAPE-CHECKED rather than trusted: this file
+          // can be hand-edited or written by another build, and a chip rendered off `{}` would
+          // read as "no account observed" while occupying the slot of one that was.
+          ...(isObservedAccount(e.account) ? { account: e.account } : {}),
           ...(e.name ? { name: e.name } : {}),
           ...(e.hibernated === true ? { hibernated: true as const } : {}),
           updatedAt,
@@ -1228,18 +1389,19 @@ interface NeedsYouClassification {
  *    STRIPPED — so TerminalNode's `blocked && pendingId` gate never renders approve/deny on a
  *    question (field report: the buttons showed during an AskUserQuestion);
  *  - a genuine `approval` gains `askKind:'approval'` and keeps its `pendingId` unchanged.
- * Every other event (working / done / session / subagent / recurring) passes through untouched
- * (same reference). Internal behavior — inbox production, live-update seams, disk writes — is
- * unchanged; this only affects what the caller then broadcasts. Called with EVERY normalized event
- * by both shells.
+ * Grok's state-less `StopCancelled` is projected here too, so the state folded into this mirror is
+ * the same state both shells broadcast; subagent/unknown cancellations retain their original
+ * identity-only event. Every other event passes through untouched (same reference). Called with
+ * EVERY normalized event by both shells.
  */
-export function recordAgentEvent(ev: NormalizedAgentEvent): NormalizedAgentEvent {
-  if (!ev?.nodeId) return ev
+export function recordAgentEvent(rawEvent: NormalizedAgentEvent): NormalizedAgentEvent {
+  if (!rawEvent?.nodeId) return rawEvent
+  const ev = resolveGrokStopCancelled(rawEvent)
   const nodeId = ev.nodeId
   const now = Date.now()
   const prev = state.get(nodeId)
   const prevState = prev?.state
-  const next = reduceEntry(prev, ev, now)
+  const next = reduceEffectiveEntry(prev, ev, now)
   state.set(nodeId, next)
   // reduceEntry held an unanswered `request_user_input` through its turn-end `done` — rewrite
   // the broadcast to what the reducer decided, so every consumer (canvas store, notch, phone)

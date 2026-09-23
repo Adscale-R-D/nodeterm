@@ -16,6 +16,7 @@ import path from 'path'
 import { spawn } from 'child_process'
 import type { ProviderUsage, UsageLimit } from '../../shared/types'
 import { parseResetTimestamp } from './claude-usage-map'
+import { directExecutableInvocation, findInLoginPath } from '../exec-path'
 
 const BACKEND_USAGE_URL = 'https://chatgpt.com/backend-api/wham/usage'
 const FETCH_TIMEOUT_MS = 8000
@@ -147,14 +148,35 @@ async function fetchViaBackend(home: string): Promise<ProviderUsage | null> {
 
 /**
  * Tier 2: `codex app-server` speaks JSON-RPC over stdio. Costs a subprocess, so it runs only
- * when the backend tier declined. Sandboxed read-only/untrusted — this must never be a way for
- * a quota refresh to touch the user's files.
+ * when the backend tier declined. Sandboxed read-only — this must never be a way for a quota
+ * refresh to touch the user's files.
+ *
+ * The approval policy is `never`, and it used to be `untrusted`. That value was removed from
+ * codex's vocabulary in 0.149.0 and clap refuses the whole invocation rather than ignoring it:
+ *
+ *   error: invalid value 'untrusted' for '--ask-for-approval <APPROVAL_POLICY>'
+ *
+ * so on every current CLI this tier exited 2 before it spoke a word of JSON-RPC and silently
+ * returned null forever (issue #785). Unlike the launch path there is nothing to probe for here:
+ * `never` is accepted by EVERY codex we have measured, 0.146.0 through 0.154.0 (checked by running
+ * `-s read-only -a never app-server` against each binary), so one value serves both vocabularies.
+ * It is also the right value on its own terms — this is a non-interactive read with no user to
+ * prompt, and `-s read-only` is what actually keeps it away from the user's files; an approval
+ * policy that escalates would only have hung it.
  */
-async function fetchViaAppServer(home: string): Promise<ProviderUsage | null> {
+export const CODEX_APP_SERVER_ARGS = ['-s', 'read-only', '-a', 'never', 'app-server'] as const
+
+export async function fetchCodexUsageViaAppServerAt(
+  bin: string,
+  home: string
+): Promise<ProviderUsage | null> {
+  const invocation = directExecutableInvocation(bin, [...CODEX_APP_SERVER_ARGS])
+  if (!invocation) return null
   return new Promise<ProviderUsage | null>((resolve) => {
     let child: ReturnType<typeof spawn>
     try {
-      child = spawn('codex', ['-s', 'read-only', '-a', 'untrusted', 'app-server'], {
+      child = spawn(invocation.executable, invocation.args, {
+        ...invocation.options,
         env: { ...process.env, CODEX_HOME: home },
         stdio: ['pipe', 'pipe', 'ignore']
       })
@@ -223,6 +245,11 @@ async function fetchViaAppServer(home: string): Promise<ProviderUsage | null> {
       }) + '\n'
     )
   })
+}
+
+async function fetchViaAppServer(home: string): Promise<ProviderUsage | null> {
+  const bin = await findInLoginPath('codex')
+  return bin ? fetchCodexUsageViaAppServerAt(bin, home) : null
 }
 
 /**

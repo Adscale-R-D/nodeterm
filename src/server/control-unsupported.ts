@@ -1,3 +1,6 @@
+import { parseControlRequest } from '../core/canvas-control-core'
+import type { ServerControlReply } from './headless-node-factory'
+
 /**
  * The Server Edition's answer to `/control/*`: a NAMED, permanent refusal.
  *
@@ -22,25 +25,10 @@ export const CONTROL_UNSUPPORTED_ERROR = 'control-unsupported-on-this-edition'
  * The prose, which must say the thing a retrying model needs to hear IN WORDS: the literal
  * "do not retry". A refusal that only a status code distinguishes from an outage is not a refusal
  * an agent can act on.
- *
- * IT NAMES THE VERB, and that stopped being cosmetic the day this edition gained real canvas
- * control. This used to read "Canvas control is not available on the nodeterm Server Edition",
- * which was true when EVERY verb was refused and became a lie the moment only a handful were: an
- * agent that asked for `send` was told the whole feature was missing, so it went looking for a
- * switch to turn on (Settings → Agents) and asked its user to check — for a setting that could not
- * have helped. Reported from a live session, within the hour. A per-verb refusal must scope its
- * claim to the verb, or it teaches the reader something false about everything else.
  */
-export function controlUnsupportedSentence(verb: string): string {
-  return (
-    `The \`${verb}\` verb is not available on the nodeterm Server Edition (other canvas-control ` +
-    'verbs work here). This is permanent on this host, not a temporary failure — do not retry.'
-  )
-}
-
-/** The invariant tail, kept as a constant because it is what a caller may match on. */
 export const CONTROL_UNSUPPORTED_SENTENCE =
-  'This is permanent on this host, not a temporary failure — do not retry.'
+  'Canvas control is not available on the nodeterm Server Edition. This is permanent on this ' +
+  'host, not a temporary failure — do not retry.'
 
 /**
  * `browser` gets one extra clause naming WHY it is structural, so nobody files it as unimplemented
@@ -58,27 +46,14 @@ export const BROWSER_UNSUPPORTED_CLAUSE =
  * the text/plain dialect (which carries no `error` field) still names the refusal.
  */
 export function controlUnsupportedMessage(verb: string): string {
-  return `${CONTROL_UNSUPPORTED_ERROR}: ${controlUnsupportedSentence(verb)}${unsupportedClause(verb)}`
+  const why = verb === 'browser' ? ` ${BROWSER_UNSUPPORTED_CLAUSE}` : ''
+  return `${CONTROL_UNSUPPORTED_ERROR}: ${CONTROL_UNSUPPORTED_SENTENCE}${why}`
 }
-
-/** The per-verb "why", empty for a verb that needs no elaboration. */
-function unsupportedClause(verb: string): string {
-  if (verb === 'browser') return ` ${BROWSER_UNSUPPORTED_CLAUSE}`
-  if (verb === 'open-project') return ` ${OPEN_PROJECT_UNSUPPORTED_CLAUSE}`
-  if (verb === PROJECT_TARGET_VERB) return ` ${PROJECT_TARGET_UNSUPPORTED_CLAUSE}`
-  return ''
-}
-
-/** The pseudo-verb name a `--project`-carrying refusal reports, so its clause is routed like any
- *  other and the message still names what was refused. */
-const PROJECT_TARGET_VERB = '--project targeting'
 
 /**
- * The permanent refusal, for a verb this edition genuinely cannot perform. Never resolves `ok: true`.
- *
- * It is no longer the answer to EVERY verb — the edition wires canvas control for real now
- * (`core/agents/canvas-control-bridge.ts`) — so this is what `withEditionRefusals` puts in front of
- * the bridge for the verbs below.
+ * What `src/server/index.ts` hands to `hookServer.setControlHandler` while the feature flag is
+ * OFF. This preserves the pre-Phase-1 response byte-for-byte, which is both the safe upgrade
+ * default and the explicit rollback path.
  */
 export async function serverEditionControlHandler({ verb }: { verb: string }): Promise<{
   ok: false
@@ -88,77 +63,141 @@ export async function serverEditionControlHandler({ verb }: { verb: string }): P
   return { ok: false, error: CONTROL_UNSUPPORTED_ERROR, message: controlUnsupportedMessage(verb) }
 }
 
-/**
- * The verbs that stay permanently refused on this edition, even with a browser tab attached.
- *
- * WHY A SET IN FRONT OF THE BRIDGE, rather than letting these fall through to the browser and be
- * refused there: the bridge needs an attached UI to reach any refusal at all, and with zero tabs —
- * the normal state of a headless host — it answers its own no-UI message, which says *retryable*.
- * For a verb that can never work here that is a lie with a cost: the agent waits for a browser tab
- * that would not have helped. A permanent fact must not be reported behind a transient one.
- *
- *  - `browser` — structural, and the clause above says why: a browser node on this edition renders
- *    in the VIEWER's own Chrome tab. There is no `<webview>`, no `webContents` and no CDP on this
- *    host, so the server has no debugger for it and never can. (It is also not a verb this app has
- *    yet — `ControlVerb` lists 24 and the browser one is `open-browser`, which is deliberately NOT
- *    here: opening a surface is not driving one, and `open-browser` works fine in the browser.)
- * A verb LEAVES this set the day its dependency reaches core. That is the whole checklist, and it has
- * already been collected once: `send`/`reply`/`notify` were here because agent messaging lived in
- * `src/main/agent-messaging.ts` — and it turned out nothing in that module needed Electron (every
- * import was core/shared; its whole surface is an injected deps object). Only its WIRING sat in
- * main's boot. Both shells now boot it from `core/agents/agent-messaging-boot.ts`, so the three verbs
- * work here, under the same gates as the desktop: the per-project capability GRANT (off by default),
- * the runtime pane-ownership check, flow budgets, and hook-server's verified-only route.
- *
- * The lesson is the checklist's, not messaging's: before adding a verb here, check whether the
- * dependency is really Electron-bound or merely LIVES in `src/main`. Twice now it has been the latter.
- */
-export const EDITION_UNSUPPORTED_VERBS: ReadonlySet<string> = new Set(['browser', 'open-project'])
-
-/**
- * `open-project`'s clause, and the reason it is in the set above rather than forwarded.
- *
- * Everything that AUTHORIZES it lives in the desktop shell's control wrapper: the verified-caller
- * check, the SSH-caller local-only rule, the grant cap, and the single `statSync` resolution that
- * makes the renderer see a resolved path instead of the caller's raw argument (`gateOpenProject` /
- * `recordOpenProjectGrant`, src/main). None of that exists here, so forwarding the verb would hand
- * this edition's renderer an UNVALIDATED cwd with no grant accounting — a weaker gate than the
- * desktop's, reached by the same call. Refusing is the only honest answer until the gate itself
- * moves into core.
- */
-export const OPEN_PROJECT_UNSUPPORTED_CLAUSE =
-  'Opening another project from an agent is desktop-only: the checks that authorize it (verified ' +
-  'caller, path resolution, grant cap) live in the desktop shell, so this edition refuses rather ' +
-  'than acting on an unchecked path.'
-
-/**
- * `--project` TARGETING is refused here for the same reason, and it is matched on the ARGUMENT
- * rather than the verb: the set of targetable verbs (`PROJECT_TARGETABLE_VERBS`) lives in
- * `src/main/project-grants.ts`, which this shell may not import, and duplicating it here is exactly
- * the drift CLAUDE.md warns about. Refusing ANY verb that carries `--project` is a superset of that
- * set, needs no import, and cannot go stale when a verb joins it.
- */
-export function refusesProjectTargeting(args: Record<string, string> | undefined): boolean {
-  return !!args && args.project !== undefined
+export interface ServerEditionControlActions {
+  openProject(
+    sourceNodeId: string,
+    args: Record<string, string>,
+    verified: boolean
+  ): Promise<ServerControlReply>
+  openTerminal(
+    sourceNodeId: string,
+    args: Record<string, string>,
+    verified: boolean
+  ): Promise<ServerControlReply>
+  openAgent(
+    sourceNodeId: string,
+    args: Record<string, string>,
+    verified: boolean
+  ): Promise<ServerControlReply>
+  close(
+    sourceNodeId: string,
+    args: Record<string, string>,
+    verified: boolean
+  ): Promise<ServerControlReply>
+  link(
+    sourceNodeId: string,
+    args: Record<string, string>,
+    verified: boolean
+  ): Promise<ServerControlReply>
+  group(sourceNodeId: string, args: Record<string, string>): Promise<ServerControlReply>
+  rename(sourceNodeId: string, args: Record<string, string>): Promise<ServerControlReply>
+  color(sourceNodeId: string, args: Record<string, string>): Promise<ServerControlReply>
+  sticky(sourceNodeId: string, args: Record<string, string>): Promise<ServerControlReply>
+  /** Reads only; `--set` is refused by name (src/server/settings-control.ts). */
+  settings(sourceNodeId: string, args: Record<string, string>): Promise<ServerControlReply>
+  deliver(input: {
+    verb: 'send' | 'reply' | 'notify'
+    sourceNodeId: string
+    targetNodeId: string
+    body: string
+  }): Promise<ServerControlReply>
 }
 
-export const PROJECT_TARGET_UNSUPPORTED_CLAUSE =
-  'Targeting another project with --project is desktop-only: the own-or-granted check that ' +
-  'authorizes it lives in the desktop shell. Run the verb from a session in that project instead.'
+const SERVER_V1_VERBS: ReadonlySet<string> = new Set([
+  'open-project',
+  'open-terminal',
+  'open-agent',
+  'close',
+  'link',
+  'group',
+  'rename',
+  'color',
+  'send',
+  'reply',
+  'notify',
+  'sticky',
+  'settings'
+])
+
+/** A permanent, verb-specific refusal used only while canvas control itself is enabled. */
+export function unsupportedServerVerbMessage(verb: string): string {
+  const why = verb === 'browser' ? ` ${BROWSER_UNSUPPORTED_CLAUSE}` : ''
+  return (
+    `${CONTROL_UNSUPPORTED_ERROR}: The "${verb}" canvas-control verb is not supported by ` +
+    `nodeterm Server Edition v1. This is not a temporary failure — do not retry.${why}`
+  )
+}
 
 /**
- * Wrap the real control bridge so the verbs above keep their permanent, named refusal and everything
- * else reaches the canvas. `handler` is `initCanvasControlBridge(...)`; the signature is structural
- * so this file stays free of the bridge (and of core) — it is vocabulary, not transport.
+ * Build the real Server Edition handler. Authentication remains entirely in HookServer: this
+ * callback receives only requests that passed the app bearer, per-node verdict and the
+ * verified-only gate for messaging/sticky. Parsing is shared with desktop; dispatch is deliberately
+ * small and exhaustive so every deferred verb receives a named permanent edition refusal.
  */
-export function withEditionRefusals<
-  H extends (req: { verb: string; nodeId: string; args: Record<string, string> }) => Promise<unknown>
->(handler: H): H {
-  return (async (req) => {
-    if (EDITION_UNSUPPORTED_VERBS.has(req.verb)) return await serverEditionControlHandler(req)
-    // Argument-matched, not verb-matched — see refusesProjectTargeting.
-    if (refusesProjectTargeting(req.args))
-      return await serverEditionControlHandler({ verb: PROJECT_TARGET_VERB })
-    return await handler(req)
-  }) as H
+export function createServerEditionControlHandler(actions: ServerEditionControlActions): (req: {
+  verb: string
+  nodeId: string
+  args: Record<string, string>
+  verified: boolean
+}) => Promise<ServerControlReply> {
+  return async ({ verb, nodeId, args, verified }) => {
+    if (!SERVER_V1_VERBS.has(verb)) {
+      return {
+        ok: false,
+        error: CONTROL_UNSUPPORTED_ERROR,
+        message: unsupportedServerVerbMessage(verb)
+      }
+    }
+    const command = parseControlRequest(verb, args)
+    if ('error' in command) return { ok: false, error: command.error }
+    // Creator ownership is meaningful only for an authenticated node identity. Keep this at the
+    // Server boundary so every mutating/executing verb — including ones whose factory method has no
+    // `verified` parameter — fails before it can inspect or change shared state.
+    if (!verified) {
+      return {
+        ok: false,
+        error: `${command.verb}-identity-refused: Server Edition canvas control requires verified node identity`
+      }
+    }
+
+    switch (command.verb) {
+      case 'open-project':
+        return actions.openProject(nodeId, command.args, verified)
+      case 'open-terminal':
+        return actions.openTerminal(nodeId, command.args, verified)
+      case 'open-agent':
+        return actions.openAgent(nodeId, command.args, verified)
+      case 'close':
+        return actions.close(nodeId, command.args, verified)
+      case 'link':
+        return actions.link(nodeId, command.args, verified)
+      case 'group':
+        return actions.group(nodeId, command.args)
+      case 'rename':
+        return actions.rename(nodeId, command.args)
+      case 'color':
+        return actions.color(nodeId, command.args)
+      case 'sticky':
+        return actions.sticky(nodeId, command.args)
+      case 'settings':
+        return actions.settings(nodeId, command.args)
+      case 'send':
+      case 'reply':
+      case 'notify':
+        return actions.deliver({
+          verb: command.verb,
+          sourceNodeId: nodeId,
+          targetNodeId: command.args.node,
+          body: command.verb === 'notify' ? '' : command.args.text
+        })
+      default:
+        // `SERVER_V1_VERBS` and this switch are kept separate on purpose: the parser's wider
+        // ControlVerb union can grow without silently making a new server action reachable.
+        return {
+          ok: false,
+          error: CONTROL_UNSUPPORTED_ERROR,
+          message: unsupportedServerVerbMessage(verb)
+        }
+    }
+  }
 }

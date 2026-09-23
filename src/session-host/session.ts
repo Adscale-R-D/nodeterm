@@ -14,9 +14,16 @@ const SHELL_QUIET_CAP_MS = 1_500
 const POST_LAUNCH_READY_CAP_MS = 5_000
 const LAUNCH_READINESS_POLL_MS = 100
 const VERIFY_TIMEOUT_MS = 2_000
+const ECHO_EDGE_CHARS = 24
 const DELIVERY_ATTEMPTS = 3
-const ECHO_TAIL_CHARS = 24
-const KILL_LINE = '\x15'
+import {
+  KILL_LINE,
+  WINDOWS_KILL_LINE,
+  shellKillLineSequence
+} from '../shared/shell-kill-line'
+
+export { KILL_LINE, WINDOWS_KILL_LINE, shellKillLineSequence }
+
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 // eslint-disable-next-line no-control-regex
 const ESC_SEQ = /\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-_]/g
@@ -169,6 +176,10 @@ export class HostSession {
     return this.privateLaunchOutput
   }
 
+  get killLineSequence(): string {
+    return shellKillLineSequence(this.launchDialect, this.shellExecutableName)
+  }
+
   /** True once a successful explicit kill has claimed the name but before node-pty proves process
    * death with onExit. Same-name attach waits behind `ending` instead of joining this generation. */
   retiring = false
@@ -263,6 +274,17 @@ export class HostSession {
   async serialize(scrollback?: number): Promise<string> {
     await this.outputTail
     return this.term.serialize(scrollback)
+  }
+
+  /**
+   * Has the app in this pane requested bracketed paste? Behind `outputTail` for the same reason
+   * `serialize` is: xterm applies writes asynchronously, so a mode set by output we have already
+   * observed is not in `modes` yet. Reading it early answers "no" for the turn that just enabled
+   * it — which is exactly the injected-prompt delivery this gates (see send-keys-delivery.ts).
+   */
+  async bracketedPasteRequested(): Promise<boolean> {
+    await this.outputTail
+    return this.term.bracketedPasteRequested()
   }
 
   /** Stage an attach's explicit flow state and per-socket geometry before the warm screen barrier.
@@ -530,6 +552,13 @@ export class HostSession {
       let done = false
       let attempt = 0
       let echoed = ''
+      // The head is STICKY, because `echoed` below is a bounded window. A tail match is safe under
+      // that truncation by construction — the tail is what the window keeps — but a head is not:
+      // once a window's worth of bytes has arrived after it, the head is evicted and the two
+      // substrings need never coexist in the buffer even though both were genuinely echoed. This
+      // leg REFUSES on exhausted retries rather than failing open, so an evicted head would not
+      // merely retry, it would stop the node from starting.
+      let sawHead = false
       let timer: ReturnType<typeof setTimeout> | undefined
       let dataSub: { dispose(): void } | undefined
       let exitSub: { dispose(): void } | undefined
@@ -563,16 +592,17 @@ export class HostSession {
         if (done) return
         attempt++
         echoed = ''
+        sawHead = false
         timer = setTimeout(() => {
           if (done) return
           if (attempt >= DELIVERY_ATTEMPTS) {
             // Never submit an unverified/mangled command. Clear it so the terminal remains
             // recoverable, cache the fixed failure, and let explicit user action decide next.
-            write(KILL_LINE)
+            write(this.killLineSequence)
             finish(new Error('session-host could not verify launch command delivery'))
             return
           }
-          if (!write(KILL_LINE)) return
+          if (!write(this.killLineSequence)) return
           tryOnce()
         }, VERIFY_TIMEOUT_MS)
         timer.unref?.()
@@ -580,8 +610,16 @@ export class HostSession {
       }
       dataSub = this.proc.onData((chunk) => {
         if (done) return
-        echoed = (echoed + cleanEcho(chunk)).slice(-Math.max(command.length + 256, 512))
-        if (echoed.includes(command.slice(-ECHO_TAIL_CHARS))) submit()
+        // BOTH ends, not just the tail — see echoedIntact in the renderer's command-delivery for
+        // why a tail match let a head-truncated command through (#556), and why requiring the
+        // whole command contiguously would be too strict on this leg in particular: the retry
+        // exhaustion below REFUSES the launch rather than failing open.
+        const merged = echoed + cleanEcho(chunk)
+        // Tested BEFORE the window is trimmed, so a head that arrived in an earlier chunk still
+        // counts once it has scrolled out. Same memory bound as before.
+        sawHead ||= merged.includes(command.slice(0, ECHO_EDGE_CHARS))
+        echoed = merged.slice(-Math.max(command.length + 256, 512))
+        if (sawHead && echoed.includes(command.slice(-ECHO_EDGE_CHARS))) submit()
       })
       exitSub = this.proc.onExit(() =>
         finish(new Error('session-host terminal exited during launch delivery'))

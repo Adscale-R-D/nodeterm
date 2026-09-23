@@ -1,35 +1,16 @@
 /**
  * The Server Edition's `/control/*` answer, proven on the wire.
  *
- * ORIGINALLY this file measured a WORDING defect with a behavioural cost: `control unavailable` +
- * HTTP 400 is indistinguishable from a transient outage, and a language model retries an outage. So
- * the assertions are about what the CALLER CAN CONCLUDE — a stable machine name, prose containing
- * the literal "do not retry" — never merely about a status code.
- *
- * THE EDITION NOW WIRES CANVAS CONTROL FOR REAL (`core/agents/canvas-control-bridge.ts`), so the
- * blanket per-verb refusal this file was written to prove is GONE, and the tests that asserted it
- * went with it. What is kept, and why:
- *
- *  - The vocabulary itself (`controlUnsupportedMessage`, the `browser` clause) is still exported and
- *    still tested as a PURE unit. It is the dialect for an honestly-unsupported verb, and the
- *    distinction it draws — permanent vs retryable — is now load-bearing in the other direction:
- *    the bridge's no-UI refusal is the retryable one, and an agent must be able to tell them apart.
- *  - The identity-ordering tests are untouched, because they never depended on the handler: the
- *    strict/messaging gates run BEFORE it on every edition, so a tokenless caller still learns
- *    nothing about what this host can do.
- *  - The boot assertion now pins that a handler is registered AT ALL. That is the invariant with
- *    teeth (a null handler is invisible until an agent hits it in production); WHICH handler is a
- *    product decision that has now changed once.
+ * The defect being fixed is a WORDING one with a behavioural cost: `control unavailable` + HTTP 400
+ * is indistinguishable from a transient outage, and a language model retries an outage. So the
+ * assertions here are about what the caller can conclude — a stable machine name, and prose that
+ * contains the literal "do not retry" — not merely about a status code.
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest'
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest'
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
-import { initPlatform, platform, resetPlatformForTests } from '../core/platform'
-import {
-  CONTROL_NO_UI_ERROR,
-  initCanvasControlBridge
-} from '../core/agents/canvas-control-bridge'
+import { initPlatform, resetPlatformForTests } from '../core/platform'
 import { fakePlatform } from '../core/platform-fake'
 import { hookServer, MESSAGING_CONTROL_REFUSAL } from '../core/agents/hook-server'
 import { nodeAuthToken } from '../core/agents/node-auth-token'
@@ -39,10 +20,8 @@ import {
   CONTROL_UNSUPPORTED_ERROR,
   CONTROL_UNSUPPORTED_SENTENCE,
   controlUnsupportedMessage,
-  EDITION_UNSUPPORTED_VERBS,
-  refusesProjectTargeting,
-  serverEditionControlHandler,
-  withEditionRefusals
+  createServerEditionControlHandler,
+  serverEditionControlHandler
 } from './control-unsupported'
 
 const SECRET = Buffer.alloc(32, 7)
@@ -68,13 +47,8 @@ beforeAll(async () => {
   initPlatform(fakePlatform({ userDataDir: dir }))
   await hookServer.start()
   hookServer.setNodeAuthSecret(SECRET)
-  // The exact registration `src/server/index.ts` performs after `hookServer.start()` — the real
-  // bridge, over a platform with NO attached UI, which is the normal state of a headless host.
-  hookServer.setControlHandler(
-    withEditionRefusals(
-      initCanvasControlBridge({ platform: platform(), candidates: () => platform().clientIds() })
-    )
-  )
+  // The exact registration `src/server/index.ts` performs after `hookServer.start()`.
+  hookServer.setControlHandler(serverEditionControlHandler)
 })
 
 afterAll(() => {
@@ -84,57 +58,52 @@ afterAll(() => {
   fs.rmSync(dir, { recursive: true, force: true })
 })
 
-describe('with no UI attached, the refusal is RETRYABLE and says so', () => {
-  it('names the no-UI case for every verb, in JSON, and never claims the edition cannot do it', async () => {
+describe('the Server Edition refuses canvas control by name', () => {
+  it('answers every verb with the same machine-readable error, in JSON', async () => {
     for (const verb of ['list', 'open-terminal', 'write']) {
       const res = await control(verb, 'n-1', 'application/json')
       expect(res.status, verb).toBe(400)
       const body = (await res.json()) as { ok: boolean; error: string; message: string }
       expect(body.ok, verb).toBe(false)
       // The name is EXACT and stable — this is the field a client is allowed to branch on.
-      expect(body.error, verb).toBe(CONTROL_NO_UI_ERROR)
+      expect(body.error, verb).toBe(CONTROL_UNSUPPORTED_ERROR)
       expect(body.error, verb).not.toBe('control unavailable')
-      // The distinction this whole file exists to protect: a browser tab fixes this, so telling the
-      // agent it is PERMANENT would strand a canvas that is one click from working.
-      expect(body.error, verb).not.toBe(CONTROL_UNSUPPORTED_ERROR)
-      expect(body.message, verb).not.toContain('do not retry')
     }
   })
 
-  it('tells a text/plain caller, in words, that it is retryable and what to do', async () => {
+  it('tells a text/plain caller, in words, not to retry', async () => {
     // Verified, so the reply is the refusal alone: an unverified caller inside the warning window
     // gets the identity note prefixed on top, which is existing behaviour and not what is measured
     // here.
     const res = await control('open-terminal', 'n-2', 'text/plain', nodeAuthToken(SECRET, 'n-2'))
     expect(res.status).toBe(400)
     const text = await res.text()
-    expect(text).toContain(CONTROL_NO_UI_ERROR)
-    expect(text).toContain('retryable')
-    // The ACTION, not just the diagnosis: an agent that cannot open a browser tab still has to be
-    // able to tell its user what will fix this.
-    expect(text).toMatch(/web UI|nodeterm window/)
+    // The literal the whole change exists for.
+    expect(text).toContain('do not retry')
+    expect(text).toContain('permanent')
+    // …and the name, because the text dialect carries no fields.
+    expect(text).toContain(CONTROL_UNSUPPORTED_ERROR)
+    expect(text).toContain(CONTROL_UNSUPPORTED_SENTENCE)
     // One line: the shim prints the body as-is.
     expect(text.trimEnd()).not.toContain('\n')
   })
 
-  it('the messaging verbs are NO LONGER refused by edition — they reach the bridge like any verb', () => {
-    // They were in EDITION_UNSUPPORTED_VERBS because agent messaging lived in src/main. Nothing in
-    // that module needed Electron (every import was core/shared, its surface an injected deps
-    // object) — only its WIRING sat in main's boot, so both shells boot it from core now. What a
-    // tabless host answers is therefore the bridge's RETRYABLE no-UI message, not a permanent no.
-    for (const verb of ['send', 'reply', 'notify']) {
-      expect(EDITION_UNSUPPORTED_VERBS.has(verb), verb).toBe(false)
-    }
-    // What IS left, and why each one is structural rather than a wiring accident: `browser` needs
-    // Electron's <webview> + CDP, and `open-project` needs the desktop wrapper's authorization
-    // (verified caller, path resolution, grant cap) that this shell has no copy of.
-    expect([...EDITION_UNSUPPORTED_VERBS].sort()).toEqual(['browser', 'open-project'])
+  it('the messaging verbs get the same NAMED refusal — /control/send is 400, never an outage', async () => {
+    // Task 5.3 of the messaging plan, shared with this mechanism by agreement. `send` is
+    // verified-only at the route (requiresVerified runs before the handler on every edition), so
+    // a token is presented here for the same reason the `browser` test presents one: the edition
+    // answer is what a caller that got PAST identity hears.
+    const res = await control('send', 'n-msg', 'text/plain', nodeAuthToken(SECRET, 'n-msg'))
+    expect(res.status).toBe(400)
+    const text = await res.text()
+    expect(text).toContain(CONTROL_UNSUPPORTED_ERROR)
+    expect(text).toContain('do not retry')
   })
 
-  it('`open-project` is unreachable on this edition — the P8 pin for issue #338', async () => {
-    // No server code changed for #338 and none may need to: the SE registers this handler for
-    // ALL verbs, so open-project (and any --project-carrying open) answers the same permanent
-    // named refusal. Pinned by name so the contract cannot drift silently.
+  it('`open-project` stays unreachable when Server canvas control is disabled', async () => {
+    // The feature-off rollback handler refuses every verb. The enabled handler below exposes the
+    // narrow existing-local-project recovery form, but a disabled deployment must still answer a
+    // permanent named refusal rather than pretending the operation succeeded.
     expect(await serverEditionControlHandler({ verb: 'open-project' })).toEqual({
       ok: false,
       error: CONTROL_UNSUPPORTED_ERROR,
@@ -168,59 +137,9 @@ describe('with no UI attached, the refusal is RETRYABLE and says so', () => {
     expect(text).toContain('renders in your own browser')
   })
 
-  it('scopes the claim to the VERB — it must not say canvas control is unavailable', () => {
-    // The regression, reported within an hour of canvas control going live: `send` answered
-    // "Canvas control is not available on the nodeterm Server Edition", so the calling agent
-    // concluded the whole feature was off and asked its user to check a Settings switch that could
-    // not have helped. True when every verb was refused; a lie once only a handful are.
-    for (const verb of ['send', 'browser', 'notify']) {
-      const msg = controlUnsupportedMessage(verb)
-      expect(msg, verb).toContain(`\`${verb}\` verb is not available`)
-      expect(msg, verb).toContain('other canvas-control verbs work here')
-      expect(msg, verb).not.toMatch(/^\S+: Canvas control is not available/)
-    }
-  })
-
-  it('refuses ANY verb carrying --project, matched on the argument not the verb', async () => {
-    // The gate that authorizes cross-project targeting (own-or-granted) lives in the desktop shell's
-    // control wrapper. Forwarding a --project-carrying open here would reach this edition's renderer
-    // with nothing having checked it — a weaker gate than the desktop's, through the same call.
-    //
-    // Matched on the ARGUMENT because the targetable-verb set lives in src/main/project-grants.ts,
-    // which this shell may not import; refusing anything carrying --project is a superset of it and
-    // cannot go stale when a verb joins the set.
-    expect(refusesProjectTargeting({ project: 'p-1' })).toBe(true)
-    expect(refusesProjectTargeting({ project: '' })).toBe(true) // present-but-empty is still a target
-    expect(refusesProjectTargeting({ node: 'n-1' })).toBe(false)
-    expect(refusesProjectTargeting(undefined)).toBe(false)
-
-    const forwardStub = async (_req: {
-      verb: string
-      nodeId: string
-      args: Record<string, string>
-    }): Promise<unknown> => ({ ok: true, message: 'forwarded' })
-    const refused = await withEditionRefusals(forwardStub)({
-      verb: 'open-claude',
-      nodeId: 'n-1',
-      args: { project: 'p-other' }
-    })
-    expect(refused).toMatchObject({ ok: false, error: CONTROL_UNSUPPORTED_ERROR })
-    expect((refused as { message: string }).message).toContain('--project')
-    expect((refused as { message: string }).message).toContain('do not retry')
-
-    // …and the same verb WITHOUT --project is forwarded untouched.
-    expect(
-      await withEditionRefusals(forwardStub)({
-        verb: 'open-claude',
-        nodeId: 'n-1',
-        args: {}
-      })
-    ).toEqual({ ok: true, message: 'forwarded' })
-  })
-
   it('adds that clause to `browser` and to nothing else', () => {
     expect(controlUnsupportedMessage('browser')).toContain(BROWSER_UNSUPPORTED_CLAUSE)
-    for (const verb of ['list', 'open-terminal', 'browsers', 'BROWSER', 'send']) {
+    for (const verb of ['list', 'open-terminal', 'browsers', 'BROWSER']) {
       expect(controlUnsupportedMessage(verb), verb).not.toContain(BROWSER_UNSUPPORTED_CLAUSE)
       expect(controlUnsupportedMessage(verb), verb).toContain(CONTROL_UNSUPPORTED_ERROR)
     }
@@ -244,34 +163,216 @@ describe('with no UI attached, the refusal is RETRYABLE and says so', () => {
 })
 
 describe('the Server Edition wires it at boot', () => {
-  it('registers a handler instead of leaving the null branch, and puts the refusals in FRONT', () => {
-    // A hook-server change made on one shell only has shipped wrong three times in this repo, and the
-    // null branch is invisible until an agent hits it in production. WHICH handler is a product
-    // decision that has already changed once (a blanket refusal → the real bridge); the ORDER is the
-    // invariant: the permanent-refusal wrapper must wrap the bridge, not the other way round, or
-    // `send` on a tabless host reports "retryable" for something no tab can ever do.
+  it('registers the refusing handler instead of leaving the null branch', () => {
+    // A hook-server change made on one shell only has shipped wrong three times in this repo, and
+    // the null branch is invisible until an agent hits it in production.
     const src = fs.readFileSync(path.resolve(__dirname, 'index.ts'), 'utf8')
-    expect(src).toContain('setControlHandler(')
-    expect(src).toMatch(/withEditionRefusals\(\s*initCanvasControlBridge\(/)
+    expect(src).toContain('setControlHandler(serverEditionControlHandler)')
+  })
+})
+
+describe('the enabled Server Edition handler parses and dispatches the v1 surface', () => {
+  const actions = () => ({
+    openProject: vi.fn(async () => ({ ok: true as const, result: { projectId: 'project-loop' } })),
+    openTerminal: vi.fn(async () => ({ ok: true as const, result: { id: 'term-new' } })),
+    openAgent: vi.fn(async () => ({ ok: true as const, result: { id: 'agent-new' } })),
+    close: vi.fn(async () => ({ ok: true as const, result: { id: 'closed' } })),
+    link: vi.fn(async () => ({ ok: true as const, result: { linked: ['term-target'] } })),
+    group: vi.fn(async () => ({ ok: true as const, result: { groupId: 'group-new' } })),
+    rename: vi.fn(async () => ({ ok: true as const, result: { id: 'renamed' } })),
+    color: vi.fn(async () => ({ ok: true as const, result: { colored: ['term-target'] } })),
+    sticky: vi.fn(async () => ({ ok: true as const, result: { id: 'sticky-new' } })),
+    settings: vi.fn(async () => ({ ok: true as const, message: 'settings' })),
+    deliver: vi.fn(async () => ({ ok: true as const, message: 'queued' }))
   })
 
-  it('every verb the bridge does answer is one the browser renderer implements', () => {
-    // The bridge is a pipe: a verb it forwards that `Canvas.tsx` has no case for reaches the agent as
-    // a puzzling default reply. So the two sets must agree — anything not in the edition's refusal
-    // set has to exist in the renderer's switch.
-    const canvas = fs.readFileSync(
-      path.resolve(__dirname, '../renderer/canvas/Canvas.tsx'),
-      'utf8'
+  it('routes settings to its action, after the shared allowlist parse', async () => {
+    const a = actions()
+    const handler = createServerEditionControlHandler(a)
+    await expect(
+      handler({ verb: 'settings', nodeId: 'term-source', args: { get: 'gridSize' }, verified: true })
+    ).resolves.toMatchObject({ ok: true })
+    expect(a.settings).toHaveBeenCalledWith('term-source', { get: 'gridSize' })
+    // A key off the allowlist never reaches the action.
+    await expect(
+      handler({
+        verb: 'settings',
+        nodeId: 'term-source',
+        args: { set: 'claudePermissionMode', value: 'bypassPermissions' },
+        verified: true
+      })
+    ).resolves.toMatchObject({ ok: false, error: expect.stringContaining('settings-key-forbidden') })
+    expect(a.settings).toHaveBeenCalledTimes(1)
+  })
+
+  it('shares parser validation and forwards source identity to an open', async () => {
+    const a = actions()
+    const handler = createServerEditionControlHandler(a)
+    await expect(
+      handler({
+        verb: 'open-terminal',
+        nodeId: 'term-source',
+        args: { count: '2', after: 'term-upstream' },
+        verified: true
+      })
+    ).resolves.toMatchObject({ ok: true })
+    expect(a.openTerminal).toHaveBeenCalledWith(
+      'term-source',
+      { count: '2', after: 'term-upstream' },
+      true
     )
-    const core = fs.readFileSync(path.resolve(__dirname, '../core/agents/canvas-control-core.ts'), 'utf8')
-    const verbs = [...core.matchAll(/^ {2}\| '([a-z-]+)'$/gm)].map((m) => m[1])
-    expect(verbs.length).toBeGreaterThan(20) // the union really was found, not an empty regex
-    for (const verb of verbs) {
-      if (EDITION_UNSUPPORTED_VERBS.has(verb)) continue
-      expect(
-        canvas.includes(`case '${verb}'`) || canvas.includes(`verb === '${verb}'`),
-        `${verb} is forwarded to a renderer that has no case for it`
-      ).toBe(true)
+
+    await expect(
+      handler({ verb: 'open-agent', nodeId: 'term-source', args: {}, verified: true })
+    ).resolves.toEqual({ ok: false, error: 'open-agent requires --agent <id>' })
+    expect(a.openAgent).not.toHaveBeenCalled()
+
+    await expect(
+      handler({
+        verb: 'open-project',
+        nodeId: 'term-source',
+        args: { cwd: '/srv/loop' },
+        verified: true
+      })
+    ).resolves.toMatchObject({ ok: true })
+    expect(a.openProject).toHaveBeenCalledWith(
+      'term-source',
+      { cwd: '/srv/loop' },
+      true
+    )
+
+    await expect(
+      handler({
+        verb: 'close',
+        nodeId: 'term-source',
+        args: { node: 'term-new,term-other' },
+        verified: true
+      })
+    ).resolves.toMatchObject({ ok: true })
+    expect(a.close).toHaveBeenCalledWith(
+      'term-source',
+      { node: 'term-new,term-other' },
+      true
+    )
+  })
+
+  it('refuses every enabled verb at the handler boundary when creator identity is unverified', async () => {
+    const a = actions()
+    const handler = createServerEditionControlHandler(a)
+
+    await expect(handler({
+      verb: 'group',
+      nodeId: 'term-source',
+      args: { nodes: 'term-source,term-target' },
+      verified: false
+    })).resolves.toEqual({
+      ok: false,
+      error: 'group-identity-refused: Server Edition canvas control requires verified node identity'
+    })
+    await expect(handler({
+      verb: 'open-terminal',
+      nodeId: 'term-source',
+      args: {},
+      verified: false
+    })).resolves.toEqual({
+      ok: false,
+      error: 'open-terminal-identity-refused: Server Edition canvas control requires verified node identity'
+    })
+    expect(a.group).not.toHaveBeenCalled()
+    expect(a.openTerminal).not.toHaveBeenCalled()
+  })
+
+  it('routes messaging without trusting a notify body', async () => {
+    const a = actions()
+    const handler = createServerEditionControlHandler(a)
+    await handler({
+      verb: 'send',
+      nodeId: 'term-source',
+      args: { node: 'term-target', text: 'hello' },
+      verified: true
+    })
+    await handler({
+      verb: 'notify',
+      nodeId: 'term-source',
+      args: { node: 'term-target' },
+      verified: true
+    })
+    await handler({
+      verb: 'reply',
+      nodeId: 'term-source',
+      args: { node: 'term-target', text: 'ack' },
+      verified: true
+    })
+    expect(a.deliver).toHaveBeenNthCalledWith(1, {
+      verb: 'send',
+      sourceNodeId: 'term-source',
+      targetNodeId: 'term-target',
+      body: 'hello'
+    })
+    expect(a.deliver).toHaveBeenNthCalledWith(2, {
+      verb: 'notify',
+      sourceNodeId: 'term-source',
+      targetNodeId: 'term-target',
+      body: ''
+    })
+    expect(a.deliver).toHaveBeenNthCalledWith(3, {
+      verb: 'reply',
+      sourceNodeId: 'term-source',
+      targetNodeId: 'term-target',
+      body: 'ack'
+    })
+  })
+
+  it('dispatches headless link, group, rename, and color while preserving link identity', async () => {
+    const a = actions()
+    const handler = createServerEditionControlHandler(a)
+    await handler({
+      verb: 'link',
+      nodeId: 'term-source',
+      args: { from: 'term-a', to: 'term-b' },
+      verified: true
+    })
+    await handler({
+      verb: 'group',
+      nodeId: 'term-source',
+      args: { nodes: 'term-a,term-b', label: 'Pair', color: '#bf5af2' },
+      verified: true
+    })
+    await handler({
+      verb: 'color',
+      nodeId: 'term-source',
+      args: { node: 'term-a,term-b', color: '#32d74b' },
+      verified: true
+    })
+    await handler({
+      verb: 'rename',
+      nodeId: 'term-source',
+      args: { node: 'term-a', title: 'A' },
+      verified: true
+    })
+    expect(a.link).toHaveBeenCalledWith(
+      'term-source',
+      { from: 'term-a', to: 'term-b' },
+      true
+    )
+    expect(a.group).toHaveBeenCalledWith('term-source', {
+      nodes: 'term-a,term-b',
+      label: 'Pair',
+      color: '#bf5af2'
+    })
+    expect(a.rename).toHaveBeenCalledWith('term-source', { node: 'term-a', title: 'A' })
+    expect(a.color).toHaveBeenCalledWith('term-source', {
+      node: 'term-a,term-b',
+      color: '#32d74b'
+    })
+  })
+
+  it('keeps every deferred or unknown verb a clean permanent edition refusal', async () => {
+    const handler = createServerEditionControlHandler(actions())
+    for (const verb of ['list', 'browser', 'write', 'not-a-verb']) {
+      const reply = await handler({ verb, nodeId: 'term-source', args: {}, verified: true })
+      expect(reply, verb).toMatchObject({ ok: false, error: CONTROL_UNSUPPORTED_ERROR })
+      expect(reply.message, verb).toContain('do not retry')
     }
   })
 })

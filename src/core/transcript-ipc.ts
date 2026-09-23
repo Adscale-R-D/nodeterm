@@ -9,15 +9,20 @@
 // The remote (SSH-project) leg stays an injected dep: it needs a ControlMaster, which only the
 // Electron shell has. Absent deps ⇒ local-only, which is the correct and complete answer on the
 // server — it runs ON the host whose transcripts it is reading.
+import fsp from 'node:fs/promises'
 import { IPC } from '../shared/ipc'
-import type { ChatTranscriptResult, TranscriptLine } from '../shared/types'
+import type { ChatTranscriptResult, TranscriptLine, TranscriptPresence } from '../shared/types'
 import { platform } from './platform'
+import { chatMessagesFromGrok } from './grok-chat'
+import { locateGrok } from './handoff/locate'
 import {
   parseChatMessages,
   parseTranscriptLines,
+  readCappedTail,
   readChatMessages,
   readTranscriptLines,
   resolveTranscriptPath,
+  transcriptPresence,
   transcriptPathForCwd,
   SESSION_ID_RE
 } from './transcript-reader'
@@ -39,6 +44,15 @@ export interface TranscriptIpcDeps {
    * could not be resolved). Electron-only — the server has no SSH-project manager.
    */
   readRemote?(q: TranscriptQuery): Promise<string | null>
+  /**
+   * Does the transcript exist on the HOST — or `null` when this is not a remote session, which is
+   * the signal to take the local path below. Same `null` convention as `readRemote`.
+   *
+   * It must return `'unknown'` (not `null`) for a remote session it failed to ask, or the local
+   * resolver would run against THIS machine's disk for a session that only ever existed on the
+   * host and report `absent` — the one answer that destroys a resume. Electron-only.
+   */
+  remoteExists?(q: TranscriptQuery): Promise<TranscriptPresence | null>
 }
 
 /**
@@ -79,13 +93,55 @@ export function registerTranscriptIpc(deps: TranscriptIpcDeps = {}): void {
   )
 
   platform().handle(
+    IPC.transcriptExists,
+    async (
+      sessionId: string | undefined,
+      accountId: string | undefined,
+      nodeId: string | undefined
+    ): Promise<TranscriptPresence> => {
+      if (!sessionId) return 'unknown'
+      // Remote first, and its `'unknown'` is TERMINAL. Falling through to the local resolver for
+      // a remote session whose host we could not reach would search this machine for a file that
+      // only ever existed on the other one, and answer `absent` about it.
+      const remote = deps.remoteExists ? await deps.remoteExists({ sessionId, cwd: undefined, accountId, nodeId }) : null
+      if (remote !== null) return remote
+      // A live context tail's own path is the authoritative hint — but it is a HINT, so it is
+      // verified rather than trusted: the file it names can have been deleted since.
+      const hinted = deps.pathFor?.(sessionId)
+      if (hinted) {
+        try {
+          await fsp.access(hinted)
+          return 'present'
+        } catch {
+          /* fall through to the scan */
+        }
+      }
+      return transcriptPresence(sessionId, accountId)
+    }
+  )
+
+  platform().handle(
     IPC.chatReadTranscript,
     async (
       sessionId: string | undefined,
       cwd: string | undefined,
       accountId: string | undefined,
-      nodeId: string | undefined
+      nodeId: string | undefined,
+      agentId: string | undefined
     ): Promise<ChatTranscriptResult> => {
+      // Routed by agent BEFORE anything claude-shaped runs. `resolveTranscript` below falls back to
+      // the newest claude transcript for the cwd when its sessionId leg misses, and a grok id always
+      // misses — so reaching that fallback with a grok node would answer with a stranger's
+      // conversation. The remote leg is claude-only too (its reader tails claude's file), so a grok
+      // node is served locally or not at all rather than being handed the wrong host's claude log.
+      if (agentId === 'grok') {
+        const gp = sessionId ? await locateGrok(sessionId) : undefined
+        if (!gp) return { messages: [], found: false }
+        const buf = await readCappedTail(gp)
+        return buf === undefined
+          ? { messages: [], found: false }
+          : { messages: chatMessagesFromGrok(buf), found: true }
+      }
       const remote = await remoteText({ sessionId, cwd, accountId, nodeId })
       // A resolved-but-unreadable remote file is NOT "no conversation yet" — the read failed
       // (master down, transcript gone), and the panel must be able to say so.

@@ -16,7 +16,9 @@
 
 import {
   UNKNOWN_CLAUDE_CLI_CAPS,
+  UNKNOWN_GROK_CLI_CAPS,
   UNKNOWN_CODEX_IDENTITY_CAPS,
+  UNKNOWN_CODEX_CLI_CAPS,
   type ClaudeUsage,
   type NodeTerminalApi,
   type NotifyPayload,
@@ -216,6 +218,9 @@ export function buildStubApi(): Omit<
       onProgress: noopUnsub,
       onError: noopUnsub,
       onNotAvailable: noopUnsub,
+      // Server Edition has no updater at all (initUpdater runs only in src/main) and a browser
+      // tab cannot self-install, so there is no channel state to report either way.
+      onNoChannel: noopUnsub,
       check: noop,
       getVersion: U('updates.getVersion'),
       // Boot path awaits this and reads `p.mandatory` UNGUARDED (UpdateCard.tsx), so the old
@@ -303,6 +308,13 @@ export function buildStubApi(): Omit<
       // one the Server Edition gives on purpose (see server/handlers/index.ts): no shared
       // identity, so every Codex launch line stays the bare `codex`.
       identityCaps: () => Promise.resolve(UNKNOWN_CODEX_IDENTITY_CAPS),
+      // A RELAY tab keeps this stub: its sessions run on the GUEST's machine, whose codex is a
+      // different binary from the one this probe could reach, and applying our vocabulary to their
+      // launch line is precisely the cross-machine guess this gate exists to stop. Unknown ⇒ the
+      // baseline vocabulary ⇒ the two values every measured codex accepts; "Ask each time" is
+      // reported as unsupported there rather than gambling `untrusted` on someone else's CLI.
+      // Overridden by the real WS-backed namespace in ws-bridge for the Server Edition.
+      cliCaps: () => Promise.resolve(UNKNOWN_CODEX_CLI_CAPS),
       onIdentity: noopUnsub
     },
     claude: {
@@ -310,6 +322,14 @@ export function buildStubApi(): Omit<
       // fail-open caps (never rejects) because the permission-mode gate reads it on the boot path.
       cliCaps: () => Promise.resolve(UNKNOWN_CLAUDE_CLI_CAPS),
       readTranscript: U('claude.readTranscript')
+    },
+    grok: {
+      // Same shape and same reason as claude's above: the launch path reads this synchronously, so
+      // it must resolve rather than reject. Unprobed ⇒ no `--session-id` ⇒ today's command line.
+      cliCaps: () => Promise.resolve(UNKNOWN_GROK_CLI_CAPS),
+      // Nothing taken is the honest answer where no shell can look, and it degrades to today's
+      // behaviour: mint freely. Overridden by the real WS-backed namespace in ws-bridge.
+      takenSessionIds: () => Promise.resolve([])
     },
     agent: {
       // No env snapshot outside the desktop window: the stub (and ws-bridge, identically) answers
@@ -355,13 +375,20 @@ export function buildStubApi(): Omit<
       materializeShared: () => Promise.resolve([])
     },
     chat: {
-      readTranscript: U('chat.readTranscript')
+      readTranscript: U('chat.readTranscript'),
+      // Resolves rather than rejects, like the two `cliCaps` above and for the same reason: cold
+      // restore awaits this on the boot path, and its whole contract is that anything it cannot
+      // judge is `unknown` ⇒ resume exactly as before. A rejection here would be a second way of
+      // saying the same thing that every caller would have to remember to catch.
+      transcriptExists: () => Promise.resolve('unknown' as const)
     },
     claudeAccounts: {
       add: U('claudeAccounts.add'),
       waitLogin: U('claudeAccounts.waitLogin'),
       cancelWaitLogin: U('claudeAccounts.cancelWaitLogin'),
-      remove: U('claudeAccounts.remove')
+      remove: U('claudeAccounts.remove'),
+      link: U('claudeAccounts.link'),
+      setSkillSharing: U('claudeAccounts.setSkillSharing')
     },
     codexAccounts: {
       add: U('codexAccounts.add'),
@@ -511,13 +538,12 @@ export function buildStubApi(): Omit<
     // resolve round-trip is inert here — the verb is refused by name before it reaches a handler.
     onBrowserControlResolve: noopUnsub,
     sendBrowserControlResolveResult: noop,
-    // Superseded in the BROWSER by `buildAgentApi`'s real implementation: agent messaging moved to
-    // core (`agents/agent-messaging-boot.ts`) and both shells boot it, so the Server Edition delivers
-    // for real under the same gates as the desktop. This stays as the RELAY answer — a delivery over
-    // the relay would type into a pane on the HOST while the gate chain (pane ownership, the
-    // project's capability grant) was evaluated against the guest's own stores — and as the honest
-    // refusal for any surface with no messaging service behind it. Terminal ("Do not retry") because
-    // no setting on the reading machine can change it.
+    // Messaging never runs from a BROWSER surface. The Server Edition delivers it host-side inside
+    // its own canvas-control runtime (`src/server/canvas-control.ts`, behind
+    // NODETERM_SERVER_CANVAS_CONTROL) — the renderer is not in that path at all — and a relay
+    // delivery would type into a pane on the HOST while the gate chain (pane ownership, the
+    // project's capability grant) was evaluated against the guest's own stores. Terminal ("Do not
+    // retry") because no setting on the reading machine can change it.
     agentMessage: {
       deliver: async () => ({
         ok: false as const,

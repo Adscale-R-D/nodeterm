@@ -4096,7 +4096,28 @@ the Settings section and ShortcutsPanel start disagreeing about what a chord mea
   half-pill itself: (`components/kanban/ColumnPill.tsx`, `columnForNode` in lib/kanban; rendered
   as a SIBLING of the node root — the roots are overflow:hidden — hidden for Ungrouped/dangling,
   click opens the board). Server Edition works as-is (pure renderer + workspace.save). Scope: no
-  agent-driven card movement yet, no board undo.
+  board undo.
+  **Agents drive the board through `board` / `assign` — on BOTH shells** (the Server Edition's
+  headless factory serves them too). The transforms live in `src/shared/kanban.ts` +
+  `board-log-diff.ts` (the renderer's `lib/kanban.ts` / `lib/boardLogDiff.ts` are re-exports) and
+  the reply shape in `@shared/kanban-control` (`boardSnapshot`), so the two shells cannot answer
+  in two shapes. `assign --create yes` makes a column when no title matches and marks it
+  `KanbanColumn.origin: 'agent'`; it is idempotent (title match, case-insensitive) and needs no
+  lock of its own because both callers already serialize — the desktop dispatch is synchronous
+  against one store, the server's `runExclusive` queue covers the resolve-or-create AND the save.
+  **An agent column is removed when a change EMPTIES it** (`sweepEmptiedAgentColumns`): the rule is
+  "prev filed a card there, next files none that still holds", so a column a person made is never
+  touched and an agent column that was already empty is not this change's business. Every choke
+  point applies it — `setProjectKanban` (drags, card menu, desktop `assign`; it now RETURNS the
+  stored board, and a caller narrating to the board log must diff against that), both renderer
+  delete funnels, and the server's `assign`/`close`. **The renderer's delete sweep judges "gone"
+  by the set being deleted, never by absence from its canvas** — a node the server just created
+  may not have reached that canvas yet, and reading it as dead would delete a live lane's column;
+  the server, whose node list is authoritative, passes existence. Server `assign` also takes the
+  creator-ownership rule every other headless mutation has; desktop `assign` has none, on purpose.
+  A server write reaches an open board through the full-project publish (`replaceProject` carries
+  `kanban`); a desktop drag landing in the same instant is last-write-wins on the whole board —
+  each side writes a complete board, so the result is always one of the two, never a mix.
   **Mobile (nodeterm-ios) reaches the board through two relay verbs**, both landing in
   `WorkspaceStore.ensureRemoteBoard` / `setRemoteCardColumn` (host-service `handleKanban`; wired in
   `main/index.ts`'s `hostBridge.kanban`; pure transforms in `core/project-kanban-write.ts`):

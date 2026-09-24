@@ -493,6 +493,10 @@ Consequences worth knowing:
   S8 (nav/read/click/type/press/scroll/wait/screenshot/cookies) is therefore **desktop-only**:
   it needs Electron's `<webview>` + CDP, which this edition has none of, so there is no
   browser driving here at all. See `src/server/control-unsupported.ts`.
+  **Kanban:** `board` and `assign` are served (the same shared transforms and reply shape as the
+  desktop). `assign` takes the creator-ownership rule — a card the caller did not open this run is
+  refused — and `--create yes` makes an agent-created column, removed automatically once its last
+  card is closed or moved out. `board` changes nothing and needs no ownership.
   The agent-messaging verbs (`send`/`reply`/`notify`) are verified-only. When Server control is
   enabled they additionally require process-local proof that the caller spawned the target in this
   run; with control disabled they receive `control-unsupported-on-this-edition`.

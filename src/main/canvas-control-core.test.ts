@@ -972,3 +972,27 @@ describe('the --project clause tells the truth about travel (review #363 I-1 + M
     for (const v of answered) expect(offScreenDisposition(v).kind, v).not.toBe('refuse')
   })
 })
+
+describe('agent-facing kanban docs match the verb (assign --create, auto-removal)', () => {
+  // Both bodies an agent actually reads. A stale line here is a wrong contract an orchestrator acts
+  // on, which is the drift #269 shipped — so the claims are pinned to the mechanism's words.
+  const bodies = {
+    skill: buildCanvasSkillBody('/x/nodeterm.sh'),
+    instructions: buildCanvasControlInstructions('/x/nodeterm.sh')
+  }
+  for (const [name, body] of Object.entries(bodies)) {
+    it(`${name}: documents --create yes, its idempotence, and the automatic removal`, () => {
+      expect(body).toContain('[--create yes]')
+      expect(body).toMatch(/idempotent/)
+      expect(body).toMatch(/REMOVED AUTOMATICALLY/)
+      expect(body).toMatch(/never removed/)
+      // Desktop reads the CALLER'S project, not the one on screen — the old line said otherwise.
+      expect(body).not.toContain("CURRENTLY OPEN project's board")
+    })
+  }
+  it('the parser still requires --node for assign (the docs promise a card id)', () => {
+    expect(parseControlRequest('assign', { column: 'x', create: 'yes' })).toEqual({
+      error: 'assign requires --node <id>'
+    })
+  })
+})

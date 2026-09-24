@@ -312,7 +312,8 @@ export const GlobalKanbanView = memo(function GlobalKanbanView() {
 
   const onChangeBoard = useCallback((projectId: string, next: ProjectKanban) => {
     const prev = useProjects.getState().getProject(projectId)?.kanban ?? defaultKanban()
-    useProjects.getState().setProjectKanban(projectId, next)
+    // `stored` can differ from `next`: an agent-created column this change emptied is removed.
+    const stored = useProjects.getState().setProjectKanban(projectId, next)
     markWorkspaceDirty()
     const cardTitle = (nodeId: string) => {
       const proj = useProjects.getState().getProject(projectId)
@@ -321,7 +322,7 @@ export const GlobalKanbanView = memo(function GlobalKanbanView() {
       const s = toKanbanSessionState(n as never)
       return s ? s.title || 'Untitled' : ''
     }
-    for (const { nodeId, event } of boardLogEvents(prev, next, cardTitle)) {
+    for (const { nodeId, event } of boardLogEvents(prev, stored, cardTitle)) {
       useBoardLog.getState().append(api, projectId, { kind: 'event', nodeId, event })
     }
   }, [api])

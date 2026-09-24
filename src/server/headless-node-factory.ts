@@ -11,6 +11,14 @@ import {
   type NodeColor
 } from '../shared/node-colors'
 import { applyStickyWrite, parseStickyArgs, resolveStickyRef } from '../shared/sticky-write'
+import {
+  assignNode,
+  defaultKanban,
+  resolveOrCreateColumn,
+  sweepEmptiedAgentColumns
+} from '../shared/kanban'
+import { boardSnapshot, persistedControlCard, wantsCreate } from '../shared/kanban-control'
+import { boardLogEvents } from '../shared/board-log-diff'
 import type { WorkspaceStore } from '../core/workspace-store'
 import {
   AGENT_CONFIG,
@@ -28,12 +36,14 @@ import type { AgentState, NormalizedAgentEvent } from '../shared/agents/normaliz
 import { oneLine } from '../shared/one-line'
 import { UNKNOWN_CODEX_CLI_CAPS } from '../shared/types'
 import type {
+  BoardLogEntry,
   BridgeLink,
   CanvasNodeState,
   ClaudeCliCaps,
   CodexCliCaps,
   GrokCliCaps,
   Project,
+  ProjectKanban,
   PtyCreateOptions,
   PtyCreateResult,
   Settings,
@@ -95,6 +105,13 @@ export interface HeadlessNodeFactoryDeps {
   publishNode?: (projectId: string, node: CanvasNodeState) => void
   publishRemoval?: (projectId: string, nodeId: string) => void
   publishProject?: (project: Project) => void
+  /**
+   * Board-log appender (`BoardLogHandlers.append` in production). Optional so a test that is not
+   * about the board log need not supply one; without it a board change is simply not narrated —
+   * the board itself is still written. A failed append never fails the verb (same rule as the
+   * agent-messaging delivery trace).
+   */
+  appendBoardLog?: (projectId: string, entry: BoardLogEntry) => Promise<boolean>
   schedule?: (cb: () => void, ms: number) => ReturnType<typeof setTimeout>
   clearSchedule?: (timer: ReturnType<typeof setTimeout>) => void
   /** Injectable only so tests can seed creator facts; production uses a fresh process-local ledger. */
@@ -141,6 +158,9 @@ const GROUP_HEADER = 34
 const AFTER_RETRY_MS = 500
 const AFTER_RETRY_LIMIT = 5
 const SERVER_AGENTS: ReadonlySet<string> = new Set(['claude', 'codex', 'gemini'])
+/** Author colour for board-log lines an agent wrote through the server (the neutral trace grey the
+ *  agent-messaging delivery trace uses — an agent is not a person with a presence colour). */
+const AGENT_LOG_COLOR = '#8b8b8b'
 
 function token(): string {
   return randomBytes(4).toString('hex')
@@ -574,6 +594,38 @@ export class HeadlessNodeFactory {
     }
   }
 
+  /**
+   * Narrate a board change the way a desktop change is narrated (the same `boardLogEvents` diff),
+   * attributed to the AGENT that made it — there is no presence identity on a headless server, and
+   * "an agent filed this card" is the truthful author. Best-effort: runs after the save, and a
+   * failed or throwing append is swallowed, because the board write already happened.
+   */
+  private async narrateBoard(
+    project: Project,
+    source: CanvasNodeState,
+    prev: ProjectKanban,
+    next: ProjectKanban
+  ): Promise<void> {
+    const append = this.deps.appendBoardLog
+    if (!append) return
+    const byId = new Map(project.nodes.map((node) => [node.id, node]))
+    // boardLogEvents' binding invariant: '' for, and ONLY for, a node that no longer exists.
+    const cardTitle = (id: string): string => {
+      const node = byId.get(id)
+      const card = node ? persistedControlCard(node) : null
+      return card ? card.title || 'Untitled' : ''
+    }
+    const now = (this.deps.now ?? Date.now)()
+    const author = { name: source.title || source.id, color: AGENT_LOG_COLOR }
+    for (const { nodeId, event } of boardLogEvents(prev, next, cardTitle)) {
+      try {
+        await append(project.id, { id: randomUUID(), ts: now, author, nodeId, kind: 'event', event })
+      } catch {
+        /* the board is already written; a missing log line is not a failed move */
+      }
+    }
+  }
+
   private projectGranted(sourceNodeId: string, projectId: string): boolean {
     return this.projectGrants.get(sourceNodeId)?.has(projectId) ?? false
   }
@@ -819,8 +871,24 @@ export class HeadlessNodeFactory {
         removedByProject.set(project, removed)
       }
 
+      // A closed card can empty an agent-created kanban column — the lane that filed into it is
+      // being torn down, and nobody is left to remove the column. Judged against this server's
+      // own node list, which is authoritative (a person's column is never touched).
+      const sweptBoards: Array<{ project: Project; prev: ProjectKanban; next: ProjectKanban }> = []
+      for (const project of removedByProject.keys()) {
+        if (!project.kanban) continue
+        const live = new Set(project.nodes.map((node) => node.id))
+        const next = sweepEmptiedAgentColumns(project.kanban, project.kanban, (id) => live.has(id))
+        if (next === project.kanban) continue
+        sweptBoards.push({ project, prev: project.kanban, next })
+        project.kanban = next
+      }
+
       if (removedByProject.size) {
         await this.deps.workspaceStore.save(workspace)
+        for (const { project, prev, next } of sweptBoards) {
+          await this.narrateBoard(project, source.node, prev, next)
+        }
         for (const [project, removed] of removedByProject) {
           const surviving = project.nodes.map((node) => node.id)
           const changed = [...(changedByProject.get(project)?.values() ?? [])].filter((node) =>
@@ -1268,6 +1336,113 @@ export class HeadlessNodeFactory {
           (after.length ? `; waiting for ${after.join(', ')} before running` : ''),
         result: { ids, id: ids[0], after }
       }
+    })
+  }
+
+  /**
+   * `board`: the caller project's kanban board, in the SAME text and result shape as the desktop
+   * (`boardSnapshot`, shared). A project that has never saved a board answers with the lazy default
+   * — every card Ungrouped — and writes nothing. Read-only, so no ownership check: seeing which card
+   * sits where grants nothing a `list` does not already show.
+   */
+  board(sourceNodeId: string, args: Record<string, string>): Promise<ServerControlReply> {
+    return this.runExclusive(async () => {
+      const flagError = unsupportedFlags(args, new Set())
+      if (flagError) return { ok: false, error: `board: ${flagError}` }
+      const workspace = await this.deps.workspaceStore.load({ sideline: false })
+      const source = sourceProject(workspace, sourceNodeId)
+      if (!source) return { ok: false, error: 'source node is not in exactly one saved project' }
+      if (!sourceCanControl(source.node, this.deps.agentIdOf)) {
+        return { ok: false, error: 'source node is not a control-capable agent' }
+      }
+      const cards = source.project.nodes
+        .map(persistedControlCard)
+        .filter((card): card is NonNullable<typeof card> => card !== null)
+      return { ok: true, ...boardSnapshot(source.project.kanban, cards) }
+    })
+  }
+
+  /**
+   * `assign`: file a card under a column, the desktop verb's semantics plus the server's ownership
+   * rule — the card must be a node THIS caller spawned during this server run, like every other
+   * mutating verb here. With `--create yes` an unmatched title becomes an agent-created column.
+   *
+   * Two things this runs inside, and both are load-bearing:
+   * - `runExclusive`: the resolve-or-create and the save are ONE critical section, so two agents
+   *   filing into the same new title land in one column — the second sees the first's column.
+   * - the full-project publish: the browser's server-change handler ends in `replaceProject`, which
+   *   carries `kanban`, so an open board updates live with no reload.
+   *
+   * The move also removes an agent-created column it emptied (`sweepEmptiedAgentColumns`), judged
+   * against this server's own node list, which is authoritative here.
+   */
+  assign(sourceNodeId: string, args: Record<string, string>): Promise<ServerControlReply> {
+    return this.runExclusive(async () => {
+      const flagError = unsupportedFlags(args, new Set(['node', 'column', 'before', 'create']))
+      if (flagError) return { ok: false, error: `assign: ${flagError}` }
+      const workspace = await this.deps.workspaceStore.load({ sideline: false })
+      const source = sourceProject(workspace, sourceNodeId)
+      if (!source) return { ok: false, error: 'source node is not in exactly one saved project' }
+      if (!sourceCanControl(source.node, this.deps.agentIdOf)) {
+        return { ok: false, error: 'source node is not a control-capable agent' }
+      }
+
+      const nodeId = (args.node ?? '').trim()
+      const projects = nodeProjects(workspace, nodeId)
+      if (projects.length && (projects.length !== 1 || projects[0].id !== source.project.id)) {
+        return {
+          ok: false,
+          error: `assign-project-refused: ${nodeId} is not exclusively in the caller's project`
+        }
+      }
+      const target = source.project.nodes.find((node) => node.id === nodeId)
+      const card = target ? persistedControlCard(target) : null
+      if (!card) {
+        return { ok: false, error: `assign: --node names no session card (${nodeId || 'missing'})` }
+      }
+      if (!this.ownsMutation(sourceNodeId, nodeId)) {
+        return this.ownershipRefusal('assign', sourceNodeId, nodeId)
+      }
+
+      // A lazy-default board is materialized here, as the desktop's first edit would, so the
+      // resolved column id is stable across the write and the board-log diff.
+      const prev = source.project.kanban ?? defaultKanban()
+      const rawCol = (args.column ?? '').trim()
+      const resolved = resolveOrCreateColumn(prev, rawCol, wantsCreate(args.create))
+      if ('error' in resolved) return { ok: false, error: `assign: ${resolved.error}` }
+      if ('unknown' in resolved) {
+        return {
+          ok: false,
+          error:
+            `assign: no column "${rawCol}" — columns: ` +
+            `${prev.columns.map((c) => c.title).join(', ') || '(none)'} (pass --create yes to create it)`
+        }
+      }
+      const before = (args.before ?? '').trim() || null
+      const live = new Set(source.project.nodes.map((node) => node.id))
+      const next = sweepEmptiedAgentColumns(
+        prev,
+        assignNode(resolved.k, nodeId, resolved.columnId, before),
+        (id) => live.has(id)
+      )
+      const where = resolved.columnId
+        ? next.columns.find((c) => c.id === resolved.columnId)?.title ?? resolved.columnId
+        : 'Ungrouped'
+      const title = card.title || 'Untitled'
+      const reply: ServerControlReply = {
+        ok: true,
+        message: `${resolved.created ? `created column "${where}" and ` : ''}moved ${title} to ${where}`,
+        result: { node: nodeId, column: resolved.columnId, created: resolved.created }
+      }
+      // Already there (or unassigning on a board that was never written): nothing to save, and no
+      // lazy default is materialized for a no-op — a retry must not churn the file.
+      if (JSON.stringify(prev) === JSON.stringify(next)) return reply
+
+      source.project.kanban = next
+      await this.deps.workspaceStore.save(workspace)
+      this.publish(source.project, [])
+      await this.narrateBoard(source.project, source.node, prev, next)
+      return reply
     })
   }
 

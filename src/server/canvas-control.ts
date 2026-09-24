@@ -189,7 +189,10 @@ export async function initServerCanvasControl(
     // up suspends autosave, so it latched on, and "Keep my version" then wrote the browser's edge
     // state over the ropes this factory had just persisted. These writes are OURS; the renderer
     // merges them (renderer/lib/serverChange.ts) and is never asked to choose.
-    publishProject: (project: Project) => platform().broadcast(IPC.workspaceServerChange, project)
+    publishProject: (project: Project) => platform().broadcast(IPC.workspaceServerChange, project),
+    // `assign` / the column sweep on `close` narrate through the SAME appender the delivery trace
+    // uses, so a server-side card move lands in the card's feed exactly like a desktop move.
+    appendBoardLog: (projectId, entry) => deps.boardLog.append(projectId, entry)
   })
 
   const messaging: AgentMessagingDeps = {
@@ -228,6 +231,8 @@ export async function initServerCanvasControl(
     rename: (sourceNodeId, args) => factory.rename(sourceNodeId, args),
     color: (sourceNodeId, args) => factory.color(sourceNodeId, args),
     sticky: (sourceNodeId, args) => factory.sticky(sourceNodeId, args),
+    board: (sourceNodeId, args) => factory.board(sourceNodeId, args),
+    assign: (sourceNodeId, args) => factory.assign(sourceNodeId, args),
     settings: async (sourceNodeId, args) =>
       serverSettingsControl(
         {

@@ -34,17 +34,18 @@ Upstream rebuilt Server-Edition canvas control, and it replaced our implementati
   **No browser tab is required.**
 
 **It is tab-free but NARROWER, and that trade is the headline.** Our retired bridge served all 25
-verbs whenever a tab happened to be attached; the headless runtime serves **13**, always. Measured
-on this host, not read off a doc:
+verbs whenever a tab happened to be attached; the headless runtime serves **15**, always —
+upstream's 13, plus `board`/`assign`, which this fork adds (§4):
 
 | Served headless (Server Edition v1) | Refused headless (`control-unsupported-on-this-edition`) |
 |---|---|
-| `open-project` `open-terminal` `open-agent` `close` `link` `group` `rename` `color` `send` `reply` `notify` `sticky` `settings` | `list` `board` `assign` `verify` `spawn-team` `arrange` `align` `move` `ungroup` `open-claude` `open-worktree` `close-worktree` `branch` `write` `show-*` `open-browser` `browser` |
+| `open-project` `open-terminal` `open-agent` `close` `link` `group` `rename` `color` `send` `reply` `notify` `sticky` `settings` **`board` `assign`** | `list` `verify` `spawn-team` `arrange` `align` `move` `ungroup` `open-claude` `open-worktree` `close-worktree` `branch` `write` `show-*` `open-browser` `browser` |
 
 Consequences an orchestrator must plan around:
 - **`open-claude` is gone — use `open-agent --agent claude`** (v1 takes `claude|codex|gemini`).
-- **No `list` and no `board`.** An agent cannot read the canvas or the kanban board here at all, so
-  it cannot discover node ids it did not create. It knows only what its own calls returned.
+- **No `list`.** An agent cannot read the canvas here, so it cannot discover node ids it did not
+  create; it knows only what its own calls returned. **`board` works** and lists every card with
+  its id, which is the one way to see ids it did not create (it cannot mutate them — see below).
 - **No `verify` and no `spawn-team`.** A review panel or a team has to be assembled by hand from
   `open-agent` + `link` + `group`, and there is no `arrange`/`align` to tidy it.
 - SSH: v1 creates **local sessions only** (`project-target-ssh-unsupported`).
@@ -69,7 +70,7 @@ naming the surface it grants.
 ### The headless ownership rule — new, and it will surprise you
 
 On the Server Edition, the node-mutating verbs (`close`, `link`, `group`, `rename`, `color`,
-`sticky` update) accept **only nodes the caller opened during the current server run**, and refuse
+`sticky` update, `assign`) accept **only nodes the caller opened during the current server run**, and refuse
 the whole request before any partial mutation. A server restart resets that; nodes from a previous
 run are not yours to mutate. Desktop is unchanged (it asks the user instead).
 
@@ -87,7 +88,7 @@ env). A Claude started from a plain SSH shell sees the skill but the CLI refuses
 the CLI stays inert in ordinary terminals.
 
 **New/changed verb surface worth knowing.** Everything below is upstream's CLI contract; on this
-host only the 13 verbs in §2 reach it, so treat the rest as desktop-only until v2:
+host only the 15 verbs in §2 reach it, so treat the rest as desktop-only until v2:
 
 - **`close --node <id,id>`** takes a **comma list**, confirmed in ONE dialog. Close a finished wave
   in a single call — one call per node asked the user once per node and refused every call after
@@ -124,12 +125,41 @@ worktree); pass **`--cwd`** when the target has neither, or they review the wron
 
 ---
 
-## 4. What the fork still adds (2 patches, down from 5)
+## 4. What the fork still adds (3 patches)
 
 | Patch | Why it is still ours |
 |---|---|
+| **Kanban control on the Server Edition + agent-created columns** | upstream refuses `board`/`assign` headless, and has no way to create a column from an agent anywhere. See below. |
 | **`contextLink.info` over the browser bridge** | upstream still stubs it `E_UNSUPPORTED`; without it `verify` cannot build a reviewer's brief |
 | **Claude window = 200k unless `[1m]`** | upstream still uses the `opus\|sonnet\|fable` family rule, which under-reports context pressure **5×** on every 200k session |
+
+**Kanban control (added 2026-09-24).** A pipeline files each lane's cards into one column per
+TASK, and the column cleans itself up:
+
+```sh
+nodeterm.sh assign --node <child> --column "Task A" --create yes   # idempotent: one column per title
+nodeterm.sh board                                                  # columns + cards (+ ids), Ungrouped
+```
+
+- `--create yes` makes the column when no title matches (case-insensitive), marked
+  `origin: 'agent'`. Several agents filing into one title — even at the same instant — land in ONE
+  column: the server serializes every control write.
+- An agent-created column is **removed automatically** when its last card is closed or moved out,
+  on either shell (server `close`/`assign`, and the desktop's delete + drag paths). A column the
+  user made is **never** removed, even empty. An agent column that was already empty is left alone
+  — only a change that empties it removes it.
+- Server Edition `assign` refuses a card the caller did not open this run (`assign-not-owner`);
+  `board` has no ownership check. Desktop `assign` is unchanged (no ownership check) but gained
+  `--create` too, since the agent-facing docs are one text for both shells.
+- Server moves land live on an open board (the full-project publish carries `kanban`) and in the
+  card's feed, attributed to the agent's node title.
+- Concurrent edits are last-write-wins on the whole board object, the same as nodes: a desktop
+  drag landing at the same instant as an agent `assign` keeps one of the two. Each side writes a
+  complete, self-consistent board, so the result is always a valid board — never a mix of the two.
+- A surface that drops unknown fields on write (the iOS app's direct-SSH writer may) turns an agent
+  column into a hand-made one, which then simply stays — the safe direction.
+- Upstreamable: the transforms moved to `src/shared/` (`kanban.ts`, `board-log-diff.ts`,
+  `kanban-control.ts`), with the renderer files kept as re-exports.
 
 Plus one UI keep: **the frame context menu's "close group and its nodes"** (`closeGroupWithChildren`
 + `groupSubtreeIds`). Upstream deleted the frame's `×` rather than implementing it, so this is the
@@ -156,8 +186,8 @@ boot factory, our canvas-control installer, and the agent-facing group-subtree `
 
 | | |
 |---|---|
-| `main` | `fabfeb45` (v0.3.9) |
-| **Running** | same — deployed 2026-09-23 |
+| `main` | `fabfeb45` (v0.3.9) + the kanban-control commit (2026-09-24) |
+| **Running** | same — deployed 2026-09-24 |
 | Canvas-control flag | **ON**, via `/etc/systemd/system/nodeterm-server.service.d/canvas-control.conf` |
 
 Deploy sequence (deps change most syncs, so a bare rebuild is not enough):

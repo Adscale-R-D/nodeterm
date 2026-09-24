@@ -576,6 +576,11 @@ export interface KanbanColumn {
   id: string
   title: string
   color: string
+  /** `'agent'` = created by canvas control (`assign --create yes`), so it is removed automatically
+   *  once the cards filed into it are gone (`sweepEmptiedAgentColumns`). Absent = made by a person,
+   *  and never removed automatically, empty or not. A surface that drops unknown fields on write
+   *  degrades SAFELY: the column becomes hand-made and simply stays. */
+  origin?: 'agent'
 }
 
 /** Assignment of one session node to a board column. A session with no assignment sits

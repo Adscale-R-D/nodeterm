@@ -520,7 +520,8 @@ import type {
   TranscriptHit
 } from '@shared/types'
 import type { KanbanCreateChoice, KanbanSession } from '../components/kanban/KanbanView'
-import { assignNode, assignedTo, defaultKanban, labelsForCard, migrateProjectTags, resolveColumnRef, unassigned } from '../lib/kanban'
+import { assignNode, defaultKanban, labelsForCard, migrateProjectTags, resolveOrCreateColumn, sweepEmptiedAgentColumns } from '../lib/kanban'
+import { boardSnapshot, wantsCreate } from '@shared/kanban-control'
 import { registerWorkspaceDirty } from '../state/workspaceDirty'
 import { snapNodeToGrid } from '../lib/nodeSizing'
 import { snapResizeChanges } from '../lib/resizeSnap'
@@ -2690,7 +2691,8 @@ export function Canvas() {
       // The board BEFORE this change — read fresh at callback entry (a stale closed-over value
       // would misattribute the diff). Same lazy-default as the KanbanView render.
       const prev = useProjects.getState().getProject(id)?.kanban ?? seedBoard
-      useProjects.getState().setProjectKanban(id, next)
+      // `stored` can differ from `next`: an agent-created column this change emptied is removed.
+      const stored = useProjects.getState().setProjectKanban(id, next)
       markDirty() // rides the existing debounced persist (commitActiveToStore + workspace.save)
       // cardTitle must return '' for — and ONLY for — nodes that no longer exist (the diff reads
       // '' as "pruned removal, not a move"). A LIVE node with an empty title maps to 'Untitled',
@@ -2702,7 +2704,7 @@ export function Canvas() {
         const card = n ? toKanbanSession(n) : null
         return card ? card.title || 'Untitled' : ''
       }
-      for (const { nodeId, event } of boardLogEvents(prev, next, cardTitle)) {
+      for (const { nodeId, event } of boardLogEvents(prev, stored, cardTitle)) {
         useBoardLog.getState().append(api, id, { kind: 'event', nodeId, event })
       }
     },
@@ -5285,6 +5287,31 @@ export function Canvas() {
   )
 
   // ---- multi-node actions (context menu) ----
+  /**
+   * A node going away can empty an agent-created kanban column (`assign --create yes`), and such a
+   * column is removed with its last card — the lane that filed into it was torn down, so nobody is
+   * left to clean it up. Called by BOTH delete funnels (`deleteNodes`, `closeStoredNodes`).
+   *
+   * "Gone" is exactly the set being removed here, never "absent from this canvas": a node the
+   * Server Edition has just created may not have reached this canvas yet, and reading that as dead
+   * would delete a live lane's column. A column a person made is never removed (@shared/kanban).
+   */
+  const sweepAgentColumnsForRemoval = useCallback(
+    (projectId: string, removed: ReadonlySet<string>) => {
+      const board = useProjects.getState().getProject(projectId)?.kanban
+      if (!board) return
+      const next = sweepEmptiedAgentColumns(board, board, (id) => !removed.has(id))
+      if (next === board) return
+      const stored = useProjects.getState().setProjectKanban(projectId, next)
+      // Every card in a swept column is one being removed, so '' (= "node gone") is the right
+      // title for all of them: the diff narrates only the column-deleted events.
+      for (const { nodeId, event } of boardLogEvents(board, stored, () => '')) {
+        useBoardLog.getState().append(api, projectId, { kind: 'event', nodeId, event })
+      }
+    },
+    [api]
+  )
+
   const deleteNodes = useCallback(
     (ids: string[], opts?: { record?: boolean }) => {
       const set = new Set(ids)
@@ -5382,6 +5409,7 @@ export function Canvas() {
               : n
           )
       })
+      sweepAgentColumnsForRemoval(useProjects.getState().activeProjectId ?? '', set)
       markDirty()
       // A deleted group takes its worktree BINDING with it — and the frame is the only thing that
       // goes: its children SURVIVE (freed to absolute positions above), dead `data.cwd` and all. So
@@ -5402,7 +5430,7 @@ export function Canvas() {
         )
       }
     },
-    [setNodes, markDirty, refreshWorktreeStore, releaseWorktreeBinding]
+    [setNodes, markDirty, refreshWorktreeStore, releaseWorktreeBinding, sweepAgentColumnsForRemoval]
   )
 
   /** `canvas.deleteSelection` (Delete / Backspace): confirm-then-delete the selected nodes, or —
@@ -12169,46 +12197,13 @@ export function Canvas() {
             // reading the active one would answer a background agent's `board` with whatever the
             // human happens to be looking at. On screen they are the same project, which is why
             // the old read was never wrong in practice — the travel had already made it true.
-            const board = ctlProject?.kanban
-            const sessions = ctlNodes()
+            const cards = ctlNodes()
               .map(toKanbanSession)
               .filter((s): s is KanbanSession => s !== null)
-            const titleOf = new Map(sessions.map((s) => [s.id, s.title || 'Untitled']))
-            const sessionIds = sessions.map((s) => s.id)
-            if (!board) {
-              // No board yet (lazy default not written) — every session is Ungrouped.
-              const lines = [
-                'Kanban board: (no columns yet — default To Do / In Progress / Done appears on first edit)',
-                `Ungrouped (${sessionIds.length}):`,
-                ...sessionIds.map((id) => `  - ${titleOf.get(id)} (id: ${id})`)
-              ]
-              reply({
-                ok: true,
-                message: lines.join('\n'),
-                result: { columns: [], ungrouped: sessionIds }
-              })
-              return
-            }
-            const columnsOut = board.columns.map((c) => {
-              const ids = assignedTo(board, c.id).filter((id) => titleOf.has(id))
-              return { id: c.id, title: c.title, cards: ids }
-            })
-            const ungroupedIds = unassigned(board, sessionIds)
-            const fmt = (ids: string[]) => ids.map((id) => `  - ${titleOf.get(id)} (id: ${id})`)
-            const lines = [
-              'Kanban board:',
-              ...columnsOut.flatMap((c) => [
-                `${c.title} (${c.cards.length}) [column id: ${c.id}]:`,
-                ...fmt(c.cards)
-              ]),
-              `Ungrouped (${ungroupedIds.length}):`,
-              ...fmt(ungroupedIds)
-            ]
-            reply({
-              ok: true,
-              message: lines.join('\n'),
-              result: { columns: columnsOut, ungrouped: ungroupedIds }
-            })
+              .map((s) => ({ id: s.id, title: s.title }))
+            // Shared with the Server Edition's headless `board` (@shared/kanban-control), so the
+            // two shells cannot answer the same question in two shapes.
+            reply({ ok: true, ...boardSnapshot(ctlProject?.kanban, cards) })
             return
           }
           case 'assign': {
@@ -12234,19 +12229,30 @@ export function Canvas() {
             // resolved column ids are stable across the write and the diff.
             const prev = store.getProject(pid)?.kanban ?? defaultKanban()
             // Resolve --column by id or (case-insensitive) title; empty / "ungrouped" → null
-            // (unassign). `undefined` = no such column, so report what IS available.
+            // (unassign). With `--create yes` an unmatched title becomes an agent-created column
+            // (idempotent: the next call with the same title lands in it). Otherwise an unknown
+            // column is refused, listing what IS available.
             const rawCol = (args.column ?? '').trim()
-            const columnId = resolveColumnRef(prev, rawCol)
-            if (columnId === undefined) {
+            const resolved = resolveOrCreateColumn(prev, rawCol, wantsCreate(args.create))
+            if ('error' in resolved) {
+              reply({ ok: false, error: `assign: ${resolved.error}` })
+              return
+            }
+            if ('unknown' in resolved) {
               reply({
                 ok: false,
-                error: `assign: no column "${rawCol}" — columns: ${prev.columns.map((c) => c.title).join(', ') || '(none)'}`
+                error: `assign: no column "${rawCol}" — columns: ${prev.columns.map((c) => c.title).join(', ') || '(none)'} (pass --create yes to create it)`
               })
               return
             }
+            const columnId = resolved.columnId
             const before = (args.before ?? '').trim() || null
-            const next = assignNode(prev, nodeId, columnId, before)
-            store.setProjectKanban(pid, next)
+            // setProjectKanban also removes an agent-created column this move emptied, and
+            // returns the board it actually stored — the diff below must narrate THAT board.
+            const next = store.setProjectKanban(
+              pid,
+              assignNode(resolved.k, nodeId, columnId, before)
+            )
             markDirty()
             // Board-log the move through the same diff funnel the UI uses (card-moved), so the
             // board feed reads identically whether a person or an agent moved the card. cardTitle
@@ -12264,8 +12270,8 @@ export function Canvas() {
               : 'Ungrouped'
             reply({
               ok: true,
-              message: `moved ${cardTitle(nodeId) || nodeId} to ${where}`,
-              result: { node: nodeId, column: columnId }
+              message: `${resolved.created ? `created column "${where}" and ` : ''}moved ${cardTitle(nodeId) || nodeId} to ${where}`,
+              result: { node: nodeId, column: columnId, created: resolved.created }
             })
             return
           }
@@ -12322,9 +12328,10 @@ export function Canvas() {
         useWebviewKeepAlive.getState().drop(id)
         store.removeNode(projectId, id)
       }
+      sweepAgentColumnsForRemoval(projectId, new Set(ids))
       void writeDisk()
     },
-    [writeDisk]
+    [writeDisk, sweepAgentColumnsForRemoval]
   )
 
   // Close (end) a session. tmux sessions are keyed by node id, so destroy works for an

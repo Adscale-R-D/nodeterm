@@ -557,13 +557,18 @@ export function buildCanvasControlInstructions(shimPath: string): string {
     '  nothing matches. A body that STARTS with `--` must use the `=` form: `--text=<body>`. No',
     '  confirm dialog — the note shows who wrote it and when. Use it to keep an external source',
     '  (tickets, status) live on the canvas: rewrite one titled note each run.',
-    '- `board` — the project\'s kanban board: every column (id + title) and the session cards in each,',
-    '  plus the virtual Ungrouped column. Start here when you need a column id or want the board state.',
-    '- `assign --node <id> [--column <id|title>] [--before <nodeId>]` — move a session card to a column',
-    '  (match by column id or title). Omit `--column` (or pass `ungrouped`) to send it back to Ungrouped.',
-    '  `--before <nodeId>` drops it above that card within the column. This is board metadata only — it',
-    '  never moves the node on the canvas or changes its group. Use it to reflect progress: move a card',
-    '  to your "In Progress"/"Done" column as work advances.',
+    '- `board` — your project\'s kanban board: every column (id + title) and the session cards in each,',
+    '  plus the virtual Ungrouped column; a column you created with `--create` is marked agent-created.',
+    '  Start here when you need a column id or want the board state.',
+    '- `assign --node <id> [--column <id|title>] [--before <nodeId>] [--create yes]` — move a session',
+    '  card to a column (match by column id or case-insensitive title). Omit `--column` (or pass',
+    '  `ungrouped`) to send it back to Ungrouped. `--before <nodeId>` drops it above that card within',
+    '  the column. `--create yes` makes the column when no column matches — idempotent, so every agent',
+    '  filing into the same title lands in ONE column. A column made this way is agent-created and is',
+    '  REMOVED AUTOMATICALLY once its last card is closed or moved out, so a per-task column cleans',
+    '  itself up when the lane is torn down; columns the user made are never removed. This is board',
+    '  metadata only — it never moves the node on the canvas or changes its group. On Server Edition',
+    '  you may assign only cards you opened (the ownership rule above).',
     ...settingsVerbDocLines(),
     ...reportIssueDocLines(),
     ...browserVerbDocLines(),
@@ -1075,15 +1080,21 @@ Verbs:
   which agent last wrote it and when. This is the door for syncing an external source
   (Linear/Jira/GitHub tickets, build status…) onto the canvas: keep ONE titled note per source
   and rewrite it each run — e.g. \`sticky --node "Linear: my tickets" --create yes --text "…"\`.
-- \`board\` — read the project's kanban board: every column (id + title) and the session cards
-  filed in each, plus the virtual Ungrouped column (unfiled sessions). Start here when you need
-  a column id, or to see how the work is currently laid out.
-- \`assign --node <id> [--column <id|title>] [--before <nodeId>]\` — file a session card under a
-  column, matching \`--column\` by id or (case-insensitive) title. Omit \`--column\`, or pass
-  \`ungrouped\`, to send it back to Ungrouped; \`--before <nodeId>\` drops it just above that card
-  within the column. This is board metadata ONLY — it never moves the node on the canvas, changes
-  its group, or touches the running session. Use it to reflect progress: as a station finishes,
-  move its card into your "In Progress" / "Done" column so the board tells the real story.
+- \`board\` — read your project's kanban board: every column (id + title) and the session cards
+  filed in each, plus the virtual Ungrouped column (unfiled sessions). A column you made with
+  \`--create\` is marked agent-created. Start here when you need a column id, or to see how the
+  work is currently laid out.
+- \`assign --node <id> [--column <id|title>] [--before <nodeId>] [--create yes]\` — file a session
+  card under a column, matching \`--column\` by id or (case-insensitive) title. Omit \`--column\`,
+  or pass \`ungrouped\`, to send it back to Ungrouped; \`--before <nodeId>\` drops it just above
+  that card within the column. \`--create yes\` creates the column when nothing matches. It is
+  idempotent — several agents filing into the same title land in ONE column — so a column per TASK
+  is the natural use: \`assign --node <child> --column "Task A" --create yes\` for each station of a
+  lane. A column made this way is agent-created and is REMOVED AUTOMATICALLY once its last card is
+  closed or moved out, so tearing a lane down cleans its column up with no extra step; columns the
+  user made are never removed, even when empty. This is board metadata ONLY — it never moves the
+  node on the canvas, changes its group, or touches the running session. On Server Edition you may
+  assign only cards you opened (the ownership rule above).
 ${settingsVerbDocLines().join('\n')}
 ${reportIssueDocLines().join('\n')}
 ${browserVerbDocLines().join('\n')}
@@ -1103,8 +1114,8 @@ Notes:
   in particular, never re-send a \`denied by user\` request hoping the dialog is off now.
   \`a confirmation is already pending\` means a dialog for an EARLIER request is open: wait for
   the user, do not spin. Server Edition uses the process-local ownership rule for \`close\` instead.
-- \`board\` and \`assign\` act on the CURRENTLY OPEN project's board — the same one you see when you
-  toggle the kanban view. They need no confirmation.
+- \`board\` and \`assign\` act on YOUR project's board — the project your session belongs to, even
+  when the user is looking at another one. They need no confirmation.
 - If the CLI says canvas control is unavailable, you are not in a controllable nodeterm session — do not retry.
 
 ${codexSandboxGuidanceLines(CONTROL_UNREACHABLE_MSG).join('\n')}

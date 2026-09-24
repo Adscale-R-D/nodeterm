@@ -111,6 +111,14 @@ discard them. `/repos/{repo}/pulls` looks like the obvious endpoint and is the e
 bytes. CLAUDE.md's kanban section has the measurements and the eviction rule that keeps the issue
 lane unaffected.
 
+Board transforms live in **`src/shared/kanban.ts`** (the renderer's `lib/kanban.ts` re-exports it)
+because the Server Edition runs them too, for the `board`/`assign` control verbs. Write every board
+change through `useProjects.setProjectKanban`: it removes an agent-created column the change
+emptied, and it **returns the board it stored**, so if you narrate the change to the board log,
+diff against the return value, not your argument. A new path that deletes nodes owes a call to the
+same sweep (`sweepAgentColumnsForRemoval` in Canvas), passing the ids it removes. Pass exactly those
+ids, not "everything missing from this canvas".
+
 ## House rules
 
 - **Never call the user's machine a Mac in user-visible copy.** Use `thisMachine()` /

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { ProjectKanban } from '@shared/types'
-import { boardLogEvents } from './boardLogDiff'
+import { boardLogEvents } from './board-log-diff'
 
 const col = (id: string, title: string) => ({ id, title, color: '#111' })
 const board = (columns: ProjectKanban['columns'], assignments: ProjectKanban['assignments']): ProjectKanban => ({

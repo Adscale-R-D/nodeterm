@@ -183,7 +183,28 @@ describe('the enabled Server Edition handler parses and dispatches the v1 surfac
     color: vi.fn(async () => ({ ok: true as const, result: { colored: ['term-target'] } })),
     sticky: vi.fn(async () => ({ ok: true as const, result: { id: 'sticky-new' } })),
     settings: vi.fn(async () => ({ ok: true as const, message: 'settings' })),
+    board: vi.fn(async () => ({ ok: true as const, message: 'board' })),
+    assign: vi.fn(async () => ({ ok: true as const, message: 'assigned' })),
     deliver: vi.fn(async () => ({ ok: true as const, message: 'queued' }))
+  })
+
+  it('routes board and assign to their actions (kanban control, no longer an edition refusal)', async () => {
+    const a = actions()
+    const handler = createServerEditionControlHandler(a)
+    await expect(
+      handler({ verb: 'board', nodeId: 'term-source', args: {}, verified: true })
+    ).resolves.toMatchObject({ ok: true })
+    expect(a.board).toHaveBeenCalledWith('term-source', {})
+    const args = { node: 'term-child', column: 'Task A', create: 'yes' }
+    await expect(
+      handler({ verb: 'assign', nodeId: 'term-source', args, verified: true })
+    ).resolves.toMatchObject({ ok: true })
+    expect(a.assign).toHaveBeenCalledWith('term-source', args)
+    // The shared parser still guards the action: no --node, no call.
+    await expect(
+      handler({ verb: 'assign', nodeId: 'term-source', args: { column: 'x' }, verified: true })
+    ).resolves.toEqual({ ok: false, error: 'assign requires --node <id>' })
+    expect(a.assign).toHaveBeenCalledTimes(1)
   })
 
   it('routes settings to its action, after the shared allowlist parse', async () => {

@@ -11,6 +11,7 @@ import type {
   Viewport,
   Workspace
 } from '@shared/types'
+import { sweepEmptiedAgentColumns } from '@shared/kanban'
 import { CLOSED_SESSIONS_CAP } from '@shared/types'
 import { collisionSeed, derivedProjectId } from '@shared/project-id'
 import { capabilityHasMachineDefault, type ProjectCapability } from '@shared/project-capabilities'
@@ -122,8 +123,12 @@ interface ProjectsState {
   recordProjectCapabilityAck(id: string, cap: ProjectCapability, answer: CapabilityAnswer): void
   /** Raises the project's dino high score (never lowers it). */
   setDinoHighScore(id: string, score: number): void
-  /** Replaces the project's kanban board (the UI computes the next board via lib/kanban). */
-  setProjectKanban(id: string, kanban: ProjectKanban): void
+  /** Replaces the project's kanban board (the UI computes the next board via lib/kanban), then
+   *  removes any agent-created column this change emptied (`sweepEmptiedAgentColumns` — a column a
+   *  person made is never removed). Returns the board actually STORED, which differs from the
+   *  argument only when a column was swept; a caller that narrates the change to the board log
+   *  must diff against the return value, or the removal goes unrecorded. */
+  setProjectKanban(id: string, kanban: ProjectKanban): ProjectKanban
   /** Replaces the project's breadcrumb (navigation history) list wholesale — the UI computes the
    *  next list via lib/breadcrumbs and hands it over whole, same convention as setProjectKanban. */
   setProjectBreadcrumbs(id: string, breadcrumbs: NavStop[]): void
@@ -532,9 +537,15 @@ export const useProjects = create<ProjectsState>((set, get) => ({
   },
 
   setProjectKanban(id, kanban) {
+    // The one choke point every board writer passes through (drags, the card menu, labels, the
+    // desktop `assign` verb) — so "the last card moved out of an agent column" is caught here once
+    // instead of at each call site. A board that did not exist yet has no column to empty.
+    const prev = get().projects.find((p) => p.id === id)?.kanban
+    const stored = prev ? sweepEmptiedAgentColumns(prev, kanban) : kanban
     set((s) => ({
-      projects: s.projects.map((p) => (p.id === id ? { ...p, kanban } : p))
+      projects: s.projects.map((p) => (p.id === id ? { ...p, kanban: stored } : p))
     }))
+    return stored
   },
 
   setProjectBreadcrumbs(id, breadcrumbs) {

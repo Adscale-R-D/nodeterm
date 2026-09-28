@@ -1,4 +1,13 @@
-// Resolves a Claude model → its context window (max input tokens).
+/** A hook reports only this session's effective env, never nodeterm's global environment.
+ * Decimal safe integers only: reject partial parses, exponents, infinities and zero.
+ * A window a session REPORTS beats every rule below; both tails consult this first. */
+export function sessionContextWindow(value: unknown): number | null {
+  if (typeof value !== 'string' || !/^[0-9]{1,16}$/.test(value)) return null
+  const window = Number(value)
+  return Number.isSafeInteger(window) && window > 0 ? window : null
+}
+
+// Resolves a Claude model → its context window (max input tokens), when the session reported none.
 //
 // ── THE RULE IS THE CLI'S, NOT A FAMILY GUESS ───────────────────────────────────────────────────
 // This file used to map the model FAMILY to a window — opus/sonnet/fable → 1M, haiku → 200k — on
@@ -115,12 +124,4 @@ const GEMMA_4_MODELS = new Set(['gemma-4-31b-it', 'gemma-4-26b-a4b-it'])
 export function geminiWindowFor(model: string | null): number | null {
   if (!model) return null
   return GEMMA_4_MODELS.has(model) ? GEMINI_GEMMA_4_TOKEN_LIMIT : GEMINI_DEFAULT_TOKEN_LIMIT
-}
-
-/**
- * Kept only for call-site compatibility with context-tail.ts. Window resolution is fully
- * synchronous via cachedWindowFor/staticWindowFor, so there is nothing to resolve — no-op.
- */
-export async function resolveModelWindow(_model: string | null): Promise<void> {
-  // intentional no-op
 }

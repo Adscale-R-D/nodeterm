@@ -34,6 +34,10 @@ class FakePty implements HeadlessPty {
     if (options.persistKey) this.live.add(options.persistKey)
     return { sessionId: `pty-${options.persistKey}`, fresh: true, persistent: true }
   }
+  /** A shell owns every pane — the same answer upstream's fake gives. */
+  async paneCommand(): Promise<string | null> {
+    return 'bash'
+  }
   async sessionExists(persistKey: string): Promise<boolean> {
     return this.live.has(persistKey)
   }

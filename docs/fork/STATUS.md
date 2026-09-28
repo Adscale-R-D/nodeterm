@@ -3,7 +3,7 @@
 **Audience: the agent/manager coordinating work on this box.** What you can do now that you could
 not before, what is actually running, and what is known-broken so you do not chase it.
 
-Written **2026-09-23**, replacing the 2026-09-02 edition wholesale — most of what that one
+Written **2026-09-23** (updated 2026-09-28 for sync #4), replacing the 2026-09-02 edition wholesale — most of what that one
 described has been retired (§4). Lives in `docs/fork/` (a path upstream never creates, so it adds
 no conflict surface); fork-local operational state, not upstream documentation.
 
@@ -15,7 +15,7 @@ no conflict surface); fork-local operational state, not upstream documentation.
 |---|---|
 | This checkout | `~/nodeterm` = **`Adscale-R-D/nodeterm`** (our fork), branch `main` |
 | Upstream | **`eneskirca/nodeterm`**, remote `upstream` |
-| Fork `main` | `fabfeb45` — a merge of upstream `1e56e1c3` (v0.3.9), **0 behind upstream** |
+| Fork `main` | a merge of upstream `775c852b` (**v0.3.17**, sync #4, 2026-09-28), **0 behind upstream** |
 | What runs the server | a **second checkout**, `~/.nodeterm-server-app`, systemd `nodeterm-server` |
 
 The fork now carries **2 patches** upstream lacks (§4), down from 5.
@@ -186,7 +186,7 @@ boot factory, our canvas-control installer, and the agent-facing group-subtree `
 
 | | |
 |---|---|
-| `main` | `fabfeb45` (v0.3.9) + the kanban-control commit (2026-09-24) |
+| `main` | sync #4 merge of upstream `775c852b` (v0.3.17), 2026-09-28 |
 | **Running** | same — deployed 2026-09-24 |
 | Canvas-control flag | **ON**, via `/etc/systemd/system/nodeterm-server.service.d/canvas-control.conf` |
 
@@ -215,18 +215,39 @@ Then **hard-reload the browser tab** (the renderer bundle changes every deploy).
 
 ## 7. Known-red tests (do not chase)
 
-**One**, and it reproduces on `upstream/main` alone — verified in a throwaway worktree:
-`src/core/tmux-paste.realtmux.test.ts` → "CONTROL: without the gated cancel, copy mode unframes the
-paste" (environment-sensitive real tmux). Everything else is green: **12,109 passing**, both
-typechecks clean. Upstream fixed the four `opencode.test.ts` cases and `headless-e2e` that were red
-last sync.
+**None** as of sync #4 (2026-09-28): **14,111 passing, 0 failing**, both typechecks clean.
+`src/core/tmux-paste.realtmux.test.ts` ("copy mode unframes the paste"), red at sync #3, passed this
+time; it is environment-sensitive real tmux, so if it reappears, check it on `upstream/main` alone
+before chasing it. One settings-section test can print an unhandled `window is not defined` from a
+coalesced save timer under full-suite load — a flake in a file the fork does not touch.
 
 `node_modules` here is real and patched. If `node-pty-patch.test.ts` goes red, the install is
 unpatched — not the code.
 
 ---
 
-## 8. Syncing again — what three syncs have taught
+## 8. Sync #4 (2026-09-28): what it brought (v0.3.10 → v0.3.17, 417 commits)
+
+Our three patches all survived. Upstream still refuses `board`/`assign` headless, still stubs
+`contextLink.info`, and still treats opus/sonnet as 1M. What changed for us:
+
+- **Armed launches are more reliable on the headless server**: a launch whose delivery fails or is
+  not acknowledged is now RETAINED (the node keeps its command, "Run now" can recover it) and the
+  reply says honestly whether it was delivered. Launches also check that a shell owns the pane
+  first (`paneCommand`). This is the class of bug behind the old `--after` losses.
+- **The session's own reported context window now wins** (`sessionContextWindow`, from the hook
+  env). Our 200k-unless-`[1m]` rule stays as the fallback when a session reports nothing.
+- **⌘M chat view rebuilt**: paged transcripts, a claude.ai-style composer, and Plan / Question
+  cards you can ANSWER in place; also in the kanban card modal.
+- **Accounts**: switch a running Claude/Codex node to another account; bulk-move sessions.
+- Perf (scrollback, transcript and workspace re-reads, glow, pan/zoom), terminal repaint fixes,
+  link right-click menu, node menu grouped into Transfer ▸ / Restart ▸, "Liquid Glass" theme.
+- Upstream moved the card-meta + label transforms to `src/shared/kanban-labels.ts`; our
+  `src/shared/kanban.ts` re-exports it, so nothing that imports the board transforms changed.
+
+---
+
+## 9. Syncing again — what four syncs have taught
 
 1. **Check whether upstream already fixed it before resolving anything.** It has, every time:
    the armed-node bug (sync 2), then canvas control, messaging and the group `×` (sync 3). Carrying
@@ -244,3 +265,6 @@ unpatched — not the code.
 6. Watch for **files upstream moved to a different path than we did** — `canvas-control-core.ts`
    (ours `src/core/agents/`, theirs `src/core/`) and the messaging tests (theirs stay in `src/main`)
    both bit this sync as "module not found" after a clean-looking resolution.
+7. **When upstream extracts code out of a file we moved, apply the same extraction to our copy and
+   diff the removed block against upstream's deletion** (sync 4, `kanban.ts` → `kanban-labels.ts`).
+   Byte-identical means nothing of ours was lost in the cut.

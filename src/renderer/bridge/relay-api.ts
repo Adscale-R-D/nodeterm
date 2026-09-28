@@ -163,6 +163,9 @@ export function buildRelayApi(connectionId: string, transport?: FrameTransport):
     // Browser control never rides the relay either (no CDP off the desktop) — inert no-ops.
     onBrowserControlResolve: stub.onBrowserControlResolve,
     sendBrowserControlResolveResult: stub.sendBrowserControlResolveResult,
+    // The phone Chat round-trip is the LOCAL desktop main's, never a relay peer's — inert here.
+    onHostChatQuery: stub.onHostChatQuery,
+    sendHostChatReply: stub.sendHostChatReply,
     // Messaging rides the same decision: the browser client is never a sender (constraint 5 of
     // the messaging plan — the phone drives canvas control over relay→IPC, not /control/*).
     agentMessage: stub.agentMessage

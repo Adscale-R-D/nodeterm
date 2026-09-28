@@ -1,3 +1,4 @@
+import { subagentReplay } from '../core/subagent-replay'
 import fs from 'fs'
 import { readAgentSessionName } from '../core/agent-session-name'
 import { startSessionNameSweep, displayNodeTitle } from '../core/session-name-sweep'
@@ -54,11 +55,13 @@ import { refreshNodeTokens } from '../core/agents/node-token-service'
 import { armServerNodeIdentity } from './node-identity-arm'
 import { wireServerCodexSharedIdentity } from './codex-shared-identity'
 import {
-  writePendingAnswerLocal,
+  localHeldPermissionIo,
   startPendingSweep,
   isValidPendingId,
   syntheticAnsweredEvent
 } from '../core/agents/pending-approvals'
+import { answerHeldPermission } from '../core/agents/permission-decision'
+import type { AnswerPermissionPayload } from '../shared/agents/permission-answer'
 import { installManagedAgentHooks } from '../core/agents/hooks'
 import { installHooksIntoLocalAccounts } from '../core/claude-accounts-service'
 import {
@@ -308,6 +311,7 @@ export async function startServer(
   const downloadTickets = new DownloadTickets()
   const { gitService } = registerCoreHandlers(platform, {
     getSettings: () => settingsStore.get(),
+    onSettingsChange: (cb) => settingsStore.onChange(cb),
     downloadTickets,
     localProjectCwd: (projectId: string) => workspaceStore.localCwdForProject(projectId)
   })
@@ -504,32 +508,34 @@ export async function startServer(
   // answer file is written right there (under os.homedir(), which the hook uses as $HOME). SSH
   // projects are v1-unsupported server-side (no ControlMaster manager here) → false, a documented
   // three-surfaces degrade. pendingId is validated before it becomes a path.
-  platform.handle(
-    IPC.agentAnswerPermission,
-    async (payload: { nodeId: string; pendingId: string; decision: 'allow' | 'deny' }) => {
-      const { nodeId, pendingId, decision } = payload ?? ({} as typeof payload)
-      if (!isValidPendingId(pendingId)) return false
-      if (decision !== 'allow' && decision !== 'deny') return false
-      // An SSH-project node has no reachable ControlMaster here (v1): answer only local nodes.
-      if (workspaceStore.sshProjectIdForNode(nodeId)) return false
-      const ok = await writePendingAnswerLocal(pendingId, decision, os.homedir())
-      // Optimistic flip (parity with desktop): emit the synthetic "answered" transition so the
-      // browser canvas NEEDS YOU badge clears instantly, ahead of the held hook's second POST (an
-      // idempotent duplicate). See docs/hook-reply-approvals.md.
-      if (ok) {
-        const ev = syntheticAnsweredEvent(nodeId, pendingId, decision)
-        if (ev) {
-          platform.broadcast(IPC.agentStatus, ev)
-          recordAgentEvent(ev)
-        }
+  platform.handle(IPC.agentAnswerPermission, async (payload: AnswerPermissionPayload) => {
+    const { nodeId, pendingId } = payload ?? ({} as AnswerPermissionPayload)
+    if (typeof nodeId !== 'string' || !isValidPendingId(pendingId)) return false
+    // An SSH-project node has no reachable ControlMaster here (v1): answer only local nodes.
+    if (workspaceStore.sshProjectIdForNode(nodeId)) return false
+    // Same shared body as the desktop (core/agents/permission-decision.ts), local fs only.
+    const res = await answerHeldPermission(
+      pendingId,
+      { decision: payload.decision, answer: payload.answer },
+      localHeldPermissionIo(pendingId, os.homedir())
+    )
+    // Optimistic flip (parity with desktop): emit the synthetic "answered" transition so the
+    // browser canvas NEEDS YOU badge clears instantly, ahead of the held hook's second POST (an
+    // idempotent duplicate). See docs/hook-reply-approvals.md.
+    if (res.ok && res.decision) {
+      const ev = syntheticAnsweredEvent(nodeId, pendingId, res.decision)
+      if (ev) {
+        platform.broadcast(IPC.agentStatus, ev)
+        recordAgentEvent(ev)
       }
-      return ok
     }
-  )
+    return res.ok
+  })
   // Read-a-finished-session ack (parity with desktop): the browser canvas's unread-clear funnel
   // calls it when the just-read node's latest state is `done`. The mirror resolves the node's done
   // inbox event(s) + re-sends an 'end' live-update so the paired phone dismisses its lingering DONE
   // Live Activity. Fire-and-forget; no-op with no unresolved done.
+  platform.handle(IPC.agentSubagentSnapshot, () => subagentReplay.snapshot())
   platform.handle(IPC.agentAckDone, (nodeId: string) => {
     ackDone(nodeId)
   })
@@ -616,7 +622,8 @@ export async function startServer(
     // this baseline hook pass stays unchanged when the feature flag is off.
     installHooksIntoLocalAccounts(settingsStore.get().claudeAccounts ?? [])
   }
-  await hookServer.start()
+  const hookStartupWarning = await hookServer.startForApp()
+  if (hookStartupWarning) console.error('[nodeterm-server]', hookStartupWarning)
   // Safe default and rollback path. The opt-in runtime replaces this handler only after its
   // workspace-backed services are ready; a failed initialization therefore degrades to the same
   // named permanent refusal rather than a half-wired execution surface.

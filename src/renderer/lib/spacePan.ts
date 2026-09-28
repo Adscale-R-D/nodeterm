@@ -5,6 +5,7 @@
  * decisions live here because the failure modes are all about WHEN it may engage, and every one of
  * them is testable without a DOM.
  */
+import { hasEditContext } from './keyContext'
 
 /** What a space keydown should do. */
 export type SpacePanAction = 'engage' | 'ignore'
@@ -18,12 +19,14 @@ export type SpacePanAction = 'engage' | 'ignore'
  *
  * xterm is covered without a special case, and that is not luck: xterm takes the keyboard through a
  * hidden `<textarea>`, so a focused terminal answers true here exactly like a sticky note does.
+ * Monaco is NOT a textarea any more (issue #930): it types through an EditContext, which
+ * `hasEditContext` recognises — without it, every space typed in an editor node became a pan.
  */
 export function typingTarget(active: Element | null): boolean {
   if (!active) return false
   const tag = active.tagName
   if (tag === 'TEXTAREA' || tag === 'INPUT') return true
-  return (active as HTMLElement).isContentEditable === true
+  return (active as HTMLElement).isContentEditable === true || hasEditContext(active)
 }
 
 /** The event shape this reads — a `KeyboardEvent` satisfies it, and so does a test literal. */

@@ -1,9 +1,16 @@
+import type { TextDeliveryResult } from '../shared/text-delivery'
+import { isLaunchShell } from '../shared/agents/pane'
 import { randomBytes, randomUUID } from 'node:crypto'
 import path from 'node:path'
 
 import { publishCanvasMutation } from '../core/canvas-sync'
 import { gateProjectTarget, GRANT_CAP } from '../core/project-grants'
-import { planBridges, type LinkEndpoint } from '../shared/canvas-link'
+import {
+  LINK_ENDPOINT_NOT_FOUND,
+  LINK_PROJECT_ONLY,
+  planBridges,
+  type LinkEndpoint
+} from '../shared/canvas-link'
 import {
   invalidNodeColorMessage,
   resolveNodeColor,
@@ -61,8 +68,9 @@ export interface ServerControlReply {
 export interface HeadlessPty {
   createHeadless(options: PtyCreateOptions): Promise<PtyCreateResult>
   /** Probe only. Boot reconciliation must never turn absence into a fresh session. */
+  paneCommand(persistKey: string): Promise<string | null>
   sessionExists(persistKey: string): Promise<boolean>
-  sendText(nodeId: string, text: string, opts?: { enter?: boolean }): Promise<boolean>
+  sendText(nodeId: string, text: string, opts?: { enter?: boolean }): Promise<TextDeliveryResult>
   destroySession(
     clientId: number | null,
     persistKey: string,
@@ -112,8 +120,6 @@ export interface HeadlessNodeFactoryDeps {
    * agent-messaging delivery trace).
    */
   appendBoardLog?: (projectId: string, entry: BoardLogEntry) => Promise<boolean>
-  schedule?: (cb: () => void, ms: number) => ReturnType<typeof setTimeout>
-  clearSchedule?: (timer: ReturnType<typeof setTimeout>) => void
   /** Injectable only so tests can seed creator facts; production uses a fresh process-local ledger. */
   ownership?: HeadlessNodeOwnership
 }
@@ -155,8 +161,6 @@ const H_GAP = 80
 const V_GAP = 36
 const GROUP_PAD = 28
 const GROUP_HEADER = 34
-const AFTER_RETRY_MS = 500
-const AFTER_RETRY_LIMIT = 5
 const SERVER_AGENTS: ReadonlySet<string> = new Set(['claude', 'codex', 'gemini'])
 /** Author colour for board-log lines an agent wrote through the server (the neutral trace grey the
  *  agent-messaging delivery trace uses — an agent is not a person with a presence colour). */
@@ -533,8 +537,6 @@ export class HeadlessNodeFactory {
    * project path, so a surviving agent session is never stranded after that restart.
    */
   private projectGrants = new Map<string, Set<string>>()
-  private retryCount = new Map<string, number>()
-  private retryTimers = new Map<string, ReturnType<typeof setTimeout>>()
   private stopped = false
 
   constructor(private readonly deps: HeadlessNodeFactoryDeps) {
@@ -902,10 +904,6 @@ export class HeadlessNodeFactory {
         this.ownership.forget(id)
         this.attached.delete(id)
         this.awaitingFirstWorking.delete(id)
-        this.retryCount.delete(id)
-        const timer = this.retryTimers.get(id)
-        if (timer) (this.deps.clearSchedule ?? clearTimeout)(timer)
-        this.retryTimers.delete(id)
       }
       return {
         ok: true,
@@ -949,7 +947,7 @@ export class HeadlessNodeFactory {
         if (projects.length && (projects.length !== 1 || projects[0].id !== source.project.id)) {
           return {
             ok: false,
-            error: `link-project-refused: ${id} is not exclusively in the caller's project`
+            error: `link-project-refused: ${id} is not exclusively in the caller's project; ${LINK_PROJECT_ONLY}`
           }
         }
       }
@@ -958,7 +956,7 @@ export class HeadlessNodeFactory {
 
       const byId = new Map(source.project.nodes.map((node) => [node.id, node]))
       if (!byId.has(from)) {
-        return { ok: false, error: `link: --from names no existing node (${from})` }
+        return { ok: false, error: `link: --from ${from}: ${LINK_ENDPOINT_NOT_FOUND}` }
       }
       const existing = [...(source.project.bridges ?? [])]
       const plan = planBridges(
@@ -1245,13 +1243,15 @@ export class HeadlessNodeFactory {
         }
 
         const id = nextId('term')
-        // Match the desktop's `armAfter`: if every dependency is already done, launch now rather
-        // than persisting a wait that has no future edge left to wake it.
-        const pendingLaunch = command && mustWait
+        // Persist before attempting delivery, including launches whose gates are already open.
+        // A failed attach/send must leave the command available to the user's Run now action.
+        const pendingLaunch = command
           ? {
               after,
               command,
               executor: 'server' as const,
+              attempted: !mustWait,
+              ...(!mustWait ? { manualOnly: true } : {}),
               ...(awaitWorking.length ? { awaitWorking: [...awaitWorking] } : {})
             }
           : undefined
@@ -1276,7 +1276,7 @@ export class HeadlessNodeFactory {
           ...(pendingLaunch ? { pendingLaunch } : {})
         }
         created.push(node)
-        if (command && !pendingLaunch) commands.set(id, command)
+        if (command && !mustWait) commands.set(id, command)
         addEdge(ropes, source.node.id, id, 'ctrl')
 
         if (verb === 'open-agent') {
@@ -1312,20 +1312,38 @@ export class HeadlessNodeFactory {
           }
           if (verb === 'open-agent' && result.fresh) this.awaitingFirstWorking.add(node.id)
           const command = commands.get(node.id)
-          if (command && !(await this.deps.ptyManager.sendText(node.id, command))) failed.push(node.id)
+          if (command) {
+            if (isLaunchShell(await this.deps.ptyManager.paneCommand(node.id)) &&
+                (await this.deps.ptyManager.sendText(node.id, command)) === true) node.pendingLaunch = undefined
+            else failed.push(node.id)
+          }
         } catch {
           failed.push(node.id)
         }
       }
 
+      // Creation and delivery are separate transactions. A refused/throwing send retains the
+      // exact command for the user's Run now action; boot still cannot adopt persisted nodes.
+      for (const node of created) {
+        if (failed.includes(node.id) && node.pendingLaunch) node.pendingLaunch.manualOnly = true
+      }
+      await this.deps.workspaceStore.save(workspace)
+      this.publish(target, created)
       const ids = created.map((node) => node.id)
+      const queuedIds = created
+        .filter((node) => node.pendingLaunch && !failed.includes(node.id))
+        .map((node) => node.id)
+      const deliveredIds = created
+        .filter((node) => commands.has(node.id) && !node.pendingLaunch && !failed.includes(node.id))
+        .map((node) => node.id)
+      const launchResult = { queued: queuedIds.length > 0, queuedIds, deliveredIds, failed }
       if (failed.length) {
         return {
           ok: false,
           error:
             `launch-failed: node(s) ${failed.join(', ')} were persisted but their PTY or initial ` +
-            'command could not be started; do not repeat the open request',
-          result: { ids, id: ids[0], after, failed }
+            'command could not be delivered; launch retained for Run now in the node; do not repeat the open request',
+          result: { ids, id: ids[0], after, ...launchResult }
         }
       }
       return {
@@ -1333,8 +1351,9 @@ export class HeadlessNodeFactory {
         message:
           `opened ${count} ${verb === 'open-agent' ? `${agentId} session` : 'terminal'}(s): ` +
           ids.join(', ') +
-          (after.length ? `; waiting for ${after.join(', ')} before running` : ''),
-        result: { ids, id: ids[0], after }
+          (queuedIds.length ? `; queued: ${queuedIds.join(', ')}` : '') +
+          (deliveredIds.length ? '; launch delivered; agent startup is not confirmed' : ''),
+        result: { ids, id: ids[0], after, ...launchResult }
       }
     })
   }
@@ -1537,7 +1556,7 @@ export class HeadlessNodeFactory {
       for (const project of workspace.projects) {
         for (const node of project.nodes) {
           const pending = node.pendingLaunch
-          if (!pending || pending.executor !== 'server' || !pending.command) continue
+          if (!pending || pending.executor !== 'server' || !pending.command || pending.manualOnly) continue
           // A persisted arm surviving a restart is data, not creator proof. Only a node freshly
           // spawned for this caller during the current run may receive automatic input.
           if (!this.ownership.ownerOf(node.id)) continue
@@ -1573,15 +1592,15 @@ export class HeadlessNodeFactory {
           const live = this.attached.has(node.id) ||
             await this.deps.ptyManager.sessionExists(node.id).catch(() => false)
           if (!live) continue
-          if (!(await this.deps.ptyManager.sendText(node.id, pending.command))) {
-            this.scheduleRetry(node.id)
-            continue
-          }
+          // Persist the attempt BEFORE input. A failed/uncertain send (or a crash before its
+          // acknowledgement save) must never be replayed by an unrelated hook.
+          pending.manualOnly = true
+          pending.attempted = true
+          await this.deps.workspaceStore.save(workspace)
+          markChanged()
+          if (!isLaunchShell(await this.deps.ptyManager.paneCommand(node.id).catch(() => null))) continue
+          if ((await this.deps.ptyManager.sendText(node.id, pending.command).catch(() => false)) !== true) continue
           node.pendingLaunch = undefined
-          this.retryCount.delete(node.id)
-          const timer = this.retryTimers.get(node.id)
-          if (timer) (this.deps.clearSchedule ?? clearTimeout)(timer)
-          this.retryTimers.delete(node.id)
           markChanged()
         }
       }
@@ -1597,23 +1616,8 @@ export class HeadlessNodeFactory {
     })
   }
 
-  private scheduleRetry(nodeId: string): void {
-    if (this.stopped || this.retryTimers.has(nodeId)) return
-    const count = (this.retryCount.get(nodeId) ?? 0) + 1
-    this.retryCount.set(nodeId, count)
-    if (count > AFTER_RETRY_LIMIT) return
-    const schedule = this.deps.schedule ?? ((cb: () => void, ms: number) => setTimeout(cb, ms))
-    const timer = schedule(() => {
-      this.retryTimers.delete(nodeId)
-      void this.refreshArmed()
-    }, AFTER_RETRY_MS)
-    this.retryTimers.set(nodeId, timer)
-  }
-
   stop(): void {
     this.stopped = true
-    for (const timer of this.retryTimers.values()) (this.deps.clearSchedule ?? clearTimeout)(timer)
-    this.retryTimers.clear()
     this.ownership.clear()
     this.projectGrants.clear()
   }

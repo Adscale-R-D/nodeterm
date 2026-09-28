@@ -2,6 +2,7 @@ import { create, type StoreApi, type UseBoundStore } from 'zustand'
 import { WORKING_STALE_MS } from '@shared/agents/stale'
 import type { AgentId } from '@shared/agents/config'
 import type { AgentState } from '@shared/agents/normalize'
+import type { HeldPermission } from '@shared/agents/permission-answer'
 import type { NodeTerminalApi, ObservedClaudeAccount } from '@shared/types'
 import type { WakeContext } from '../terminal/wake-identity'
 
@@ -148,6 +149,19 @@ export interface AgentNodeStatus {
    * it can still see.
    */
   dropped?: boolean
+  /**
+   * This node's CLI announced its own exit (any SessionEnd hook: `/exit`, `/quit`,
+   * Ctrl+D) and nothing has started a session since.
+   *
+   * It exists because a SessionEnd used to be recorded only as `state: undefined`, which is also
+   * what an agent that is merely idle looks like. `agentId` is durable and outlives the CLI, so
+   * `agentProcessInPane` read every exited agent as still running, and the memory levers refused
+   * forever to release a non-persistent pane that held nothing but a shell.
+   *
+   * TRANSIENT, like `dropped`: it is a claim about a pane in this app run. Cleared by the next
+   * SessionStart and by any state transition, since only a live CLI fires those.
+   */
+  sessionEnded?: boolean
   /** Which agent this node is running (claude/codex/gemini/…), when known. */
   agentId?: AgentId
   /**
@@ -180,6 +194,17 @@ export interface AgentNodeStatus {
    * leaves `blocked` (so the buttons vanish once the decision lands). Absent = legacy prompt path.
    */
   pendingId?: string
+  /**
+   * The request the node's managed hook is HOLDING (answer-file ticket + tool name), so a surface
+   * can offer controls that fit it — approve a plan with a follow-on mode, answer a question —
+   * through a structured `answerPermission`. Unlike `pendingId` it survives the mirror's question
+   * classification (which strips `pendingId` from a picker so approve/deny never lights there), and
+   * it is kept while the node is in EITHER needs-you state (`blocked` or `waiting`; a held picker is
+   * broadcast as `waiting`). TRANSIENT, cleared as soon as the node leaves needs-you. It can outlive
+   * the hold itself (the hook times out with no event), which is why an answer to a stale one is
+   * simply refused by core (`answerPermission` resolves false).
+   */
+  held?: HeldPermission
   /**
    * The station's LAST turn ended on an API/model error (issue #521) — set from the agent's own
    * `StopFailure` hook, cleared by the next genuine new turn.
@@ -245,8 +270,17 @@ export interface AgentStatusStore {
     newTurn?: boolean,
     pendingId?: string,
     verified?: boolean,
-    errored?: boolean
+    errored?: boolean,
+    held?: HeldPermission
   ): void
+  /**
+   * Subscribe to EVERY hook event `setState` records for node `id` — same-state ones included, and
+   * only once the store already reflects it. A zustand selector cannot see those: the same-state
+   * fast path refreshes `stateAt` IN PLACE and returns the same state object, so no subscriber is
+   * notified (deliberately — a notification per tool event would re-run every header's selector).
+   * This side channel is how the ⌘M panel refreshes its tail while a turn runs. Returns unsubscribe.
+   */
+  onHookEvent(id: string, cb: () => void): () => void
   /** Clear `working` entries whose last event is older than `staleMs` (lost-Stop safety net). */
   sweepStaleWorking(staleMs?: number): void
   setSession(id: string, session: string): void
@@ -276,6 +310,9 @@ export interface AgentStatusStore {
   /** Record (or withdraw) the verdict that this node's CLI died unannounced. Transient; see
    *  `dropped`. Cheap to call repeatedly — it bails when the flag already reads that way. */
   setDropped(id: string, on: boolean): void
+  /** Record (or withdraw) that this node's CLI announced its exit. Transient; see `sessionEnded`.
+   *  Bails when the flag already reads that way. */
+  setSessionEnded(id: string, on: boolean): void
   /** Record that this node just launched a background shell task (see `backgroundTaskAt`).
    *  Transient — nothing is written to localStorage. */
   markBackgroundTask(id: string): void
@@ -478,9 +515,35 @@ export function createAgentStatusSession(
     }
   }
 
+  // `onHookEvent` listeners, per node id. Outside zustand on purpose (see the interface).
+  const hookEventSubs = new Map<string, Set<() => void>>()
+  const pulse = (id: string): void => {
+    const subs = hookEventSubs.get(id)
+    if (!subs) return
+    for (const cb of [...subs]) {
+      // Runs inside Canvas's hook-event handler, after the store write: one throwing listener must
+      // neither abort that handler nor starve the listeners after it.
+      try {
+        cb()
+      } catch (e) {
+        console.warn('[agentStatus] onHookEvent listener threw', e)
+      }
+    }
+  }
+
   const store = create<AgentStatusStore>((set) => ({
     byId: load(),
     activeId: null,
+
+    onHookEvent: (id, cb) => {
+      let subs = hookEventSubs.get(id)
+      if (!subs) hookEventSubs.set(id, (subs = new Set()))
+      subs.add(cb)
+      return () => {
+        subs.delete(cb)
+        if (subs.size === 0 && hookEventSubs.get(id) === subs) hookEventSubs.delete(id)
+      }
+    },
 
     setActive: (id, active) =>
       set((s) => {
@@ -488,7 +551,7 @@ export function createAgentStatusSession(
         return s.activeId === id ? { activeId: null } : s
       }),
 
-    setState: (id, state, agentId, newTurn, pendingId, verified, errored) =>
+    setState: (id, state, agentId, newTurn, pendingId, verified, errored, held) => {
       set((s) => {
         const prev = s.byId[id] ?? EMPTY
         const now = Date.now()
@@ -513,10 +576,14 @@ export function createAgentStatusSession(
         // a freshness-only refresh.
         const samePendingWhileBlocked =
           state !== 'blocked' || (pendingId ?? prev.pendingId) === prev.pendingId
+        // Same for a NEW held request (a held picker re-asserts `waiting`, where pendingId is absent).
+        const needsYou = state === 'blocked' || state === 'waiting'
+        const sameHeld = !needsYou || !held || held.pendingId === prev.held?.pendingId
         if (
           prev.state === state &&
           (agentId === undefined || prev.agentId === agentId) &&
           samePendingWhileBlocked &&
+          sameHeld &&
           !turnErrorMoves
         ) {
           // Same-state event: refresh freshness in place — stateAt is never rendered, and a
@@ -540,6 +607,8 @@ export function createAgentStatusSession(
         if (agentId !== undefined) next.agentId = agentId
         // Retain the approval ticket only while blocked; any other state clears it (transient).
         next.pendingId = state === 'blocked' ? (pendingId ?? prev.pendingId) : undefined
+        // The held request rides both needs-you states (see `held`); anything else ends the hold.
+        next.held = needsYou ? (held ?? prev.held) : undefined
         // The last-turn verdict (issue #521). A genuine new turn retires it — the station is being
         // asked something else, and the old failure no longer describes what it is doing. Anything
         // else LEAVES IT STANDING (it rides the spread): the intermediate transitions between the
@@ -613,13 +682,18 @@ export function createAgentStatusSession(
         // (a late Stop POST would undo a hibernation we just performed), but it absolutely does
         // disprove "this pane has no CLI in it". Nothing is saved — the flag is transient.
         if (prev.dropped) next.dropped = undefined
+        // Same reasoning: a state transition is fired by a live CLI, so "it exited" no longer holds.
+        if (prev.sessionEnded) next.sessionEnded = undefined
         const byId = { ...s.byId, [id]: next }
         // `state` itself is transient, so a plain transition writes nothing — but dropping a
         // PERSISTED flag has to reach disk, or a relaunch would restore a hibernated/paused node
         // that has been demonstrably running since.
         if (alive && (prev.hibernated || prev.paused)) save(byId)
         return { byId }
-      }),
+      })
+      // After the set: a listener reads the store and must see this event applied.
+      pulse(id)
+    },
 
     sweepStaleWorking: (staleMs = STALE_WORKING_MS) =>
       set((s) => {
@@ -780,6 +854,14 @@ export function createAgentStatusSession(
         // Transient: cleared by dropping the key, and NO `save()` — see the field comment. An entry
         // holding nothing else durable must not be conjured onto disk by a pane reading.
         return { byId: { ...s.byId, [id]: { ...prev, dropped: on ? true : undefined } } }
+      }),
+
+    setSessionEnded: (id, on) =>
+      set((s) => {
+        const prev = s.byId[id] ?? EMPTY
+        if (!!prev.sessionEnded === on) return s
+        // Transient, no `save()`: see the field comment.
+        return { byId: { ...s.byId, [id]: { ...prev, sessionEnded: on ? true : undefined } } }
       }),
 
     markBackgroundTask: (id) =>

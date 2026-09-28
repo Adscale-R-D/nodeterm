@@ -17,6 +17,15 @@ describe('shouldReleasePaneFocus', () => {
     expect(shouldReleasePaneFocus(el('DIV', true))).toBe(true)
   })
 
+  it('releases a Monaco editor too — its input is an EditContext div, not a textarea (#930)', () => {
+    const monacoInput = {
+      tagName: 'DIV',
+      isContentEditable: false,
+      editContext: {}
+    } as unknown as Element
+    expect(shouldReleasePaneFocus(monacoInput)).toBe(true)
+  })
+
   it('leaves anything else alone', () => {
     // Blurring a focused button or node div would fight the browser's own focus handling for no
     // gain: neither of them eats a keystroke.

@@ -1,3 +1,4 @@
+import type { TextDeliveryResult } from './text-delivery'
 // Types shared across the main, preload, and renderer processes.
 
 import { TABBAR_HEIGHT_PX } from './window-chrome-metrics'
@@ -6,9 +7,12 @@ import type { CloneProgress } from './clone-url'
 import type { KeybindingOverrides, TerminalShortcutPolicy } from './keybindings'
 import type { NormalizedAgentEvent } from './agents/normalize'
 import type { PaneOwner } from './agents/pane-owner-predicate'
+import type { AnswerPermissionPayload, ChatQuestion } from './agents/permission-answer'
+import type { HostChatQuery, HostChatReply } from './mobile-chat'
 import type { AgentId, AgentPermissionMode, BuiltinAgentId, PromptInjectionMode } from './agents/config'
 import type { ControlConfirmWaivers } from './control-confirm'
 import type { AgentMessageDeliverRequest, AgentMessageReply } from './agents/agent-messaging'
+import type { ChatTranscriptPageRequest } from './chat-page'
 import type { BrowserLeasePush } from './browser-indicator'
 import type { GroupWorktree } from './worktree'
 import type { ClientId, DinoSnapshot, PeerDiff, PeerIdentity, PeerState } from './presence'
@@ -270,6 +274,30 @@ export interface PtyCreateResult {
    */
   coAttachMouse?: boolean
   /**
+   * A TMUX-BACKED joiner must switch its fresh xterm to the ALTERNATE buffer before painting.
+   * tmux emits `\e[?1049h` to a client only at that client's own attach; a joiner (a renderer
+   * reload re-joins the same still-alive tmux client, and the kanban card modal is always a
+   * joiner) never sees it, so its xterm stayed on the NORMAL buffer: up to 10k lines of tmux's
+   * scrolled output piled up there and every output frame forced a layout (xterm's viewport
+   * resync) — measured 16.1% vs 7.3% total CPU for one terminal streaming 20 lines/s.
+   * Absent for plain-shell and session-host sessions: there the pty IS the shell and its
+   * normal-buffer scrollback is the only history it has. Known limitation: a REMOTE SSH session on
+   * a host WITHOUT tmux (`tmuxOrExplain`'s plain login-shell fallback) is still recorded tmuxBacked,
+   * so it gets this (and `coAttachMouse`, and `tmuxClient`) too; detecting that is a follow-up.
+   */
+  coAttachAltScreen?: boolean
+  /**
+   * This session's client is a real TMUX client (local or remote; never a session-host session or a
+   * plain shell) — set on EVERY create, the solo spawn as well as a join. A `pty:resync` repaint
+   * (`repaintResync`) calls `term.reset()`, which drops the emulator back to the NORMAL buffer and
+   * clears mouse tracking; tmux does not re-send either (it emitted them once, at attach), so the
+   * renderer re-applies `CO_ATTACH_ALT_SCREEN_SEQ` + `CO_ATTACH_MOUSE_SEQ` after the reset when
+   * this is set. Same condition as `coAttachAltScreen`, asked of every session rather than only a
+   * joiner. Absent = unknown (an older core or relay peer) ⇒ the renderer re-applies nothing, the
+   * pre-field behavior.
+   */
+  tmuxClient?: boolean
+  /**
    * This session is TMUX-BACKED (local or remote) — it survives losing this client, so killing our
    * pty client only detaches us and everything running in the session keeps going.
    *
@@ -284,6 +312,17 @@ export interface PtyCreateResult {
    * the historical behavior (persistent), never protect on a guess.
    */
   persistent?: boolean
+  /**
+   * This session is owned by the session-host backend (Windows, or POSIX with no tmux), not tmux.
+   * Set only on a SPAWN answer; absent everywhere else (tmux, plain shell, a join, an older core).
+   *
+   * The renderer's launch writer reads it for one decision: a FRESH session-host shell is trusted
+   * without a pane probe, because that backend's probe is a process-tree walk that cannot tell a
+   * shell from its prompt's helpers (a `git`/`starship` child reads as "not a shell") — issue
+   * #916. A fresh tmux pane keeps its probe: tmux's answer is exact, and it still covers the rare
+   * `new-session -A` race where another client created the session first.
+   */
+  sessionHost?: boolean
   /**
    * REFUSED: this node's session was permanently destroyed by ANOTHER client, so nothing was
    * spawned (`sessionId` is empty) — the terminal shows the "closed by <name>" state instead.
@@ -307,7 +346,8 @@ export interface PtyCreateResult {
    *
    * `'codex-account'` is the S6 fail-closed twin: a LOCAL Codex node that explicitly selected a
    * managed account whose home is missing refuses rather than spawning against the system login
-   * (§5 property 4). Same contract — nothing spawned, the renderer shows the node's refusal.
+   * (§5 property 4). Remote managed Codex accounts refuse unknown/unsafe ids or unresolved/unsafe homes.
+   * System SSH Codex may attach before remote home discovery. Nothing spawned on refusal.
    */
   unavailable?: 'ssh' | 'codex-account'
 }
@@ -337,6 +377,10 @@ export type NodeKind = 'terminal' | 'sticky' | 'group' | 'editor' | 'diff' | 'vi
  * a stalled station must never be a dead end.
  */
 export interface PendingLaunch {
+  /** false proves no input attempt; true/absent require explicit recovery after reload. */
+  attempted?: boolean
+  /** An attempted/uncertain delivery requires explicit Run now; never replay on hooks. */
+  manualOnly?: boolean
   /**
    * Node ids to wait for. Only nodes running a hook-reporting agent may appear here — a plain
    * terminal never reports `done`, so waiting on one would stall forever (refused at creation).
@@ -897,9 +941,12 @@ export const EMPTY_WORKSPACE: Workspace = {
 
 // ---- Contract for the API exposed to the renderer via preload ----
 
-/** Wire shape of pty:tmux-status — behind the "tmux not found" banner. */
+/** Local core backend discovery, not a runtime health check or a promise about existing sessions. */
 export interface TmuxStatus {
+  /** tmux discovery only; retained for older callers and install polling. */
   available: boolean
+  /** Absent on older peers; null when discovery could not be read. */
+  persistence?: { enabled: boolean; backend: 'tmux' | 'session-host' | null } | null
   /** One-shot install command for a terminal node; null = no known installer (text-only banner). */
   installCommand: string | null
   /** Button caption for installCommand (e.g. "Install Homebrew + tmux" when brew must come first). */
@@ -1003,8 +1050,9 @@ export interface PtyApi {
   readScrollback(persistKey: string): Promise<string>
   /** Send literal text into a session, by default followed by Enter (e.g. a slash command).
    *  `opts.enter: false` writes the text without submitting it (dictation's Insert). Returns
-   *  false if unavailable. */
-  sendText(persistKey: string, text: string, opts?: { enter?: boolean }): Promise<boolean>
+   *  false if unavailable; `pasted-not-submitted` means input was accepted but Enter was not
+   *  confirmed written. Surface it without automatically resending. True is not an app receipt. */
+  sendText(persistKey: string, text: string, opts?: { enter?: boolean }): Promise<TextDeliveryResult>
   /** Is tmux available on this host (else the silent plain-shell fallback), plus a suggested
    *  install command for the "tmux not found" banner. */
   tmuxStatus(): Promise<TmuxStatus>
@@ -1058,9 +1106,16 @@ export interface PtyApi {
 
 export type WorkspaceMigrationKind = 'v2' | 'exec'
 
+export interface WorkspaceSaveOptions {
+  localOnly?: boolean
+}
+
 export interface WorkspaceApi {
   load(): Promise<Workspace>
-  save(workspace: Workspace): Promise<void>
+  /** `localOnly`: return once this machine's disk holds the save, WITHOUT the SSH mirror
+   *  round trips (the mirror is owed and rides the next ordinary save). For a write-ahead barrier
+   *  that must be durable here but must not wait on a remote host — see WorkspaceStore.save. */
+  save(workspace: Workspace, opts?: WorkspaceSaveOptions): Promise<void>
   /** Reads <folder>/.nodeterm/project.json and returns the assembled Project (cwd resolved), or null. */
   probeFolder(folder: string): Promise<Project | null>
   /** Whether <folder>/.nodeterm/project.json is `present`, definitely `absent`, or `unreadable`
@@ -1392,8 +1447,12 @@ export interface Settings {
   cursorBlink: boolean
   /** Appearance of the APP chrome (tab bar, panels, node headers, menus). `auto` (the default)
    *  takes it from the terminal colour theme, so picking a light terminal theme doesn't leave a
-   *  black window framing it; `dark`/`light` pin it. See renderer/lib/appTheme.ts. */
-  appTheme: 'auto' | 'dark' | 'light'
+   *  black window framing it; `dark`/`light` pin it. `liquid-glass` follows the terminal theme like
+   *  `auto` AND turns the Liquid Glass appearance on: every canvas node and the app chrome go
+   *  translucent + blurred over the wallpaper, and terminal windows drop their per-node accent
+   *  colour; tint opacities keep the primary text at WCAG 4.5:1 over any backdrop
+   *  (renderer/lib/glassContrast.ts). See renderer/lib/appTheme.ts. */
+  appTheme: 'auto' | 'dark' | 'light' | 'liquid-glass'
   /** Scale factor for the whole application UI (1 = 100%; issue #299, 4K readability). Applied as
    *  PAGE ZOOM (`webFrame.setZoomFactor`) on desktop, so menus, node headers, dialogs — and
    *  terminal glyphs — all scale together: the terminal font-size setting stays in CSS px, so its
@@ -1413,6 +1472,12 @@ export interface Settings {
    *  (settings.json is hand-editable): an unknown id falls back to the default theme, whose
    *  colours reproduce the pre-feature hardcoded `#1e1e1e`/`#e6e6e6` exactly. */
   terminalTheme: string
+  /** Desktop wallpaper behind the canvas (Liquid Glass appearance). Opt-in; `none` draws the
+   *  canvas exactly as before. Hand-editable: read through `normalizeWallpaper` (shared/wallpaper). */
+  desktopWallpaper: import('./wallpaper').DesktopWallpaper
+  /** The most recent imported wallpaper image's cache path, kept after switching to a preset so the
+   *  "Your image" tile stays and the cache prune keeps its file (`recentWallpaperImage`). */
+  recentWallpaperImage: string | null
   /** Weight for normal text. xterm's own default is `normal` (400). */
   fontWeight: number
   /** Weight for BOLD text. xterm's own default is `bold` (700). Lowering it is how you keep bold
@@ -1607,6 +1672,13 @@ export interface Settings {
   /** Minutes a terminal may sit fully offscreen before its xterm+PTY client is torn down in
    *  place (tmux keeps the session; re-approach reattaches and redraws). 0 = never. */
   offscreenTerminalMinutes: number
+  /** Minutes a terminal stays PARKED after its project is switched away — xterm + PTY client kept
+   *  alive off-DOM so switching back is instant and exact (no reattach). 0 = until the app quits.
+   *  Default 10. Hand-editable; re-validated at the use site (`parkWindowMs`). Issue #886. */
+  terminalParkMinutes: number
+  /** Max parked terminals across all projects before the oldest (local first, then remote) are
+   *  released early. Default 20. Re-validated at the use site (`parkCap`). Issue #886. */
+  terminalParkMax: number
   /** AI commit message agent: a local coding-agent CLI run read-only. */
   commitAgent: 'claude' | 'codex' | 'custom'
   /** For commitAgent='custom': command template; {prompt} placeholder optional (else stdin). */
@@ -1671,6 +1743,16 @@ export interface Settings {
    *  once-per-app-run popup). OFF by default — it interrupts every project switch, so it is
    *  opt-in. Cmd+[ / Cmd+] and the Dock buttons walk the trail regardless of this. */
   showResumeCard: boolean
+  /** Draw the canvas dot grid (Settings → Appearance). Display only — snapping and align-to-grid
+   *  are unchanged. Default ON in every appearance; read through `showCanvasDots`. */
+  canvasDots: boolean
+  /** The Liquid Glass slider (Settings → Appearance), 0 = Clear … 1 = Tinted. null = the Readable
+   *  tick, where text keeps 4.5:1 (renderer/lib/glassContrast.ts `resolveGlassSlider`). */
+  glassTint: number | null
+  /** Liquid Glass: keep the node blur and refraction live while the canvas pans or zooms (Apple's
+   *  behaviour, more GPU). Off = the blur pauses during a camera move and the tint alone stays.
+   *  Default ON; only a literal false turns it off (`keepGlassBlurWhileMoving`). */
+  glassBlurWhileMoving: boolean
   /** Whether usage percentages render as consumed ("32% used"), remaining ("68% left"), or raw
    *  token counts ("48k/200k tokens" — context-window surfaces only; provider quota surfaces
    *  have no token counts and fall back to 'used' display). 'remaining' is the historical
@@ -1839,6 +1921,8 @@ export const DEFAULT_SETTINGS: Settings = {
   uiScale: 1,
   windowTitleActiveSession: false,
   terminalTheme: 'nodeterm-dark',
+  desktopWallpaper: { kind: 'none' },
+  recentWallpaperImage: null,
   fontWeight: 400,
   fontWeightBold: 700,
   drawBoldTextInBrightColors: true,
@@ -1880,6 +1964,8 @@ export const DEFAULT_SETTINGS: Settings = {
   tmuxScrollback: 50000,
   tmuxLeadPaneWidth: 0,
   offscreenTerminalMinutes: 10,
+  terminalParkMinutes: 10,
+  terminalParkMax: 20,
   commitAgent: 'claude',
   commitAgentCommand: '',
   commitExtraPrompt: '',
@@ -1912,6 +1998,9 @@ export const DEFAULT_SETTINGS: Settings = {
   // Opt-in: the resume card pops over the canvas on every qualifying project activation, which
   // reads as noise to users who navigate by the trail chords/Dock buttons instead.
   showResumeCard: false,
+  canvasDots: true,
+  glassTint: null,
+  glassBlurWhileMoving: true,
   usagePercentMode: 'remaining',
   defaultAgent: 'claude',
   // Sessions start in auto mode out of the box. Existing users pick this up on hydrate
@@ -2012,6 +2101,8 @@ export type SshProjectStatus = 'connecting' | 'connected' | 'disconnected' | 're
  * Absent = not probed / nothing new ⇒ the renderer keeps omitting the `auto` flag (fail-open).
  */
 export interface SshProjectStatusEvent {
+  /** Hook-only health update; it does not imply an SSH reconnect or terminal restart. */
+  hookTunnelVerified?: boolean
   projectId: string
   status: SshProjectStatus
   error?: string
@@ -2428,9 +2519,18 @@ export interface UsageLimit {
  * One provider's usage snapshot. `ClaudeUsage` below is the Claude-shaped superset kept for the
  * existing pill; new providers use this leaner shape (they have no per-account story yet).
  */
+/** Safe billing diagnostics: never include URLs, response bodies, or exception messages. */
+export type UsageDiagnostic = {
+  view: 'credits' | 'default'
+} & ({ reason: 'http'; httpStatus: number } | {
+  reason: 'timeout' | 'network' | 'invalid-response'
+})
+
 export interface ProviderUsage {
   /** Agent id the limits belong to: 'claude' | 'codex' | … */
   provider: string
+  /** Failed billing views, including failures recovered by a successful fallback. */
+  diagnostics?: UsageDiagnostic[]
   limits: UsageLimit[]
   /** Signed-in identity, when the provider exposes one cheaply (email / account label). */
   account: string | null
@@ -2541,6 +2641,14 @@ export interface SessionMemoryApi {
   host(q?: SessionMemoryQuery): Promise<MemInfo | null>
 }
 
+/** Best-effort active organization from this account's Claude identity file. */
+export interface ClaudeUsageOrganization {
+  name: string
+  uuid?: string
+  type?: string
+  rateLimitTier?: string
+}
+
 /** Claude Code subscription usage snapshot for the bottom-left indicator. */
 export interface ClaudeUsage {
   /**
@@ -2552,6 +2660,8 @@ export interface ClaudeUsage {
   weekly: ClaudeUsageWindow | null
   /** Signed-in account email, read-only and best-effort (null if unknown). */
   email: string | null
+  /** Active organization, absent when its metadata is unavailable. */
+  organization?: ClaudeUsageOrganization
   /** Unix ms when this snapshot was produced. */
   updatedAt: number
   /**
@@ -2562,20 +2672,24 @@ export interface ClaudeUsage {
 }
 
 /**
- * One REMOTE (SSH host) Claude identity's usage, read on that host over the project's
+ * One REMOTE (SSH host) Claude or Codex identity's usage, read on that host over the project's
  * ControlMaster. Separate from the local per-account rows because the identity is only
  * meaningful together with the host it lives on — the same email can be logged in on two
  * machines with two different quotas in flight.
  */
-export interface RemoteAccountUsage {
+interface RemoteAccountUsageBase {
   /** `user@host` of the connection the numbers came from. */
   hostKey: string
-  /** Managed remote account id, or null for that host's system `~/.claude`. */
+  /** Managed remote account id, or null for that provider's system identity on the host. */
   accountId: string | null
   /** Display label: the managed account's label, else the host key. */
   label: string
-  usage: ClaudeUsage
 }
+
+export type RemoteAccountUsage = RemoteAccountUsageBase & (
+  | { provider?: 'claude'; usage: ClaudeUsage }
+  | { provider: 'codex'; usage: ProviderUsage }
+)
 
 /** What the usage indicator wants from the remote hosts right now. */
 export interface RemoteUsageQuery {
@@ -2613,6 +2727,12 @@ export interface UsageApi {
 
 /** A Claude session's context-window fill, pushed per sessionId from the transcript tailer. */
 export interface ContextWindowUsage {
+  /** Remote Codex observations are node-scoped; equal thread ids on different hosts never mix. */
+  nodeId?: string
+  /** Invalidates this node/session observation after its remote scope changes or disappears. */
+  cleared?: true
+  /** Missing on older hosts; only session-env is an observed Claude configuration. */
+  windowSource?: 'session-env' | 'transcript' | 'estimate'
   sessionId: string
   /** input + cache_read + cache_creation tokens of the latest assistant message. */
   usedTokens: number
@@ -2622,6 +2742,12 @@ export interface ContextWindowUsage {
   usedPercent: number
   /** Model id from the transcript, or null if not seen yet. */
   model: string | null
+  /**
+   * Reasoning effort of the latest request, as Claude Code records it on the transcript's assistant
+   * record (`low`/`medium`/`high`/`xhigh`/`max` on 2.1.283). Absent = not recorded: another agent,
+   * an older host or CLI, or a model that takes no effort. Shown by the ⌘M composer's toolbar.
+   */
+  effort?: string
   updatedAt: number
 }
 
@@ -2680,12 +2806,49 @@ export interface TranscriptLine {
 export type ChatPart =
   | { kind: 'text'; text: string }
   | { kind: 'thinking'; text: string }
-  | { kind: 'tool'; name: string; arg: string; result?: string; summary?: ChatToolSummary }
+  | {
+      kind: 'tool'
+      name: string
+      arg: string
+      result?: string
+      summary?: ChatToolSummary
+      /** Markdown worth reading in full (an `ExitPlanMode` plan, an `AskUserQuestion` question and
+       *  its options — `core/chat-tool-body.ts`). Present = the renderer shows an expanded card
+       *  instead of the collapsed chip. Capped at 64K characters. */
+      body?: string
+      /** `AskUserQuestion` only: the questions read for the answer controls (`readQuestions`) —
+       *  the SAME reader the held request's texts come from, so a surface can match the card to the
+       *  held ticket. Absent = unreadable input = the card stays read-only. */
+      questions?: ChatQuestion[]
+      /** The transcript's `tool_use` id. Set only by a PAGED read (`ChatTranscriptResult.olderCursor`
+       *  present): a result carried across a page boundary (`unmatchedResults`) is attached by it. */
+      id?: string
+    }
 
 /** A structured chat message reconstructed from a Claude session transcript. */
 export interface ChatMessage {
   role: 'user' | 'assistant'
   parts: ChatPart[]
+  /**
+   * Stable identity for list rendering: the absolute byte offset of the transcript line this
+   * message came from. Set only by a PAGED claude read — an absolute offset does not change when
+   * an older page is prepended or the file grows, so a prepend does not re-key the list. Absent on
+   * the legacy read and on grok (whose reader does not page).
+   */
+  key?: number
+  /**
+   * When the transcript line was written (epoch ms, from claude's ISO `timestamp`). Set on BOTH
+   * read paths; absent when the line states none (grok, older records). The ⌘M thread shows it as a
+   * relative time under an assistant message.
+   */
+  at?: number
+}
+
+/** A `tool_result` whose `tool_use` was not in the same page (it lives in an OLDER one). */
+export interface ChatCarriedToolResult {
+  /** The `tool_use_id` — matches `ChatPart.id` of a tool part in an older page. */
+  id: string
+  result: string
 }
 
 /** Edit/Write tool summary for diff-preview cards. */
@@ -2705,6 +2868,34 @@ export interface ChatToolSummary {
 export interface ChatTranscriptResult {
   messages: ChatMessage[]
   found: boolean
+  /**
+   * PAGED reads only (absent on the legacy unpaged read, which is unchanged byte for byte). The
+   * byte offset where this window's first complete line starts — pass it back as `page.before` to
+   * read the next OLDER window. `null` = this window reached the start of the file, or the reader
+   * does not page (grok).
+   *
+   * `found: false` on a read WITH `page.before` set is a FAILED OLDER-PAGE load (the host blipped,
+   * the file became unreadable), NOT a missing transcript: the caller keeps what it rendered and
+   * offers a retry. Only the first (tail) read's `found: false` means "no transcript".
+   */
+  olderCursor?: number | null
+  /**
+   * PAGED reads only. Tool results in this window whose `tool_use` is NOT in it: the newer page is
+   * read first, so its results precede their tools. Hold them and attach each to the tool part with
+   * the same `id` when an older page arrives. Always `[]` from a reader that does not page.
+   */
+  unmatchedResults?: ChatCarriedToolResult[]
+  /**
+   * PAGED claude reads only: the newest assistant record's `message.model` in the returned window
+   * (`<synthetic>` error lines skipped). Absent when the window has none, and on the legacy read.
+   */
+  model?: string
+  /** PAGED claude reads only: the newest assistant record's top-level `effort` in the window. */
+  effort?: string
+  /** PAGED reads only, with `found: false`: the transcript could not be READ (a remote host that did
+   *  not answer, a growth re-read that failed, a remote node with no reachable master) — as opposed
+   *  to "no transcript exists". Absent on every other result. */
+  unreadable?: true
 }
 
 /**
@@ -2730,13 +2921,19 @@ export interface ChatApi {
    * it was. It is NOT optional in spirit: without it a grok node falls into claude's resolver, whose
    * cwd fallback returns the newest CLAUDE transcript for that directory — someone else's
    * conversation. `CHAT_CAPABLE` decides who may ask; this decides who answers.
+   *
+   * `page` (optional, trailing) asks for ONE window instead of the whole 5 MB tail — see
+   * `shared/chat-page.ts`. Absent = the legacy read, byte for byte. Present = a result carrying
+   * `olderCursor`, per-message `key`s, tool-part `id`s and `unmatchedResults`. An invalid
+   * `before` rejects.
    */
   readTranscript(
     sessionId: string | undefined,
     cwd: string | undefined,
     accountId?: string,
     nodeId?: string,
-    agentId?: string
+    agentId?: string,
+    page?: ChatTranscriptPageRequest
   ): Promise<ChatTranscriptResult>
 
   /**
@@ -2788,7 +2985,29 @@ export interface ClaudeAccountsApi {
    * (the account's `skills/` resolves to the system one) and `failed` (an EPERM, a vanished skill).
    */
   setSkillSharing(id: string, enabled: boolean): Promise<ClaudeSkillShareResult>
+  /**
+   * Copy a conversation's transcript from one LOCAL account's config dir into another's (`undefined`
+   * = the system `~/.claude`), so a node switched onto the target account resumes the SAME
+   * conversation there with no `/login`. With an SSH `ctx` the same copy runs on that project's host,
+   * between REMOTE accounts pinned to it. Called only after the CLI has exited. Never overwrites a
+   * diverged copy (`diverged`); never throws — every refusal is a reason.
+   */
+  copySession(
+    sessionId: string,
+    sourceAccountId: string | undefined,
+    targetAccountId: string | undefined,
+    /** An SSH project's node: the copy runs ON THAT HOST, between its remote account dirs. */
+    ctx?: AccountSshCtx
+  ): Promise<ClaudeSessionCopyResult>
 }
+
+/** What `claudeAccounts.copySession` did. `copied: false` = the target already held this exact copy. */
+export type ClaudeSessionCopyResult =
+  | { ok: true; copied: boolean }
+  | {
+      ok: false
+      reason: 'bad-request' | 'unknown-account' | 'no-transcript' | 'diverged' | 'failed'
+    }
 
 /** What one `setSkillSharing` / launch reconcile did. Counts, never an exception. */
 export interface ClaudeSkillShareResult {
@@ -2816,22 +3035,26 @@ export interface ClaudeSkillShareResult {
  */
 export interface CodexAccountsApi {
   /** Mint a new managed account: create its private CODEX_HOME (0700) and symlink the shared,
-   *  non-secret runtime assets in. Returns the new id + its home. */
-  add(): Promise<{ id: string; home: string }>
+   *  non-secret runtime assets in. Returns the new id + its home. With an SSH `ctx` the home is
+   *  created ON that connected host (no credential ever travels); throws when it cannot be. */
+  add(ctx?: AccountSshCtx): Promise<{ id: string; home: string }>
   /** Poll the account's `auth.json` (a real file, never a symlink) every 2s up to 5min for a
-   *  completed device login, then read its email; null on timeout/cancel. */
-  waitLogin(id: string): Promise<{ email: string | null } | null>
+   *  completed device login, then read its email; null on timeout/cancel. With an SSH `ctx` the poll
+   *  runs on the host, and a login whose email cannot be read there resolves `{ email: null }`. */
+  waitLogin(id: string, ctx?: AccountSshCtx): Promise<{ email: string | null } | null>
   /** Cancel an in-flight `waitLogin` for this account. */
   cancelWaitLogin(id: string): Promise<void>
-  /** Read a managed account's already-logged-in identity (email), or null if not logged in. */
-  identity(id: string): Promise<{ email: string | null } | null>
+  /** Read a managed account's already-logged-in identity (email), or null if not logged in. With an
+   *  SSH `ctx`, asked of the account's home on that host. */
+  identity(id: string, ctx?: AccountSshCtx): Promise<{ email: string | null } | null>
   /** Read a machine's system (`~/.codex`) account identity. No arg ⇒ this Mac. `{ projectId }` ⇒
    *  the connected SSH host behind that project; a host whose system identity cannot be resolved
    *  resolves `null` (fail-closed — a remote machine panel never borrows this Mac's login). */
   systemIdentity(ctx?: { projectId?: string }): Promise<{ email: string | null } | null>
   /** Remove a managed account: stop its daemon and delete its home. Refused while a switch
-   *  reservation holds it or a concurrent removal is in flight (Property 10). */
-  remove(id: string): Promise<void>
+   *  reservation holds it or a concurrent removal is in flight (Property 10). With an SSH `ctx`,
+   *  the home is deleted on that host; throws when it could not be. */
+  remove(id: string, ctx?: AccountSshCtx): Promise<void>
   /** Phase 1 of the owner-authorized same-machine switch: plan + reserve the rollout exposure of a
    *  conversation from one account to another under a `rollbackToken` (TTL 60s, owner = caller). */
   switchThread(
@@ -2846,6 +3069,18 @@ export interface CodexAccountsApi {
   finishSwitch(rollbackToken: string): Promise<void>
   /** Phase 3b: roll back a reservation (releases it; a committed link is left for cleanup). */
   rollbackSwitch(rollbackToken: string): Promise<void>
+  /**
+   * The SSH leg of a running node's account switch: expose the conversation to `targetAccountId`
+   * ON the connected host behind `ctx.projectId` (hardlink the rollout into the target home, verify
+   * the target discovers it). `hostAccountIds` = every managed account on that host (the catalogs
+   * the thread is resolved across). Resolves once the target can resume it; throws otherwise.
+   */
+  switchThreadRemote(
+    threadId: string,
+    targetAccountId: string | undefined,
+    hostAccountIds: string[],
+    ctx: AccountSshCtx
+  ): Promise<void>
   /** Source-side leg of moving an idle LOCAL conversation to an SSH account: validate strict source
    *  containment then hand the upload to the remote import path (PR 6). Local rollout untouched. */
   transferThreadToSsh(
@@ -3138,6 +3373,10 @@ export interface LicenseApi {
   releaseOthers(): Promise<LicenseDetail>
 }
 
+export type PhoneApprovalResult = {
+  status: 'persisted' | 'approved' | 'saved-disconnected' | 'stale' | 'persistence-failed'
+}
+
 export interface RemoteHostApi {
   /**
    * Enter host mode: mint a pairing token, connect to the relay as the host, and return the
@@ -3163,16 +3402,17 @@ export interface RemoteHostApi {
    * verification code to display. Returns an unsubscribe function.
    */
   onPeerPending(
-    listener: (info: { sas: string | null; id: string; pub?: string | null }) => void
+    listener: (info: { sas: string | null; id: string; pub?: string | null; standing?: boolean }) => void
   ): () => void
   /** The pending prompt expired host-side (120 s) — the dialog must drop or re-arm, else its
    *  Approve is a silent no-op against a dead id (issue #372). */
   onPeerPendingCleared(
     listener: (info: { id: string | null; pub?: string | null }) => void
   ): () => void
-  /** Approve the pending client → the host begins serving its pty/fs RPCs. `pub` (the peer's
-   *  stable box key) survives the phone's reconnect churn where the per-attach `id` does not —
-   *  pass both when known. */
+  /** Standing phone consent: persist the displayed handshake identity before granting access.
+   *  Both fields must match a bounded pending request. Desktop-only; Server rejects explicitly. */
+  approvePhone(id: string, pub: string): Promise<PhoneApprovalResult>
+  /** Legacy interactive (single-use offer) approval; does not persist a device pin. */
   approve(id: string, pub?: string): void
   /** Reject the pending client → the connection is dropped. Same id/pub matching as approve. */
   reject(id: string, pub?: string): void
@@ -3451,6 +3691,7 @@ export interface NodeTerminalApi {
   githubControl: import('./github-issues').GitHubControlApi
   usage: UsageApi
   sessionMemory: SessionMemoryApi
+  wallpaper: import('./wallpaper').WallpaperApi
   triggers: TriggersApi
   context: ContextApi
   canvas: CanvasApi
@@ -3542,8 +3783,14 @@ export interface NodeTerminalApi {
    *  (`~/.nodeterm/pending/<pendingId>.answer`) on the host the agent runs on — the LOCAL fs for a
    *  local project, or the remote host over the project's ControlMaster for an SSH project. Resolves
    *  `true` when the file was written, `false` on any failure (invalid pendingId, unknown node,
-   *  unsupported project, fs/exec error). */
-  answerPermission(payload: { nodeId: string; pendingId: string; decision: 'allow' | 'deny' }): Promise<boolean>
+   *  unsupported project, fs/exec error).
+   *
+   *  `decision` is the original contract and still works alone. An optional structured `answer`
+   *  (`PermissionAnswer`: approve a plan with a follow-on mode, send plan feedback, answer an
+   *  AskUserQuestion) wins over it; core validates it against the held request file on the agent's
+   *  host and refuses (`false`) when that request is gone or the answer does not fit it. A plain
+   *  `allow` on a held AskUserQuestion is refused too — Claude would drop it. */
+  answerPermission(payload: AnswerPermissionPayload): Promise<boolean>
   /** Notify the core that the user READ a finished (done) session on this surface (the unread-clear
    *  funnel calls it when the node's latest state is `done`). The core marks the node's done inbox
    *  event(s) resolved (phone Inbox archives the card) and re-sends an 'end' live-update so the
@@ -3621,6 +3868,13 @@ export interface NodeTerminalApi {
     sourceTitle?: string
     browserTitle?: string
   }): void
+  /** The phone Chat verbs' round-trip (main/remote/host-chat.ts): main asks this renderer for a
+   *  node's chat status, or to send a phone message through the ⌘M composer's own gate. Desktop
+   *  only — the phone relay host lives in the Electron main process; the browser and relay bridges
+   *  subscribe to nothing. */
+  onHostChatQuery(listener: (q: HostChatQuery) => void): () => void
+  /** Answer a `onHostChatQuery` request. */
+  sendHostChatReply(reply: HostChatReply): void
   /** Agent messaging (the `send`/`reply` control verbs): run one delivery in main, where the
    *  scope check, the per-project switch, flow control and the pane probes all live. The reply is
    *  already rendered as a control reply — Canvas forwards it verbatim. */

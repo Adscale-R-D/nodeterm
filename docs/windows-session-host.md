@@ -145,7 +145,7 @@ long-lived connection (no positional-FIFO fragility, unlike this app's tmux cont
 | `capture`                        | `capture-pane -p -e [-S -N]`            | full, and strictly more (mode restoration — tmux's plain-text capture carries none) |
 | `killSession`                    | `kill-session -t <name>`                | full |
 | `detach`                         | a client's own `tmux detach-client`     | full |
-| `listSessions`                   | `list-sessions -F '#{session_name}'`    | full |
+| `listSessions`                   | `list-sessions -F '#{session_name}'` — plus, with `sessionDetails`, `list-windows`/`list-panes` | full; see "Observability" below |
 | `ping`                           | (liveness probe used during the startup race) | full |
 
 **Not implemented — deliberately out of scope for this pass:**
@@ -647,6 +647,45 @@ never held continuously. This is a genuinely new per-session cost the tmux backe
 (tmux's server keeps its own C-side pane buffer regardless, but that cost is outside this app's
 process); it was a deliberate choice per the task brief ("bound the memory... document the cost
 you chose and why") rather than an oversight.
+
+A DETACHED session's cost is bounded by the same session budget tmux sessions are
+(`core/session-budget.ts`): past the grace window, under memory pressure or past the detached-count
+cap, the reaper ends it through the host's generation-checked kill — see "Observability" above.
+
+### Observability (`sessionDetails`): reaper, session-memory panel, dev-server ports
+
+The three surfaces that ask tmux about its sessions — the session reaper (`list-windows` for
+`session_attached` + `window_activity`), the session-memory panel and dev-server ports
+(`list-panes` for `pane_pid`) — ask the host instead, through ONE additive hello feature,
+`sessionDetails`. A connection that negotiated it gets, beside the unchanged `names`, a row per
+LIVE generation: `{name, pid, subscribers, lastOutputMs, createdMs, generation}`
+(`ListSessionsResult.sessions`). An older client never asks and reads `{names}` byte-for-byte; an
+older host never answers, and the client reports `sessions: null` — named but undescribed.
+
+- **`lastOutputMs` is the honest idleness clock** (tmux's `window_activity`, not its
+  `session_activity`): stamped on every pty `data` callback, moved by nothing that only LOOKS —
+  attach, detach, capture (`session-details-host.test.ts` pins both directions against the real
+  bundled host).
+- **`subscribers` needs no `shadowed` subtraction**: the host has no control-mode shadows (a
+  background `sendKeys` needs no subscription), so every subscriber is a viewer. The reaper backend
+  (`PtyManager.sessionHostReaperBackend`) instead ADDS one for a node this process holds a live
+  session for — a host reconnect briefly reports zero subscribers for a terminal on screen.
+- **The read never launches a host** (`listSessionsDetailed`, the `inspectForUpdate` rule), and a
+  failed read is `null` — never an empty listing. The reaper then plans nothing, the memory panel
+  says "could not measure", dev ports say `unreachable`.
+- **A reap kills exactly the generation the listing observed** (`killSession`'s
+  `expectedGeneration`), never by name alone, and nothing else: no scrollback deletion, no
+  tombstone. A reaped node cold-restores (`fresh: true`), the same contract as a tmux reap. The
+  reaper's budget, triggers and kill-time re-verify are `session-budget.ts`'s, unchanged; the
+  memory reading on Windows is `os.freemem()`, which there is the OS's available physical memory.
+- **Memory panel**: each row's pid is rolled up over the Windows process table
+  (`Get-CimInstance Win32_Process`, `WorkingSetSize`, one `powershell.exe -NoProfile` per panel
+  open — never polled). Sessions an older host cannot describe are `unmeasured`, with their own
+  sentence. No host running is "no sessions", not a failure.
+- **Dev-server ports**: one PowerShell call per scan — `Win32_Process` plus
+  `Get-NetTCPConnection` (owning pid is a kernel field, nothing a process can rename itself into),
+  falling back to `netstat -ano` (listeners recognised by a foreign port of 0, because the state
+  column is localized). A non-zero exit is `unreachable`; with no nt- session nothing is spawned.
 
 ## Honest limitations
 

@@ -7,6 +7,7 @@ import {
   buildManagedHookCommand,
   mergeManagedHook,
   stripManagedHook,
+  syncWindowsShLauncher,
   writeManagedHookConfig,
   writeManagedHookFileAtomic,
   type HookSettings
@@ -312,6 +313,25 @@ describe('buildManagedHookCommand — Windows wrapper (gemini / grok / copilot)'
     expect(stripManagedHook(cfg, 'gemini.sh', ['Stop']).hooks!.Stop).toEqual([
       { hooks: [{ type: 'command', command: claudeWin }] }
     ])
+  })
+})
+
+describe('syncWindowsShLauncher — the .cmd beside a CLI shim', () => {
+  it('win32 writes nodeterm.cmd running nodeterm.sh; another platform removes a stray copy', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'nt-launcher-'))
+    try {
+      syncWindowsShLauncher(dir, 'nodeterm.sh', 'win32')
+      const text = readFileSync(join(dir, 'nodeterm.cmd'), 'utf8')
+      expect(text).toContain('set "NT_SCRIPT=%~dp0nodeterm.sh"')
+      expect(text).toContain('"%NT_SH%" "%NT_ARG%" %*')
+      expect(text).not.toContain(dir) // no baked absolute path
+      syncWindowsShLauncher(dir, 'nodeterm.sh', 'linux')
+      expect(readdirSync(dir)).toEqual([])
+      // Removing what is not there is not an error.
+      syncWindowsShLauncher(dir, 'context.sh', 'darwin')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })
 

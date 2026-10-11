@@ -1,3 +1,7 @@
+import { execFileSync } from 'child_process'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
+import { tmpdir } from 'os'
+import path from 'path'
 import { describe, expect, it } from 'vitest'
 import {
   buildWindowsHookInvocation,
@@ -93,3 +97,39 @@ describe('buildWindowsShLauncher', () => {
     expect(l.split('\n').slice(0, -1).every((x) => x.endsWith('\r'))).toBe(true)
   })
 })
+
+// The real thing, on the windows-latest runner: cmd.exe runs the generated batch files against Git
+// for Windows' sh.exe. Skipped elsewhere (no cmd.exe) and where no Git sh is installed.
+const gitSh = (): boolean =>
+  WINDOWS_SH_CANDIDATES.some((c) =>
+    existsSync(c.replace(/%([^%]+)%/g, (_, name: string) => process.env[name] ?? `%${name}%`))
+  )
+describe.skipIf(process.platform !== 'win32' || !gitSh())('Windows wrappers under a real cmd.exe', () => {
+  it('the CLI launcher passes every argument through to the POSIX script', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'nt-launcher-real-'))
+    try {
+      writeFileSync(path.join(dir, 'nodeterm.sh'), 'for a in "$@"; do printf "[%s]" "$a"; done\n')
+      writeFileSync(path.join(dir, 'nodeterm.cmd'), buildWindowsShLauncher('nodeterm.sh'))
+      const out = execFileSync('cmd.exe', ['/d', '/c', path.join(dir, 'nodeterm.cmd'), 'list', '--cmd=--version', '--node', 'b1'], {
+        encoding: 'utf8'
+      })
+      expect(out).toBe('[list][--cmd=--version][--node][b1]')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('the hook wrapper hands the payload on stdin to the script', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'nt-hookwrap-real-'))
+    try {
+      const sink = path.join(dir, 'got.txt').replaceAll('\\', '/')
+      writeFileSync(path.join(dir, 'gemini.sh'), `cat > '${sink}'\n`)
+      writeFileSync(path.join(dir, 'gemini-hook.cmd'), buildWindowsHookWrapper('gemini.sh', 'gemini'))
+      execFileSync('cmd.exe', ['/d', '/c', path.join(dir, 'gemini-hook.cmd')], { input: '{"hook_event_name":"AfterTool"}' })
+      expect(readFileSync(sink, 'utf8')).toBe('{"hook_event_name":"AfterTool"}')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+

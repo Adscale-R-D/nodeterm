@@ -19,7 +19,8 @@ import { readFileSync, writeFileSync, mkdirSync, chmodSync, rmSync } from 'fs'
 import { managedEventName, type ManagedHookEvent } from '@shared/agents/hook-events'
 import { renameAtomicSync, tempNameFor } from '../../fs-atomic'
 import { buildManagedScript } from './managed-script'
-import { buildWindowsHookInvocation, buildWindowsHookWrapper, windowsHookWrapperFile } from './windows-hook-wrapper'
+import { buildWindowsHookInvocation, buildWindowsHookWrapper, buildWindowsShLauncher, windowsHookWrapperFile } from './windows-hook-wrapper'
+import { cmdShimPathFor } from '@shared/agents/shim-invocation'
 
 type HookDef = { matcher?: string; hooks?: { type: string; command: string; timeout?: number }[] }
 type Settings = { hooks?: Record<string, HookDef[]>; [k: string]: unknown }
@@ -44,6 +45,23 @@ export function writeManagedHookFileAtomic(
     rmSync(tmp, { force: true })
     throw e
   }
+}
+
+/**
+ * Keep the `.cmd` launcher beside a user-invoked POSIX CLI shim (`nodeterm.sh`, `context.sh`) in
+ * step with the platform: written on Windows — where every agent but claude runs tools in
+ * PowerShell/cmd.exe and is told to run it (`shimDialectFor`) — and removed anywhere else, so a
+ * data dir carried across machines holds no stale launcher. Throws on a failed write, like the
+ * shim write it accompanies.
+ */
+export function syncWindowsShLauncher(
+  dir: string,
+  scriptFileName: string,
+  platformName: NodeJS.Platform | string = process.platform
+): void {
+  const target = path.join(dir, cmdShimPathFor(scriptFileName))
+  if (platformName === 'win32') writeManagedHookFileAtomic(target, buildWindowsShLauncher(scriptFileName))
+  else rmSync(target, { force: true })
 }
 
 /**

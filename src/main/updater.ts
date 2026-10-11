@@ -11,7 +11,7 @@ import path from 'path'
 // electron-vite v5's CJS interop.
 import { autoUpdater } from 'electron-updater'
 import { IPC } from '../shared/ipc'
-import { toUpdateAvailablePayload, updateDelivery } from '../shared/update-platform'
+import { mayQuitAndInstall, toUpdateAvailablePayload, updateDelivery } from '../shared/update-platform'
 import { getMainWindow, sendToMain } from './main-window'
 import { retainUntilDismissed } from './notifications'
 
@@ -20,7 +20,9 @@ const SIX_HOURS = 6 * 60 * 60 * 1000
 /**
  * The `nodeTermUpdates` marker a LOCAL package carries in its packaged package.json, injected by
  * the `dist*` scripts via electron-builder's `extraMetadata`. `release` does not set it, so a
- * promoted build is untouched and keeps updating itself.
+ * promoted build is untouched and keeps updating itself. The one RELEASE that carries a marker is
+ * the unsigned Windows beta (`dist:win:release` → `manual`): it checks the feed but never
+ * downloads or installs — see `updateDelivery`.
  *
  * It exists because a locally packaged app is indistinguishable from a release at runtime —
  * `app.isPackaged` is true for both — so it polled the production feed for a version that was
@@ -63,13 +65,6 @@ function packagedUpdateMode(): unknown {
 export function initUpdater(onBeforeRestart?: () => void): void {
   const send = (channel: string, payload?: unknown) => sendToMain(channel, payload)
 
-  // Always available, even in dev: current version, manual check, restart.
-  ipcMain.handle(IPC.appGetVersion, () => app.getVersion())
-  ipcMain.on(IPC.appRestartToUpdate, () => {
-    onBeforeRestart?.()
-    autoUpdater.quitAndInstall()
-  })
-
   const delivery = updateDelivery({
     isPackaged: app.isPackaged,
     updateMode: packagedUpdateMode(),
@@ -77,12 +72,26 @@ export function initUpdater(onBeforeRestart?: () => void): void {
     hasAppImage: !!process.env.APPIMAGE
   })
 
+  // Always available, even in dev: current version, manual check, restart.
+  ipcMain.handle(IPC.appGetVersion, () => app.getVersion())
+  ipcMain.on(IPC.appRestartToUpdate, () => {
+    // A build that must not self-install refuses here, in main — not only by the card never
+    // offering the button. The unsigned Windows beta (`nodeTermUpdates=manual`) is the reason:
+    // quitAndInstall must never run there, whatever the renderer sends. It also skips
+    // onBeforeRestart, which would otherwise leave the app flagged as quitting with no quit.
+    if (!mayQuitAndInstall(delivery)) {
+      console.warn(`[updater] restart-to-update ignored: this build does not self-install (${delivery})`)
+      return
+    }
+    onBeforeRestart?.()
+    autoUpdater.quitAndInstall()
+  })
+
   if (delivery === 'dev' || delivery === 'no-channel') {
     // Neither can reach a feed, so automatic networking and updater event wiring stay off — but
     // the two answer a MANUAL check differently, because only one of them has a user to mislead.
     //
-    // `no-channel` is a packaged app someone installed (a Windows build today: no signed release
-    // job, no `latest.yml`). Telling them "up to date" is a statement this build is structurally
+    // `no-channel` is a packaged app someone installed from a local `dist*` package. Telling them "up to date" is a statement this build is structurally
     // unable to make — it was issue #814's actual complaint, read by the reporter as a dead
     // button. It now says it has no channel and points at the download page.
     //
@@ -94,8 +103,10 @@ export function initUpdater(onBeforeRestart?: () => void): void {
   }
 
   // A Linux .deb/.rpm install (no APPIMAGE env) cannot self-install and would re-download the
-  // full AppImage every 6h only to throw on install. Degrade to a manual-download link: don't
-  // auto-download; surface update-available with `manual: true` so the card shows a Download link.
+  // full AppImage every 6h only to throw on install; the unsigned Windows beta must not
+  // self-install. Degrade both to a manual-download link: don't auto-download; surface
+  // update-available with `manual: true` so the card shows a Download link. (electron-updater's
+  // NsisUpdater verifies a signature only at install time, which this path never reaches.)
   const manualUpdates = delivery === 'manual-install'
 
   autoUpdater.autoDownload = !manualUpdates

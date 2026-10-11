@@ -143,6 +143,7 @@ long-lived connection (no positional-FIFO fragility, unlike this app's tmux cont
 | `sendKeys`                       | `send-keys -l -- <text>` (+ `Enter`)    | full — works with no attached client, exactly like tmux |
 | `paneCommand`                    | `display-message -p '#{pane_current_command}'` | approximated — see `process-tree.ts` |
 | `capture`                        | `capture-pane -p -e [-S -N]`            | full, and strictly more (mode restoration — tmux's plain-text capture carries none) |
+| `paneModesV1`                    | (none — tmux owns the mouse itself)     | additive: the pane app's mouse-tracking protocol, for relay scroll routing; an older host answers `unknown command` = "no mouse" |
 | `killSession`                    | `kill-session -t <name>`                | full |
 | `detach`                         | a client's own `tmux detach-client`     | full |
 | `listSessions`                   | `list-sessions -F '#{session_name}'`    | full |
@@ -684,6 +685,16 @@ you chose and why") rather than an oversight.
   see the protocol table's "Not implemented" note. Nothing in this app currently calls these for a
   session-host-backed node (they are gated behind `this.tmuxPath` being set), so nothing is
   silently broken; a future feature that wants one of these on Windows needs a new host verb.
+- **The phone relay has no tmux to drive on this backend.** Over SSH-less (relay-only) pairing the
+  phone used to (a) type a POSIX launch line into a fresh pane and (b) scroll by writing SGR wheel
+  bytes for tmux's copy-mode. Neither holds here: pwsh / cmd reject `2>/dev/null`, `env -u`,
+  `VAR=x cmd`, and a wheel nobody asked for lands in the prompt as text. So the phone sends
+  `pty.attach { launch }` and the HOST launches (`core/relay-launch.ts`: cwd/account ride the spawn
+  options, the line is built for the pane's real parser and typed once), the attach reply says
+  `scroll:'local'` with a full-buffer snapshot, and `pty.scroll` writes a wheel only when
+  `paneModesV1` reports the app asked for the mouse. Keyed Inbox answers (`agent.key`), read-acks
+  (`inbox.ack`), the folder browser (`fs.browse`) and plain capture (`pty.capture`) are relay
+  verbs for the same reason. All additive; `host.info` lists them for feature detection.
 - **ConPTY helper teardown can emit `Error: AttachConsole failed`** from
   `node-pty/lib/conpty_console_list_agent.js`. The protocol test determines kill success from the
   host response and follow-up session state rather than stderr text. Whether this cosmetic

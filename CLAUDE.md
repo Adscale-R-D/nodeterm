@@ -8612,6 +8612,21 @@ unix-socket forward over it. POSIX keeps OpenSSH untouched.
   being packaged (#575, shipped by #579): without that bundle `pty.attach` spawns a new plain shell
   instead of joining the node's session, while `sessionExists` still answers "warm".
 
+- **The phone never types shell syntax into a relay host** (relay-only hosts — every Windows
+  pairing — have no SSH, and a Windows pane is pwsh/cmd). `pty.attach { launch: {agentId,
+  sessionId?, cwd?, accountId?, permissionMode?} }` makes the HOST launch, only into a session the
+  attach CREATED, exactly once (`core/relay-launch.ts`, `PtyManager.prepareRelayAttach`): every
+  field re-validated, cwd jailed to the fs roots, cwd/account folded into the SPAWN options of an
+  unrecorded node (a recorded node keeps its records), and the line built for the pane's real
+  parser — `assembleResumeCommand` on POSIX, the trusted Windows planner when its resolver is
+  wired, else only a dialect-neutral line. Reply `launched: true` = "type nothing". Without
+  `launch` the reply is byte-identical. `pty.scroll` writes the wheel only on a tmux /
+  mouse-requesting pane (`PtyManager.scrollRoute`); a session-host / plain stream's reply says
+  `scroll:'local'` and its snapshot is the full buffer. Keyed answers ride `agent.key` (closed key
+  set, host-side state + open-ask guard, hook reply first), read-acks `inbox.ack`
+  (`applyPhoneReadAck`, the ack sweeper's body), plus `fs.browse` (home-jailed, dirs only) and
+  `pty.capture`; `host.info` lists them. All additive — an old phone keeps its old path.
+
 ## Push webhook (a script or CI job rings the paired phone)
 
 Settings → Phone → **Push webhook** mints a per-host bearer token; anything that can run `curl`

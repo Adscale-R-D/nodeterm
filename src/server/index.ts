@@ -856,7 +856,9 @@ export async function startServer(
   // hostMemReader). Kept identical to the desktop shell so the two cannot drift.
   const sessionReaper = createSessionReaper({
     tmuxBin: () => ptyManager.getTmuxBin(),
-    shadowed: (socket) => ptyManager.shadowedTmuxSessions(socket)
+    shadowed: (socket) => ptyManager.shadowedTmuxSessions(socket),
+    // No tmux (Windows): the session host's sessions are reaped under the same budget rules.
+    sessionHost: () => ptyManager.sessionHostReaperBackend()
   })
   sessionReaper.start()
   // Memory pressure (core/memory-pressure.ts): only the reaper leg on this shell. A CRITICAL

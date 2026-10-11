@@ -3230,7 +3230,9 @@ app.whenReady().then(async () => {
   // session-memory panel gives the user the visibility to cull deliberately.
   const sessionReaper = createSessionReaper({
     tmuxBin: () => ptyManager.getTmuxBin(),
-    shadowed: (socket) => ptyManager.shadowedTmuxSessions(socket)
+    shadowed: (socket) => ptyManager.shadowedTmuxSessions(socket),
+    // No tmux (Windows): the session host's sessions are reaped under the same budget rules.
+    sessionHost: () => ptyManager.sessionHostReaperBackend()
   })
   sessionReaper.start()
   // Memory pressure (core/memory-pressure.ts): the reaper's own 10-minute timer is the steady

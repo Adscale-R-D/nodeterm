@@ -8,7 +8,7 @@ import { join, resolve, posix } from 'path'
 import { startSessionNameSweep, displayNodeTitle } from '../core/session-name-sweep'
 import { startTriggerService } from '../core/trigger-service'
 import { readAgentSessionName, type AgentSessionNameDeps } from '../core/agent-session-name'
-import { readFile, realpath as fsRealpath, lstat as fsLstat, writeFile as fsWriteFile } from 'fs/promises'
+import { readFile, readdir as fsReaddir, realpath as fsRealpath, lstat as fsLstat, writeFile as fsWriteFile } from 'fs/promises'
 import { existsSync, statSync, openSync, fstatSync, readFileSync, closeSync } from 'fs'
 import { homedir, hostname } from 'os'
 import { randomUUID } from 'crypto'
@@ -238,14 +238,15 @@ import {
   nodeSessionName,
   workingNodes,
   mirrorEntry,
-  pendingTicketsFor
+  pendingTicketsFor,
+  openAskFor
 } from '../core/agent-status-mirror'
 import { mirrorCustomAgents } from '../core/mirror-custom-agents'
 import { paneOwnerProject } from '../core/agents/pane-ownership'
 import { createPushNotify, createLiveUpdatePush } from '../core/push-notify'
 import { createGrantsAccessor, type PushGrant } from '../core/push-grants'
 import { createRemoteGrantsCache } from '../core/remote-push-grants'
-import { createAckSweeper } from '../core/ack-sweep'
+import { applyPhoneReadAck, createAckSweeper, type AckSweepHandlers } from '../core/ack-sweep'
 import { createSessionReaper } from '../core/session-budget'
 import { initKeepAwake } from './keep-awake'
 import type { KeepAwakeTracker } from '../core/keep-awake'
@@ -2401,7 +2402,24 @@ app.whenReady().then(async () => {
         .filter((a) => !a.host && !a.pending)
         .map((a) => ({ id: a.id, dir: claudeConfigDirFor(a.id) })),
       // Derived binary names only — never the launch command/env (see core/mirror-custom-agents.ts).
-      customAgents: mirrorCustomAgents(s.customAgents)
+      customAgents: mirrorCustomAgents(s.customAgents),
+      // A phone must never type POSIX shell syntax into a win32 host's pane (core/relay-launch.ts).
+      hostPlatform: process.platform
+    }
+  })
+  // The host-authoritative facts a phone's relay launch (`pty.attach { launch }`) is built from:
+  // the same probes and settings the mirror advertises. Read fresh per launch.
+  ptyManager.setRelayLaunchContext(() => {
+    const s = settingsStore.get()
+    const localClaude = new Set((s.claudeAccounts ?? []).filter((a) => !a.host && !a.pending).map((a) => a.id))
+    const localCodex = new Set((s.codexAccounts ?? []).filter((a) => !a.host && !a.pending).map((a) => a.id))
+    return {
+      customAgents: s.customAgents ?? [],
+      claudeAutoSupported: localClaudeCaps?.autoPermissionMode === true,
+      codexApprovalValues: localCodexCaps?.approvalValues ?? null,
+      codexNoDaemon: localCodexCaps?.noDaemon === true,
+      isKnownAccount: (id) => localClaude.has(id) || localCodex.has(id),
+      env: process.env
     }
   })
   // Desktop → paired-phone APNs push (spec: apns-push). Feeds off the SAME actionable-event seam
@@ -3388,9 +3406,13 @@ app.whenReady().then(async () => {
   onSshProjectStatus((e) => {
     if (e.status !== 'connected' && e.status !== 'connecting') devPorts.registry?.projectDisconnected(e.projectId)
   })
-  const ackSweeper = createAckSweeper({
-    handlers: { ackDone, onUnreadClear: (id) => sendToMain(IPC.agentUnreadClear, id) }
-  })
+  // One handler pair for every phone read-ack arrival path: the local `.seen` sweep, the SSH hosts'
+  // remote sweep below, and the relay's `inbox.ack` (relay-only hosts — see hostBridge.relayExtras).
+  const phoneReadAckHandlers: AckSweepHandlers = {
+    ackDone,
+    onUnreadClear: (id) => sendToMain(IPC.agentUnreadClear, id)
+  }
+  const ackSweeper = createAckSweeper({ handlers: phoneReadAckHandlers })
   let remoteAckSweepBusy = false
   const ackSweepTimer = setInterval(() => {
     ackSweeper.sweep()
@@ -3399,10 +3421,7 @@ app.whenReady().then(async () => {
     void sshProjectManager
       .sweepRemoteAcks()
       .then((ids) => {
-        for (const id of ids) {
-          ackDone(id)
-          sendToMain(IPC.agentUnreadClear, id)
-        }
+        for (const id of ids) applyPhoneReadAck(id, phoneReadAckHandlers)
       })
       .catch(() => {})
       .finally(() => {
@@ -4592,6 +4611,11 @@ app.whenReady().then(async () => {
         }
       },
       hostSendRefusal: (nodeId) => mirrorChatSendRefusal(mirrorEntry(nodeId)),
+      // The relay's keyed answers (`agent.key`): guarded on the host's own mirror, typed through
+      // PtyManager's backend-neutral key writer.
+      agentState: nodeState,
+      openAsk: openAskFor,
+      sendKeys: (nodeId, keys) => ptyManager.sendKeys(nodeId, keys),
       knownTickets: pendingTicketsFor,
       readTranscript: (q, rawPage) => readChatTranscript(q, rawPage, transcriptIpcDeps),
       catalog: (q) => readChatCatalog(q, chatCatalogDeps),
@@ -4643,6 +4667,18 @@ app.whenReady().then(async () => {
         }
       })()
     }),
+    // Relay-only-host parity verbs (Windows pairings have no SSH): a phone read-ack runs the
+    // sweeper's own handler pair, and the new-project folder browser is jailed to this user's home.
+    relayExtras: {
+      inboxAck: (nodeId: string) => applyPhoneReadAck(nodeId, phoneReadAckHandlers),
+      browse: {
+        home: () => homedir(),
+        fs: {
+          readdir: (dir: string) => fsReaddir(dir, { withFileTypes: true }),
+          exists: async (p: string) => existsSync(p)
+        }
+      }
+    },
     // Jail roots beyond the active canvas: the phone browses EVERY project (projects.list), so
     // its fs/git access spans every local project root — not just the tab the desktop happens
     // to have focused (that gap read as "cwd is outside the shared project roots" on the phone).

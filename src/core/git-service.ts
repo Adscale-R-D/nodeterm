@@ -188,7 +188,15 @@ function parseNumstat(out: string): Map<string, { added: number; deleted: number
 function githubTokenFromGitCredentials(cwd: string): Promise<string | null> {
   return new Promise((resolve) => {
     let out = ''
-    const child = spawn('git', ['credential', 'fill'], { cwd: cwd || undefined, env: GIT_ENV })
+    // A STORED token only — never an interactive login. Git Credential Manager (the default helper
+    // in Git for Windows, optional on macOS/Linux) opens a GUI sign-in for an empty store, which
+    // `GIT_TERMINAL_PROMPT=0` does not suppress; Source Control retries publish every few seconds
+    // while the user runs `gh auth login` (renderer/lib/publishFallback), so without this every
+    // retry would stack another GCM window. Helpers other than GCM ignore the variable.
+    const child = spawn('git', ['credential', 'fill'], {
+      cwd: cwd || undefined,
+      env: { ...GIT_ENV, GCM_INTERACTIVE: 'never' }
+    })
     const timer = setTimeout(() => child.kill('SIGKILL'), 5000)
     child.stdout.on('data', (d) => {
       out += d.toString()

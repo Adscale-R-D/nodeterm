@@ -47,4 +47,15 @@ describe.skipIf(process.platform === 'win32')('GitService.publish — gh auth af
     await expect(git.publish(dir, 'owner/repo', true)).resolves.toEqual({ ok: true, message: 'Published to GitHub.' })
     expect(fs.readFileSync(path.join(dir, 'calls'), 'utf8').trim()).toBe('repo create owner/repo --private --source=. --push')
   })
+
+  it('asks the git credential helper for a STORED token only (GCM_INTERACTIVE=never)', async () => {
+    // A credential helper that records the env it was run with and answers nothing.
+    const helper = path.join(dir, 'helper.sh')
+    fs.writeFileSync(helper, `#!/bin/sh\necho "gcm=$GCM_INTERACTIVE" >> '${dir}/helper-env'\nexit 0\n`, { mode: 0o755 })
+    fs.writeFileSync(path.join(dir, 'no-gitconfig'), `[credential]\n\thelper = ${helper}\n`)
+    vi.resetModules()
+    const { GitService } = await import('./git-service')
+    await expect(new GitService().publish(dir, 'owner/repo', true)).resolves.toMatchObject({ ok: false, needsAuth: true })
+    expect(fs.readFileSync(path.join(dir, 'helper-env'), 'utf8')).toContain('gcm=never')
+  })
 })

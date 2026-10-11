@@ -9257,6 +9257,14 @@ button.group-node__setup:disabled {
 .scm-error__dismiss:hover {
   color: var(--text-strong);
 }
+/* Neutral variant: "waiting for GitHub sign-in" while Publish retries in-process. */
+.scm-error--info {
+  border-color: rgba(var(--tint-rgb), 0.18);
+  background: rgba(var(--tint-rgb), 0.06);
+}
+.scm-error--info .scm-error__msg {
+  color: var(--text-strong);
+}
 
 /* Publish to GitHub picker (VS Code-style: name + private/public choice) */
 .pubdlg-overlay {

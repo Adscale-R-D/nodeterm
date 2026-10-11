@@ -55,11 +55,12 @@ const GH_AUTH_TTL_MS = 10 * 60_000
 let ghAuthedCache: { value: boolean; at: number } | null = null
 let ghAuthedInFlight: Promise<boolean> | null = null
 
-async function ghAuthed(): Promise<boolean> {
+async function ghAuthed(opts?: { recheckNegative?: boolean }): Promise<boolean> {
   const invocation = ghInvocation(['auth', 'status'])
   if (!invocation) return false
   const now = Date.now()
-  if (ghAuthedCache && now - ghAuthedCache.at < GH_AUTH_TTL_MS) return ghAuthedCache.value
+  const trusted = ghAuthedCache && (ghAuthedCache.value || !opts?.recheckNegative)
+  if (ghAuthedCache && trusted && now - ghAuthedCache.at < GH_AUTH_TTL_MS) return ghAuthedCache.value
   if (ghAuthedInFlight) return ghAuthedInFlight
   ghAuthedInFlight = (async () => {
     let value = false
@@ -819,7 +820,10 @@ export class GitService {
     // (the one that already lets them push) so publishing doesn't demand a separate
     // `gh auth login`. If neither is available, signal the UI to start a login.
     const env: NodeJS.ProcessEnv = { ...GIT_ENV }
-    if (!(await ghAuthed())) {
+    // A cached "not signed in" is re-asked here: publish is user-initiated, and the Source Control
+    // panel retries it right after running `gh auth login` in a terminal — trusting a 10-minute-old
+    // negative would make that retry fail for the rest of the TTL.
+    if (!(await ghAuthed({ recheckNegative: true }))) {
       const token = await githubTokenFromGitCredentials(cwd)
       if (!token) {
         return { ok: false, message: 'Sign in to GitHub to publish.', needsAuth: true }

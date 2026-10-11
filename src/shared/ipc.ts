@@ -774,5 +774,8 @@ export const IPC = {
   // Electron-only: registered in src/main/index.ts (systemPreferences.askForMediaAccess) and
   // stubbed `async () => true` in src/server/index.ts (browser mic permission is the browser's
   // own prompt, not ours to gate).
-  speechMicConsent: 'speech:mic-consent'
+  speechMicConsent: 'speech:mic-consent',
+  // Electron-only, NOT registered by the server: opens the OS mic-privacy page from a fixed
+  // allowlist (src/main/mic-consent.ts). The browser bridge leaves `openMicSettings` absent.
+  speechOpenMicSettings: 'speech:open-mic-settings'
 } as const

@@ -22,6 +22,8 @@ const logBuffer = new LogBuffer()
 installLogSink(logBuffer)
 import { nativeMux, setNativeWindowsAgentOptIn, useNativeSsh } from '../core/remote-ssh/native/native-runtime'
 import { writeFilesToClipboard } from './clipboard-files'
+import { writeWindowsFileDrop } from './clipboard-files-win'
+import { micConsentDecision, micSettingsUrl } from './mic-consent'
 import { pickProjectIcon } from './project-icon-upload'
 import { allowGuestNavigation } from './webview-nav'
 import { appEntryUrlFor, decideMainFrameNavigation, isSafeExternalUrl } from './navigation-guard'
@@ -352,7 +354,8 @@ import type { CodexCliCaps } from '../shared/types'
 import { registerGrokCliIpc } from '../core/grok-cli'
 import { refreshCodexIdentityCaps, registerCodexIdentityIpc } from '../core/codex-identity-caps'
 import { codexCliCaps, registerCodexCliIpc } from '../core/codex-cli'
-import { registerWallpaperIpc } from '../core/wallpaper'
+import { registerWallpaperIpc, setWallpaperImageOps } from '../core/wallpaper'
+import { nativeImageWallpaperOps } from './wallpaper-native-image'
 import { registerRunConfigIpc, stopAllRunWatches } from '../core/run-service'
 import {
   bindCodexThreadIdentity,
@@ -1513,9 +1516,14 @@ app.whenReady().then(async () => {
   // Electron-only mic consent: not core-bound (systemPreferences is main-process-only), so it's
   // a raw ipcMain handler like the other Electron-only surfaces (dialogs, shell, media) rather
   // than going through registerSpeechIpc/corePlatform.
-  ipcMain.handle(IPC.speechMicConsent, async () =>
-    process.platform === 'darwin' ? systemPreferences.askForMediaAccess('microphone') : true
-  )
+  ipcMain.handle(IPC.speechMicConsent, async () => micConsentDecision(process.platform, systemPreferences))
+  // Fixed allowlisted URL per OS (never renderer-supplied); false where there is no such page.
+  ipcMain.handle(IPC.speechOpenMicSettings, async () => {
+    const url = micSettingsUrl(process.platform)
+    if (!url) return false
+    await shell.openExternal(url)
+    return true
+  })
   registerClaudeCliIpc()
   // Invariant 11 for probes: registered in BOTH shells, or session-id minting silently works on
   // the desktop and not in the browser, with nothing to say which.
@@ -1524,6 +1532,9 @@ app.whenReady().then(async () => {
   // What THIS machine's codex accepts for `--ask-for-approval`. Lazy + memoized inside the probe,
   // so registering it costs nothing until the first Codex launch line asks.
   registerCodexCliIpc()
+  // Windows has no sips: convert (thumbnails, Windows stills, oversized imports) with Chromium's
+  // own decoder. macOS keeps sips and Linux keeps no converter, byte for byte.
+  if (process.platform === 'win32') setWallpaperImageOps(nativeImageWallpaperOps)
   registerWallpaperIpc(settingsStore)
   registerRunConfigIpc()
   // Warm the `claude --version` probe now (it spawns a login shell + node, ~sub-second) so the
@@ -1728,7 +1739,8 @@ app.whenReady().then(async () => {
     writeFilesToClipboard(paths, {
       platform: process.platform,
       isFile: (path) => statSync(path).isFile(),
-      writeBuffer: (format, buffer) => clipboard.writeBuffer(format, buffer)
+      writeBuffer: (format, buffer) => clipboard.writeBuffer(format, buffer),
+      writeWindowsFileDrop: (paths) => writeWindowsFileDrop(paths)
     })
   )
 

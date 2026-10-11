@@ -2696,7 +2696,14 @@ export class PtyManager {
     // Rewrite the launcher on every create: it is generated, so an app upgrade must not leave an
     // old copy behind. Failure is not fatal — `installCodexLauncher` answers null, the caps probe
     // says "no shared identity", and the launch line the renderer already chose is the bare CLI.
-    if (options.agentId && hasSharedIdentity(options.agentId as AgentId) && !options.sshRemote) {
+    // Not on Windows (`codexLauncherPathDir()` null): shared identity is gated off there, and an sh
+    // launcher nothing can resolve is a file we would only be rewriting on every codex spawn.
+    if (
+      options.agentId &&
+      hasSharedIdentity(options.agentId as AgentId) &&
+      !options.sshRemote &&
+      codexLauncherPathDir() !== null
+    ) {
       installCodexLauncher()
     }
     // Resolved HERE rather than inside `spawnSession` because that function is synchronous. Its

@@ -114,6 +114,17 @@ describe('codex thread identity store', () => {
     expect(codexLauncherPathDir('win32')).toBeNull()
   })
 
+  it('pty-manager gates BOTH launcher sites (the per-create rewrite and the PATH prepend) on it', () => {
+    // Source-level pin: a create() is too heavy to drive here, and the docs promise "no launcher
+    // write" on Windows — the per-spawn installCodexLauncher() call used to skip the gate.
+    const src = fs.readFileSync(path.join(__dirname, 'pty-manager.ts'), 'utf8')
+    const calls = [...src.matchAll(/installCodexLauncher\(\)/g)]
+    expect(calls.length).toBe(1)
+    const before = src.slice(Math.max(0, calls[0].index! - 400), calls[0].index!)
+    expect(before).toContain('codexLauncherPathDir() !== null')
+    expect(src).toMatch(/\?\s*codexLauncherPathDir\(\)\s*:\s*null/)
+  })
+
   it('round-trips a record and resolves its owning node', () => {
     writeCodexThreadIdentity('thread-1', 'node-1', '/data/hook-endpoint.env', recordsRoot)
     expect(resolveCodexThreadNodeIdentity('thread-1', recordsRoot)).toBe('node-1')

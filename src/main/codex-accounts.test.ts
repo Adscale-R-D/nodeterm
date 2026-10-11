@@ -178,6 +178,14 @@ describe('Codex identity on a host with no reachable app-server (Windows)', () =
     expect(readAccount).not.toHaveBeenCalled()
   })
 
+  it('a leg that NEEDS the app-server (transfer) fails at once with a named error — no daemon spawn', async () => {
+    await expect(
+      call(IPC.codexAccountsTransferThreadToSsh, 'thread-1', '/work', 'proj-1', undefined, undefined)
+    ).rejects.toThrow(/not reachable on Windows/)
+    expect(findInLoginPath).not.toHaveBeenCalled()
+    expect(readAccount).not.toHaveBeenCalled()
+  })
+
   it('POSIX keeps the app-server path (regression pin)', async () => {
     const { setCodexAccountsHostPlatformForTests } = await import('./codex-accounts')
     setCodexAccountsHostPlatformForTests('linux')

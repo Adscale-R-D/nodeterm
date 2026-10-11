@@ -100,6 +100,12 @@ export function localCodexSocket(accountId?: string): string {
   return codexSocketForAccount(platform().userDataDir, accountId)
 }
 
+/** The host OS the app-server legs branch on — a seam so the Windows leg is testable on Linux. */
+let hostPlatform = (): NodeJS.Platform => process.platform
+export function setCodexAccountsHostPlatformForTests(p: NodeJS.Platform | null): void {
+  hostPlatform = p ? () => p : () => process.platform
+}
+
 /**
  * Reuse the account's shared app-server if it is already answering on its control socket, else boot
  * one exactly once (§2.2). The managed home is migrated to its short form first so the app-server
@@ -107,6 +113,12 @@ export function localCodexSocket(accountId?: string): string {
  * device-verification owed; the control flow (probe → start-once) is pure and tested via injection.
  */
 export async function ensureCodexAccountDaemon(accountId?: string): Promise<void> {
+  // No `ws+unix` app-server on Windows (`codexAppServerReachable`): starting one could only spawn a
+  // daemon nothing can dial and then time out (15 s) — say so at once instead. Identity no longer
+  // comes through here on Windows; this is what the conversation switch / transfer legs hit.
+  if (!codexAppServerReachable(hostPlatform())) {
+    throw new Error('The Codex app-server is not reachable on Windows yet')
+  }
   if (accountId) migrateLegacyCodexAccountHome(platform().userDataDir, accountId)
   const socket = localCodexSocket(accountId)
   await ensureSharedCodexDaemon(
@@ -145,12 +157,6 @@ async function initializeAccountHome(id: string): Promise<string> {
     await linkSharedEntry(source, path.join(home, name))
   }
   return home
-}
-
-/** The host OS the identity read branches on — a seam so the Windows leg is testable on Linux. */
-let hostPlatform = (): NodeJS.Platform => process.platform
-export function setCodexAccountsHostPlatformForTests(p: NodeJS.Platform | null): void {
-  hostPlatform = p ? () => p : () => process.platform
 }
 
 async function accountIdentity(accountId?: string): Promise<{ email: string | null } | null> {

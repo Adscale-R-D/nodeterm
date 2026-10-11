@@ -75,6 +75,12 @@ Codex install + a **logged-in 2nd managed account**. Headless CI cannot run them
       `CODEX_HOME` set to the managed home (`echo %CODEX_HOME%` / `$env:CODEX_HOME`).
 - [ ] **System Codex row** shows the email from `%USERPROFILE%\.codex\auth.json`.
 - [ ] **No `codex app-server daemon start`** process appears while a login is pending.
+- [ ] **Remove does not follow the junctions.** After removing a managed account whose `skills` /
+      `plugins` were junctioned in, `%USERPROFILE%\.codex\skills` and `plugins` are still intact
+      (`fs.rm` must unlink the junction, never recurse through it into the system home).
+- [ ] **Conversation switch / transfer** between Codex accounts fails at once with "The Codex
+      app-server is not reachable on Windows yet" (no daemon spawned, no 15 s wait) — the explicit
+      degrade until a named-pipe app-server endpoint exists.
 
 ## Happy-path acceptance walk (the one a human runs end to end)
 

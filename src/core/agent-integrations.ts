@@ -188,12 +188,15 @@ export function legacyInstructionFiles(agent: IntegrationAgentId, home: string =
   }
 }
 
+// Every file a declined agent loses, Windows wrappers included (`windowsHookWrapperFile`: the
+// `.cmd` that PowerShell-run hooks call). A wrapper left behind would outlive its script harmlessly
+// (it drains and exits 0), but "remove exactly what we wrote" means all of it.
 const HOOK_SCRIPTS: Partial<Record<IntegrationAgentId, string[]>> = {
   claude: ['claude.sh'],
   codex: ['codex.sh', 'codex-hook.cmd'],
-  gemini: ['gemini.sh'],
-  grok: ['grok.sh'],
-  copilot: ['copilot.sh'],
+  gemini: ['gemini.sh', 'gemini-hook.cmd'],
+  grok: ['grok.sh', 'grok-hook.cmd'],
+  copilot: ['copilot.sh', 'copilot-hook.cmd'],
   antigravity: ['antigravity.sh', 'antigravity-hook.cmd']
 }
 

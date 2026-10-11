@@ -1201,7 +1201,13 @@ export interface TmuxStatus {
   /** tmux discovery only; retained for older callers and install polling. */
   available: boolean
   /** Absent on older peers; null when discovery could not be read. */
-  persistence?: { enabled: boolean; backend: 'tmux' | 'zellij' | 'session-host' | null } | null
+  persistence?: {
+    enabled: boolean
+    backend: 'tmux' | 'zellij' | 'session-host' | null
+    /** Session host only: the CONNECTED host speaks `watch-attach`, so a live link viewer can join a
+     *  node nobody holds open. Absent = no / not known yet. */
+    watchJoin?: boolean
+  } | null
   /**
    * The optional Zellij backend (@shared/session-backend): whether a `zellij` binary was found and
    * whether this machine's setting selects it for NEW local terminals. Absent on older peers and on

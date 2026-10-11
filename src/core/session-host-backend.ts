@@ -11,13 +11,18 @@ import { platform } from './platform'
 import {
   SessionHostClient,
   SessionHostProtocolCompatibilityError,
+  SessionHostWatchUnsupportedError,
   type HostShutdownOutcome,
   type HostUpdateInspection,
   type SessionHostListing
 } from './session-host-client'
 import { SessionHostPty } from './session-host-pty'
 import { ensureStagedHostRuntime } from './session-host-runtime'
-import type { ExecuteLaunchResult, SessionHostSpawnOptions } from '../session-host/protocol'
+import type {
+  CaptureVisibleResult,
+  ExecuteLaunchResult,
+  SessionHostSpawnOptions
+} from '../session-host/protocol'
 import type { PreparedAgentLaunch } from './agent-launch'
 import type { PaneOwner } from '../shared/agents/pane-owner-predicate'
 
@@ -124,6 +129,36 @@ export function attachExistingSessionHostPty(name: string): SessionHostPty {
   return new SessionHostPty(getClient(), name, null, 0)
 }
 
+/** A live link / relay viewer's READ-ONLY attachment to an already-running session: never spawns,
+ * casts no size claim, takes no pause ticket, cannot type. `ready` rejects with
+ * `SessionHostWatchUnsupportedError` when the running host predates the `watch-attach` feature. */
+export function watchExistingSessionHostPty(name: string): SessionHostPty {
+  return new SessionHostPty(getClient(), name, null, 0, 'watch')
+}
+
+/** Does the running host speak `watch-attach`? Connects to ask (only called where the session-host
+ *  backend is already the selected one). */
+export async function sessionHostSupportsWatch(): Promise<boolean> {
+  return getClient().supportsFeature('watch-attach')
+}
+
+/** The same answer WITHOUT connecting — undefined while this process has no connection (nothing
+ *  session-host-backed has been opened yet). Synchronous, for `tmuxStatus`. */
+export function sessionHostWatchKnown(): boolean | undefined {
+  return client?.connectedFeature('watch-attach')
+}
+
+/** A live link's keyframe: the visible screen, cursor and active buffer. Null = no capture (an
+ *  older host, a gone session, any failure) — never history in its place. */
+export async function sessionHostCaptureVisible(name: string): Promise<CaptureVisibleResult | null> {
+  return getClient().captureVisible(name)
+}
+
+/** `#{pane_current_path}`'s equivalent: the cwd the pane last REPORTED (OSC 7 / 9;9 / 633), or null. */
+export async function sessionHostPaneCwd(name: string): Promise<string | null> {
+  return getClient().paneCwd(name)
+}
+
 /** Background write — works whether or not this process currently has a live client for `name`,
  *  exactly like `sendText`'s tmux `send-keys -t <name>` needs no attached client. */
 export async function sessionHostSendKeys(name: string, text: string, enter: boolean): Promise<TextDeliveryResult> {
@@ -169,7 +204,7 @@ export async function sessionHostKillSession(
   return getClient().killSession(name, options)
 }
 
-export { SessionHostProtocolCompatibilityError }
+export { SessionHostProtocolCompatibilityError, SessionHostWatchUnsupportedError }
 export type { SessionHostListing }
 
 /** `tmux has-session`'s equivalent — currently unused by the create path (which gets `fresh`

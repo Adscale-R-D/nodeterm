@@ -48,6 +48,10 @@ export function noSessionHost(): Record<string, unknown> {
     sessionHostKillSession: async () => {},
     sessionHostListSessions: async () => [],
     sessionHostPaneCommand: async () => null,
-    sessionHostSendKeys: async () => false
+    sessionHostSendKeys: async () => false,
+    sessionHostCaptureVisible: async () => null,
+    sessionHostPaneCwd: async () => null,
+    sessionHostSupportsWatch: async () => false,
+    sessionHostWatchKnown: () => undefined
   }
 }

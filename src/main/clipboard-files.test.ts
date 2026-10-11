@@ -126,6 +126,23 @@ describe('validateClipboardFilePaths', () => {
     expect(validateClipboardFilePaths(['C:\\a'], 'win32', () => true)).toEqual(['C:\\a'])
     expect(validateClipboardFilePaths([], 'darwin', () => true)).toBeNull()
   })
+
+  it('accepts only fully qualified Windows paths (drive or UNC), never a driveless rooted one', () => {
+    const ok = (p: string) => validateClipboardFilePaths([p], 'win32', () => true)
+    expect(ok('C:/a/b.png')).toEqual(['C:/a/b.png'])
+    expect(ok('\\\\srv\\share\\c.txt')).toEqual(['\\\\srv\\share\\c.txt'])
+    expect(ok('\\a.png')).toBeNull()
+    expect(ok('/a.png')).toBeNull()
+    expect(ok('C:a.png')).toBeNull()
+    expect(ok('\\\\srv')).toBeNull()
+    // POSIX keeps accepting a leading slash, byte for byte.
+    expect(validateClipboardFilePaths(['/a.png'], 'linux', () => true)).toEqual(['/a.png'])
+  })
+
+  it('dedupes case-insensitively on Windows only', () => {
+    expect(validateClipboardFilePaths(['C:\\A.png', 'c:\\a.png'], 'win32', () => true)).toEqual(['C:\\A.png'])
+    expect(validateClipboardFilePaths(['/A.png', '/a.png'], 'darwin', () => true)).toEqual(['/A.png', '/a.png'])
+  })
 })
 
 describe('fileListPropertyList', () => {

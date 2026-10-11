@@ -1,5 +1,8 @@
+import { execFileSync } from 'child_process'
 import { describe, expect, it, vi } from 'vitest'
 import {
+  WINDOWS_FILE_DROP_READ_PATHS,
+  asciiJson,
   WINDOWS_FILE_DROP_SCRIPT,
   WINDOWS_FILE_DROP_TIMEOUT_MS,
   windowsPowerShellPath,
@@ -28,7 +31,7 @@ describe('writeWindowsFileDrop', () => {
     expect(calls[0].args).toEqual(['-NoProfile', '-NonInteractive', '-STA', '-Command', WINDOWS_FILE_DROP_SCRIPT])
     for (const arg of calls[0].args) for (const p of paths) expect(arg).not.toContain(p)
     expect(calls[0].options).toEqual({ timeout: WINDOWS_FILE_DROP_TIMEOUT_MS, windowsHide: true })
-    expect(stdin.end).toHaveBeenCalledWith(JSON.stringify(paths))
+    expect(stdin.end).toHaveBeenCalledWith(asciiJson(paths))
   })
 
   it('maps a nonzero exit or a timeout kill to false', async () => {
@@ -56,4 +59,50 @@ describe('windowsPowerShellPath', () => {
     expect(windowsPowerShellPath({})).toBe('C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe')
     expect(windowsPowerShellPath({ WINDIR: 'E:\\W' })).toBe('E:\\W\\System32\\WindowsPowerShell\\v1.0\\powershell.exe')
   })
+})
+
+describe('asciiJson', () => {
+  it('escapes every non-ASCII unit so an OEM code page cannot mangle it', () => {
+    const paths = ['C:\\caf\u00e9\\\u65e5\u672c.png', 'C:\\\ud83d\ude00.txt']
+    const wire = asciiJson(paths)
+    expect(wire).toMatch(/^[\x00-\x7e]*$/)
+    expect(JSON.parse(wire)).toEqual(paths)
+  })
+})
+
+function hasPwsh(): boolean {
+  try {
+    execFileSync('pwsh', ['-NoProfile', '-Command', 'exit 0'], { stdio: 'ignore', timeout: 20_000 })
+    return true
+  } catch {
+    return false
+  }
+}
+
+// The parse half of the real script, run under a real PowerShell. `-NoEnumerate` reproduces
+// Windows PowerShell 5.1's ConvertFrom-Json (an array is ONE pipeline object), which is the shape
+// that used to fold a multi-file selection into a single space-joined path.
+describe.skipIf(!hasPwsh())('WINDOWS_FILE_DROP_READ_PATHS under pwsh', () => {
+  const run = (paths: unknown, emulate51: boolean): string[] => {
+    const script =
+      (emulate51
+        ? WINDOWS_FILE_DROP_READ_PATHS.replace('ConvertFrom-Json -InputObject', 'ConvertFrom-Json -NoEnumerate -InputObject')
+        : WINDOWS_FILE_DROP_READ_PATHS) +
+      '; foreach ($x in $p) { [Console]::Out.Write((($x.ToCharArray() | ForEach-Object { [int]$_ }) -join ",") + ";") }'
+    const out = execFileSync('pwsh', ['-NoProfile', '-NonInteractive', '-Command', script], {
+      input: asciiJson(paths),
+      encoding: 'utf8',
+      timeout: 30_000
+    })
+    return out
+      .split(';')
+      .filter(Boolean)
+      .map((codes) => String.fromCharCode(...codes.split(',').map(Number)))
+  }
+
+  it.each([false, true])('keeps a multi-file selection as separate paths (5.1 semantics: %s)', (emulate51) => {
+    const paths = ['C:\\a b.png', 'C:\\caf\u00e9 $(x) & "q".txt', '\\\\srv\\share\\\ud83d\ude00']
+    expect(run(paths, emulate51)).toEqual(paths)
+    expect(run(['C:\\only.png'], emulate51)).toEqual(['C:\\only.png'])
+  }, 60_000)
 })

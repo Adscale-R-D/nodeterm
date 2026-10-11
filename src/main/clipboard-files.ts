@@ -1,4 +1,4 @@
-import { posix, win32 } from 'path'
+import { posix } from 'path'
 
 export const FILE_LIST_PASTEBOARD_TYPE = 'NSFilenamesPboardType'
 const MAX_CLIPBOARD_FILES = 64
@@ -34,6 +34,15 @@ export function fileListPropertyList(paths: string[]): Buffer {
 }
 
 /**
+ * `path.win32.isAbsolute` also accepts ROOTED-but-driveless paths (`\foo`, `/foo`), which resolve
+ * against whatever drive the process is on — not a path a drop list should carry. Only a drive
+ * path (`C:\…`) or a UNC path (`\\server\share\…`) is fully qualified.
+ */
+function isFullyQualifiedWin32(value: string): boolean {
+  return /^[A-Za-z]:[\\/]/.test(value) || /^[\\/]{2}[^\\/]+[\\/][^\\/]+/.test(value)
+}
+
+/**
  * Validate a renderer-supplied file selection. Inputs cross an IPC trust boundary, so paths are
  * capped, absolute-only (in the dialect of the platform that will read them — `path.win32` on
  * Windows, so drive and UNC paths validate there and only there), de-duplicated and re-checked
@@ -46,20 +55,24 @@ export function validateClipboardFilePaths(
   isFile: (path: string) => boolean
 ): string[] | null {
   if (!Array.isArray(input)) return null
-  const isAbsolute = platform === 'win32' ? win32.isAbsolute : posix.isAbsolute
+  const win = platform === 'win32'
+  const isAbsolute = win ? isFullyQualifiedWin32 : posix.isAbsolute
+  // NTFS is case-insensitive: `C:\A.png` and `c:\a.png` are one file, and a drop list naming it
+  // twice makes the paste ask to overwrite the file with itself.
+  const key = (value: string): string => (win ? value.toLowerCase() : value)
 
   const paths: string[] = []
   const seen = new Set<string>()
   for (const value of input) {
     if (typeof value !== 'string' || !isAbsolute(value)) return null
-    if (seen.has(value)) continue
+    if (seen.has(key(value))) continue
     if (paths.length >= MAX_CLIPBOARD_FILES) return null
     try {
       if (!isFile(value)) return null
     } catch {
       return null
     }
-    seen.add(value)
+    seen.add(key(value))
     paths.push(value)
   }
   return paths.length ? paths : null

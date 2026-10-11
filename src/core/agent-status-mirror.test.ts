@@ -35,6 +35,7 @@ import {
   workingNodes,
   _resetForTest,
   pendingTicketsFor,
+  openAskFor,
   _snapshot,
   _inboxSnapshot,
   DONE_HOLDOFF_MS,
@@ -2608,5 +2609,20 @@ describe('pendingTicketsFor', () => {
     expect(pendingTicketsFor('nope')).toEqual([])
     recordAgentEvent(syntheticAnsweredEvent('n1', 'n1-1-1', 'allow')!)
     expect(pendingTicketsFor('n1')).toEqual([])
+  })
+})
+
+// The relay's `agent.key` (main/remote/host-chat.ts) compares the answer it is about to type with
+// the ask open NOW — the newest unresolved approval/question card, the phone's own pick.
+describe('openAskFor', () => {
+  beforeEach(() => _resetForTest())
+  it('names the open approval (with its ticket), and nothing once it is answered', () => {
+    expect(openAskFor('n1')).toBeUndefined()
+    recordAgentEvent(ev({ state: 'working', newTurn: true }))
+    recordAgentEvent(ev({ state: 'blocked', lastMessage: 'Approve write', pendingId: 'n1-1-1' }))
+    expect(openAskFor('n1')).toEqual({ kind: 'approval', pendingId: 'n1-1-1' })
+    expect(openAskFor('n2')).toBeUndefined()
+    recordAgentEvent(syntheticAnsweredEvent('n1', 'n1-1-1', 'allow')!)
+    expect(openAskFor('n1')).toBeUndefined()
   })
 })

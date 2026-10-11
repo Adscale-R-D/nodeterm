@@ -61,6 +61,10 @@ export function noSessionHost(): Record<string, unknown> {
     sessionHostWriteDetached: async () => false,
     // Error classes are read by `instanceof` checks on catch paths; a fresh class never matches.
     SessionHostProtocolCompatibilityError: class extends Error {},
-    SessionHostWatchUnsupportedError: class extends Error {}
+    SessionHostWatchUnsupportedError: class extends Error {},
+    sessionHostMouseTracking: async () => null,
+    sessionHostExecuteLaunch: async () => {
+      throw new Error('session-host launch in a suite that mocked the backend out')
+    }
   }
 }

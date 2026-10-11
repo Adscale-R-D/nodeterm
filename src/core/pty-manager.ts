@@ -40,6 +40,7 @@ import {
   remoteTmuxWatcherArgs,
   remoteWindowSizeArgs,
   remotePaneCommandArgs,
+  remoteSendKeyArgs,
   remotePaneCwdArgs,
   remoteSessionAgeArgs,
   parseSessionAge,
@@ -145,7 +146,7 @@ import { effectiveSize, type PtySize } from './pty-size'
 import { machOArch, archMismatch } from './macho-arch'
 import { writeScrollback, readScrollback, deleteScrollback } from './scrollback-store'
 import { snapshotDue } from './scrollback-cadence'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { claudeConfigDirFor } from './claude-config-dir'
 import { envPathKey, findExecutableSync, findInPathString, resolveShellPath, shellPathNow } from './exec-path'
 import {
@@ -195,7 +196,7 @@ import {
   stageRemoteSessionEnv
 } from './remote-ssh/session-env'
 import { foregroundProcessGroup, parsePaneProcess } from './pane-process'
-import { isShellCommand } from '../shared/agents/pane'
+import { isLaunchShell, isShellCommand } from '../shared/agents/pane'
 // Third persistence backend, selected when no local tmux was found (primarily Windows, where
 // tmux does not exist at all) — see docs/windows-session-host.md. Deliberately a thin, separate
 // module rather than inline here: this is the one narrow seam this file needed to grow for a
@@ -222,13 +223,17 @@ import {
   sessionHostSupportsWatch,
   sessionHostWatchKnown,
   sessionHostCaptureVisible,
-  sessionHostPaneCwd
+  sessionHostPaneCwd,
+  sessionHostMouseTracking,
+  sessionHostExecuteLaunch
 } from './session-host-backend'
 import type { SessionHostPty } from './session-host-pty'
 import type { SessionHostReaperBackend, SessionInfo } from './session-budget'
 import { NativeWindowsPane } from './native-windows-pane'
 import { terminatePaneOwner } from '../session-host/terminate-owner'
 import type { ProjectSpawnOverrides, ProjectSpawnOverridesReader } from './project-spawn-overrides'
+import { buildRelayLaunch, relayLaunchAgentKnown, relayLaunchDialect, relayLaunchPreflight, type RelayLaunchContext, type RelayLaunchRequest } from './relay-launch'
+import { RELAY_KEY_GAP_MS, rawKeyBytes, tmuxKeyArgs, type RelayKey } from './relay-keys'
 
 // How often we snapshot a live tmux session's scrollback to disk, so a machine reboot (which
 // kills the tmux server) can still replay recent output on cold restart. A final snapshot also
@@ -918,10 +923,19 @@ export type RelayAttachPrep =
       remote: boolean
       /** Does the session exist RIGHT NOW (fail-safe toward "exists")? Ask before `attach`. */
       sessionExists(): Promise<boolean>
-      /** The current visible screen, '' when there is none. */
+      /** The current visible screen, '' when there is none. For a `scroll: 'local'` stream this is
+       *  the emulator's FULL buffer instead, so the phone holds the history it will scroll itself. */
       snapshot(): Promise<string>
       /** Spawn the relay-served client; rejects when nothing could be started. */
       attach(sinks: DetachedSinks): Promise<string>
+      /** Who scrolls this stream's history: `host` = a tmux behind the pty (the wheel drives its
+       *  copy-mode), `local` = no tmux in front (session host / plain shell) — the viewer's own
+       *  emulator holds the history. See `scrollRoute`. */
+      scroll: 'host' | 'local'
+      /** Present only when the attach was asked to launch an agent AND this machine may: run it
+       *  once, after `attach`, and only when `sessionExists` said the session was NOT there.
+       *  Resolves true when the launch line was delivered. See `relay-launch.ts`. */
+      launch?: () => Promise<boolean>
     }
 
 export interface DetachedSinks {
@@ -1195,6 +1209,13 @@ export class PtyManager {
   private remoteNodeOwner: RemoteNodeOwnerResolver | null = null
   /** Machine-local records the relay host's attach is decided from — see `setRelayNodeResolver`. */
   private relayNodes: RelayNodeResolver | null = null
+  /** Host-authoritative launch facts for a phone's `pty.attach { launch }` (see relay-launch.ts).
+   *  Null — the Server Edition, which has no relay host, and every test that does not wire one —
+   *  means no relay launch is ever performed. */
+  private relayLaunchContext: (() => RelayLaunchContext) | null = null
+  /** Node ids a relay launch was delivered to recently: two phones attaching in the same instant
+   *  can both see "fresh", and only one of them may type. */
+  private relayLaunched = new Set<string>()
   /** ONE shared snapshot interval for all persisted sessions — a per-session interval spawned
    *  one tmux/ssh capture subprocess per session per tick, forever, even for idle terminals. */
   private snapshotTimer: ReturnType<typeof setInterval> | null = null
@@ -3524,6 +3545,12 @@ export class PtyManager {
     this.relayNodes = resolve
   }
 
+  /** Wire the host-authoritative facts a phone's relay launch is built from (main: settings, CLI
+   *  probes, account lists). Absent ⇒ `prepareRelayAttach` never offers a `launch`. */
+  setRelayLaunchContext(provider: (() => RelayLaunchContext) | null): void {
+    this.relayLaunchContext = provider
+  }
+
   /**
    * Prepare a relay-served attach to the session for `nodeId` (the phone's `pty.attach`).
    *
@@ -3545,7 +3572,7 @@ export class PtyManager {
   async prepareRelayAttach(
     nodeId: string,
     size: { cols: number; rows: number },
-    hint: { projectId?: string } = {}
+    hint: { projectId?: string; launch?: RelayLaunchRequest } = {}
   ): Promise<RelayAttachPrep> {
     const resolver = this.relayNodes
     const placements = resolver?.placements(nodeId) ?? []
@@ -3582,6 +3609,8 @@ export class PtyManager {
       cols: size.cols,
       rows: size.rows
     }
+    let launch = plan.kind === 'local' ? this.relayLaunchFor(hint.launch, plan.projectId, options) : undefined
+    if (launch && !(await this.relayLaunchViable(launch, nodeId))) launch = undefined
     const refused = this.spawnRefusal(options)
     if (refused) {
       return {
@@ -3624,6 +3653,8 @@ export class PtyManager {
       return {
         kind: 'ready',
         remote: true,
+        // A remote node always runs inside the host's tmux, which owns its history.
+        scroll: 'host',
         sessionExists: async () =>
           (await this.remoteSessionVerdict(sshRemote, name).catch(() => 'unknown' as const)) !== 'absent',
         snapshot: async () => {
@@ -3643,11 +3674,14 @@ export class PtyManager {
         attach: (sinks) => this.spawnRelayRemote(options, sinks)
       }
     }
+    const scroll = this.relayScrollOwner(nodeId)
     return {
       kind: 'ready',
       remote: false,
+      scroll,
       sessionExists: () => this.sessionExists(nodeId),
-      snapshot: () => this.captureSnapshot(nodeId),
+      snapshot: () => (scroll === 'local' ? this.relayLocalSnapshot(nodeId) : this.captureSnapshot(nodeId)),
+      ...(launch ? { launch: () => this.deliverRelayLaunch(nodeId, launch) } : {}),
       attach: async (sinks) => {
         await resolveShellPath()
         const overrides = await this.projectSpawnOverrides(options)
@@ -3683,6 +3717,196 @@ export class PtyManager {
     }
     releaseSpawnSlotOnOutput(this.sessions.get(sessionId), slot)
     return sessionId
+  }
+
+  /**
+   * Decide whether a phone's launch request may run for this LOCAL attach, and fold its cwd /
+   * account / agent into the spawn options when the node is UNRECORDED (a session the phone is
+   * starting before registering it) — so the one env builder applies them and nothing is typed.
+   * A recorded node keeps its own records: the launch must name the agent the record names, and
+   * the phone cannot move it or rebind its account. `undefined` = no launch.
+   */
+  private relayLaunchFor(
+    req: RelayLaunchRequest | undefined,
+    recordedProjectId: string | undefined,
+    options: PtyCreateOptions
+  ): RelayLaunchRequest | undefined {
+    const ctxFn = this.relayLaunchContext
+    if (!req || !ctxFn) return undefined
+    let ctx: RelayLaunchContext
+    try {
+      ctx = ctxFn()
+    } catch {
+      return undefined
+    }
+    if (!relayLaunchAgentKnown(req.agentId, ctx)) return undefined
+    if (recordedProjectId) {
+      if (options.agentId !== req.agentId) return undefined
+      return { agentId: req.agentId, sessionId: req.sessionId, permissionMode: req.permissionMode }
+    }
+    // Unrecorded: the phone's profile (already jailed for cwd by the relay host) becomes the
+    // spawn profile. An account this machine does not know is dropped (system default), never
+    // trusted as a path component.
+    options.agentId = req.agentId
+    if (req.cwd) options.cwd = req.cwd
+    if (req.accountId && ctx.isKnownAccount(req.accountId, req.agentId)) options.accountId = req.accountId
+    return req
+  }
+
+  /** `relayLaunchPreflight` for this node's pane: a Windows pane unless a tmux (or a live non-Windows
+   *  backend) will hold it. A throwing context means no launch. */
+  private async relayLaunchViable(req: RelayLaunchRequest, persistKey: string): Promise<boolean> {
+    const ctxFn = this.relayLaunchContext
+    if (!ctxFn) return false
+    try {
+      const live = this.liveSessionForPersistKey(persistKey)
+      const windowsPane =
+        this.runtimePlatform === 'win32' &&
+        (live ? !!live.sessionHost || !!live.nativeWindowsPane || !live.tmuxBacked : !(this.tmuxPath && this.getSettings().tmuxEnabled))
+      return await relayLaunchPreflight(req, ctxFn(), windowsPane)
+    } catch {
+      return false
+    }
+  }
+
+  /** How long a relay launch waits for a shell to own the fresh pane before giving up. */
+  static readonly RELAY_LAUNCH_SHELL_WAIT_MS = 10_000
+
+  /**
+   * Deliver a relay launch into the session the attach just created: wait until a SHELL owns the
+   * pane (a fresh tmux session is created by the attach's own client, asynchronously), read which
+   * parser it is from that same answer, build the line for it, and deliver it exactly once.
+   */
+  private async deliverRelayLaunch(nodeId: string, req: RelayLaunchRequest): Promise<boolean> {
+    const ctxFn = this.relayLaunchContext
+    if (!ctxFn || this.relayLaunched.has(nodeId)) return false
+    this.relayLaunched.add(nodeId)
+    const forget = setTimeout(() => this.relayLaunched.delete(nodeId), 60_000)
+    forget.unref?.()
+    try {
+      const deadline = Date.now() + PtyManager.RELAY_LAUNCH_SHELL_WAIT_MS
+      let pane: string | null = null
+      for (;;) {
+        pane = await this.paneCommand(nodeId).catch(() => null)
+        if (isLaunchShell(pane)) break
+        if (Date.now() >= deadline) return false
+        await new Promise((r) => setTimeout(r, 250))
+      }
+      const built = await buildRelayLaunch(req, relayLaunchDialect(pane), ctxFn())
+      if (!built) return false
+      if (built.kind === 'type') return (await this.sendText(nodeId, built.command)) === true
+      // A trusted Windows plan goes through the session host's exactly-once launch ledger.
+      const live = this.liveSessionForPersistKey(nodeId)
+      if (!live?.sessionHost) return false
+      const res = await this.serializePaneWrite(nodeId, () =>
+        sessionHostExecuteLaunch(sessionName(nodeId), randomUUID(), built.plan)
+      )
+      return res.status === 'executed' || res.status === 'already-executed'
+    } catch {
+      return false
+    }
+  }
+
+  /** Who owns a LOCAL node's history, before the attach exists: the live session's backend when
+   *  one is held, else the backend a spawn would pick (tmux, else session host / plain shell). */
+  private relayScrollOwner(persistKey: string): 'host' | 'local' {
+    const live = this.liveSessionForPersistKey(persistKey)
+    if (live) return live.sessionHost || !live.tmuxBacked ? 'local' : 'host'
+    if (this.isZellij(persistKey, undefined)) return 'host'
+    return this.tmuxPath && this.getSettings().tmuxEnabled ? 'host' : 'local'
+  }
+
+  /** The relay snapshot for a `scroll: 'local'` stream: everything the session host's emulator
+   *  holds (bounded by `tmuxScrollback`, like a desktop warm attach's seed), not just the visible
+   *  screen — the relay attach never gets the host's attach repaint, so without this the phone has
+   *  no history at all. A plain shell has nothing to capture. */
+  private async relayLocalSnapshot(persistKey: string): Promise<string> {
+    const live = this.liveSessionForPersistKey(persistKey)
+    const viaHost = live ? live.sessionHost : !this.tmuxPath && this.getSettings().tmuxEnabled && sessionHostSupported()
+    if (!viaHost) return this.captureSnapshot(persistKey)
+    try {
+      return await sessionHostCapture(sessionName(persistKey), true)
+    } catch {
+      return ''
+    }
+  }
+
+  /**
+   * Where a relay `pty.scroll` wheel for this session goes:
+   *  - `tmux` — a tmux client (local, remote, or Zellij's own) is in front of the pane; it owns
+   *    the history and consumes the SGR wheel (the behaviour every POSIX host has always had);
+   *  - `app-mouse` — a session-host pane whose app has asked for mouse tracking (a full-screen
+   *    TUI): the wheel is the app's to handle;
+   *  - `local` — anything else (a session-host pane with no mouse app, a plain shell): there is
+   *    nothing to consume a wheel, and writing one types raw escape text into the prompt. The
+   *    viewer's own emulator holds the history (`RelayAttachPrep.scroll`).
+   * Unknown (an older session host that cannot answer, a session already gone) is `local`.
+   */
+  async scrollRoute(sessionId: string): Promise<'tmux' | 'app-mouse' | 'local'> {
+    const s = this.sessions.get(sessionId)
+    if (!s) return 'local'
+    if (s.sessionHost) {
+      if (!s.persistKey) return 'local'
+      const mode = await sessionHostMouseTracking(sessionName(s.persistKey)).catch(() => null)
+      return mode && mode !== 'none' ? 'app-mouse' : 'local'
+    }
+    if (s.nativeWindowsPane) return 'local'
+    return s.tmuxBacked || s.sshRemote ? 'tmux' : 'local'
+  }
+
+  /**
+   * Type a closed set of KEYS into a node's pane — the phone's keyed Inbox answers over the relay
+   * (`agent.key`). One key per write, `RELAY_KEY_GAP_MS` apart (an Ink picker reads one stdin
+   * chunk as one string), all inside the pane's write chain so nothing interleaves. tmux names
+   * the keys (`send-keys`, local or over the project's ControlMaster); a session-host pane, which
+   * has no tmux, takes the raw bytes through a client this process already holds (or, released, by name). `false` =
+   * nothing (or not everything) was delivered.
+   */
+  async sendKeys(persistKey: string, keys: readonly RelayKey[]): Promise<boolean> {
+    if (keys.length === 0) return false
+    return this.serializePaneWrite(persistKey, async () => {
+      const target = sessionName(persistKey)
+      const live = this.liveSessionForPersistKey(persistKey)
+      if (live?.nativeWindowsPane || this.isZellij(persistKey, live)) return false
+      // An SSH-project node with no client of ours held right now lives on the HOST's tmux: its
+      // owner's ControlMaster is the only way there. Never fall through to the LOCAL socket — a
+      // same-named local `nt-<id>` (the pre-`requireRemote` orphan) would take the keystroke, and a
+      // stray `1` / Enter into an unrelated pane is exactly what the closed key set exists to stop.
+      const owner = live ? null : (this.remoteNodeOwner?.(persistKey) ?? null)
+      if (owner && !owner.remote) return false
+      const sshRemote = live?.sshRemote ?? owner?.remote
+      for (let i = 0; i < keys.length; i++) {
+        if (i > 0) await new Promise((r) => setTimeout(r, RELAY_KEY_GAP_MS))
+        const key = keys[i]
+        try {
+          if (sshRemote) {
+            const ssh = findSsh()
+            if (!ssh) return false
+            await runAsync(ssh, remoteSendKeyArgs(sshRemote.conn, sshRemote.controlPath, target, tmuxKeyArgs(key)))
+          } else if (live?.sessionHost || !this.tmuxPath) {
+            // The session host's `sendKeys` is a paste, so a key needs a client this process holds
+            // (the desktop node, or a relay stream) — or, for a RELEASED session-host node, the
+            // name-addressed raw write (`writeDetachedV1`, same gate as `write()`'s released leg;
+            // an older host refuses it, which is a plain `false`, never a sendKeys fallback).
+            const current = this.liveSessionForPersistKey(persistKey)
+            if (current?.sessionHost) {
+              current.proc.write(rawKeyBytes(key))
+            } else {
+              const released = this.released.get(persistKey)
+              if (!released?.sessionHost || released.remote) return false
+              if (!this.getSettings().tmuxEnabled || !sessionHostSupported()) return false
+              if (!isSessionName(target)) return false
+              if (!(await sessionHostWriteDetached(target, rawKeyBytes(key)))) return false
+            }
+          } else {
+            await runAsync(this.tmuxPath, ['-L', TMUX_SOCKET, 'send-keys', '-t', target, ...tmuxKeyArgs(key)])
+          }
+        } catch {
+          return false
+        }
+      }
+      return true
+    })
   }
 
   /**

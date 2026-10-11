@@ -134,6 +134,18 @@ export class TerminalEmulator {
     return this.term.modes.bracketedPasteMode
   }
 
+  /**
+   * Which mouse-tracking protocol the app in this pane has requested (`CSI ?1000h` / `?1002h` /
+   * `?1003h` / `?9h`), `'none'` when it has asked for none. Same provenance argument as
+   * `bracketedPasteRequested`: this emulator is fed the pane's own output, so the mode is the
+   * app's, not a client terminal's. The relay's `pty.scroll` asks it before writing a wheel event
+   * into a session-host pane (`PtyManager.scrollRoute`) — with no tmux in front, a wheel the app
+   * did not ask for lands in the prompt as raw escape text.
+   */
+  mouseTrackingMode(): 'none' | 'x10' | 'vt200' | 'drag' | 'any' {
+    return this.term.modes.mouseTrackingMode
+  }
+
   dispose(): void {
     try {
       this.serializer.dispose()

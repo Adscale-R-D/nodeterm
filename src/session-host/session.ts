@@ -335,6 +335,12 @@ export class HostSession {
     return this.term.bracketedPasteRequested()
   }
 
+  /** The pane app's mouse-tracking protocol, behind `outputTail` for the same reason. */
+  async mouseTrackingMode(): Promise<'none' | 'x10' | 'vt200' | 'drag' | 'any'> {
+    await this.outputTail
+    return this.term.mouseTrackingMode()
+  }
+
   /** Agent messaging's stricter form of the same read: the pane must also still be alive and not
    * inside a private launch, because the envelope is only ever written as a framed paste. */
   async messagePasteReady(): Promise<boolean> {

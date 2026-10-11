@@ -1,3 +1,5 @@
+import { WINDOWS_SH_LAYOUTS } from '../../windows-sh'
+
 // The Windows entry point for the codex managed hook.
 //
 // WHY THIS EXISTS. Every managed hook command in this repo is a POSIX `sh` one-liner, and for
@@ -48,15 +50,10 @@
 // install Git.Git` produces without admin), then whatever `sh.exe` is on PATH. PATH is last on
 // purpose: it is the least predictable, and a WSL `sh` shim there cannot run a Windows-path script.
 
-/** Where the wrapper looks for a POSIX shell, in order. cmd.exe expands these itself. */
-export const WINDOWS_SH_CANDIDATES = [
-  '%ProgramFiles%\\Git\\bin\\sh.exe',
-  '%ProgramFiles%\\Git\\usr\\bin\\sh.exe',
-  '%ProgramFiles(x86)%\\Git\\bin\\sh.exe',
-  '%ProgramFiles(x86)%\\Git\\usr\\bin\\sh.exe',
-  '%LOCALAPPDATA%\\Programs\\Git\\bin\\sh.exe',
-  '%LOCALAPPDATA%\\Programs\\Git\\usr\\bin\\sh.exe'
-] as const
+/** Where the wrapper looks for a POSIX shell, in order. cmd.exe expands these itself. Derived from
+ *  `WINDOWS_SH_LAYOUTS` (core/windows-sh.ts) — the same list the setup-script runner resolves in
+ *  process — so the two cannot disagree about where Git Bash lives. */
+export const WINDOWS_SH_CANDIDATES: readonly string[] = WINDOWS_SH_LAYOUTS.map((l) => `%${l.envVar}%\\${l.rel}`)
 
 /** The wrapper's file name, beside the managed script it runs. */
 export const CODEX_WINDOWS_WRAPPER_FILE = 'codex-hook.cmd'

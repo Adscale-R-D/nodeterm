@@ -19,6 +19,7 @@ import { ipcMain, type WebContents } from 'electron'
 import { IPC } from '../shared/ipc'
 import {
   assertCodexAccountId,
+  codexAppServerReachable,
   commitCodexRolloutExposure,
   codexAccountHome,
   codexHomeForAccount,
@@ -29,10 +30,13 @@ import {
   migrateLegacyCodexAccountHome,
   migrateLegacyCodexAccountHomes,
   planCodexRolloutExposure,
+  readCodexAuthEmail,
+  systemCodexHome,
   type CodexRolloutExposurePlan
 } from '../core/codex-accounts-core'
 import { readCodexAccountAt, readCodexThreadAt } from '../core/codex-session-name'
 import { directExecutableInvocation } from '../core/exec-path'
+import { linkSharedEntry } from '../core/shared-entry-link'
 import { ensureCodexRelayRoot } from './codex-relay-daemon'
 import { platform } from '../core/platform'
 import { findInLoginPath } from '../core/pty-manager'
@@ -124,9 +128,10 @@ export async function ensureCodexAccountDaemon(accountId?: string): Promise<void
 }
 
 /**
- * Create a managed account's private home (0700) and symlink the shared, NON-secret runtime assets
- * from the system home in. Credentials (`auth.json`) and the thread DB are never shared — only
- * installation assets. A missing source asset is skipped; an existing target link is left as-is.
+ * Create a managed account's private home (0700) and link the shared, NON-secret runtime assets
+ * from the system home in (`linkSharedEntry` — symlinks on POSIX). Credentials (`auth.json`) and
+ * the thread DB are never shared — only installation assets. A missing source asset is skipped; an
+ * existing target link is left as-is.
  */
 async function initializeAccountHome(id: string): Promise<string> {
   migrateLegacyCodexAccountHome(platform().userDataDir, id)
@@ -136,21 +141,40 @@ async function initializeAccountHome(id: string): Promise<string> {
   const sourceHome = process.env.CODEX_HOME?.trim() || path.join(os.homedir(), '.codex')
   for (const name of SHARED_ENTRIES) {
     const source = path.join(sourceHome, name)
-    const target = path.join(home, name)
-    try {
-      await fs.lstat(source)
-      await fs.symlink(source, target)
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code
-      if (code !== 'ENOENT' && code !== 'EEXIST') throw error
-    }
+    // POSIX: a plain symlink. Windows: junction / hardlink / copy, never a blocking EPERM.
+    await linkSharedEntry(source, path.join(home, name))
   }
   return home
 }
 
+/** The host OS the identity read branches on — a seam so the Windows leg is testable on Linux. */
+let hostPlatform = (): NodeJS.Platform => process.platform
+export function setCodexAccountsHostPlatformForTests(p: NodeJS.Platform | null): void {
+  hostPlatform = p ? () => p : () => process.platform
+}
+
 async function accountIdentity(accountId?: string): Promise<{ email: string | null } | null> {
+  if (!codexAppServerReachable(hostPlatform())) return authFileIdentity(accountId)
   await ensureCodexAccountDaemon(accountId)
   return readCodexAccountAt(localCodexSocket(accountId), 5000)
+}
+
+/**
+ * The identity on a host with no reachable app-server (Windows): NO daemon start — it could only
+ * time out on every poll — just the account's own `auth.json`, under the same gate as the login
+ * wait (a REAL file, never a symlink; absent ⇒ `null`). The email is the id_token's claim, a display
+ * label only (`readCodexAuthEmail`); a credential with no readable email is still a login.
+ */
+async function authFileIdentity(accountId?: string): Promise<{ email: string | null } | null> {
+  const home = accountId ? localCodexAccountHome(accountId) : systemCodexHome()
+  const file = path.join(home, 'auth.json')
+  try {
+    const auth = await fs.lstat(file)
+    if (!auth.isFile() || auth.isSymbolicLink()) return null
+    return { email: readCodexAuthEmail(await fs.readFile(file, 'utf8')) }
+  } catch {
+    return null
+  }
 }
 
 /**

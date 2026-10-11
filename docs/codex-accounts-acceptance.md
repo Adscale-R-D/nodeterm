@@ -66,6 +66,16 @@ Codex install + a **logged-in 2nd managed account**. Headless CI cannot run them
       login completes with no email), a new Codex node on that host runs under the managed home
       (`echo $CODEX_HOME` in the pane), and Remove leaves no `~/.nodeterm/cx/<digest>` behind.
 
+### Windows (managed local accounts)
+
+- [ ] **Add + login on a stock (non-admin, no Developer Mode) account.** Add completes (no EPERM);
+      `skills`/`plugins` in `~/.nodeterm/cx/<digest>` are junctions and `config.toml` a hardlink or
+      (with a logged warning) a copy. `codex login` completes, the row leaves pending and shows the
+      email read from `auth.json`'s id_token, and a new Codex node under that account runs with
+      `CODEX_HOME` set to the managed home (`echo %CODEX_HOME%` / `$env:CODEX_HOME`).
+- [ ] **System Codex row** shows the email from `%USERPROFILE%\.codex\auth.json`.
+- [ ] **No `codex app-server daemon start`** process appears while a login is pending.
+
 ## Happy-path acceptance walk (the one a human runs end to end)
 
 On a real Mac with a real SSH host and a 2nd ChatGPT login available:

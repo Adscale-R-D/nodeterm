@@ -4327,7 +4327,7 @@ export function TerminalNode({
           // brand new either way — tmux respawned it, whether from the deep "pause & end session"
           // recycle or from a genuine reboot that took a shallow-paused session's tmux with it.
           // The later Resume's pane-recognition (see `decideWakeResume`) would otherwise refuse a
-          // user whose default shell sits outside the `isShellCommand` allowlist (nu/xonsh/pwsh)
+          // user whose default shell sits outside the `isShellCommand` allowlist (xonsh/elvish/…)
           // forever: a PAUSED chip that can never resume, with a live conversation on disk. Record
           // what this fresh pane actually is, the same way the exit half does — replacing any
           // stale record a pre-reboot shallow pause left behind, which described a pane that no

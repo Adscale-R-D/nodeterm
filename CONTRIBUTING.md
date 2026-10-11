@@ -528,6 +528,11 @@ anything else. Board-level fields survive every transform — `pullLinks` is one
   login profile leaves the project folder). And do not type a chained command line (`a && b '<x>'`)
   into a terminal for the user: PowerShell 5.1 and cmd parse it differently. Type one bare command
   and do the rest in-process (Source Control's publish fallback, `lib/publishFallback.ts`).
+- **Closing the window on Windows hides it to the tray (background mode), it does not quit.** The
+  relay host, hook server and notifications must outlive the window there as they do on macOS. Any
+  new app-initiated quit (updater-style) must set `quitting` before `app.quit()`, or the hidden
+  window's close handler turns the quit back into a hide. Every new raise (`show`/`focus`) needs a
+  user action and an entry in `window-raise.guard.test.ts`.
 
 - **The phone reaches a Windows desktop through the relay only.** Everything the iOS app sends over
   SSH is POSIX sh plus tmux, and Windows OpenSSH hands out `cmd.exe`, so Windows pairing installs no

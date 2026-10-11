@@ -1791,6 +1791,9 @@ export interface ZoomActualSizeModifiers {
   control: boolean
 }
 
+/** `settings.runInBackgroundOnClose` — see the field's doc. */
+export type BackgroundOnCloseSetting = 'auto' | 'on' | 'off'
+
 /** User-configurable application settings (settings.json). */
 export interface Settings {
   fontSize: number
@@ -2264,6 +2267,14 @@ export interface Settings {
    *  The auto-update "Restart to update" flow never asks — that decision was already made.
    *  Settings → Behavior. */
   confirmBeforeQuit: boolean
+  /** Windows/Linux "background mode": closing the window hides it to the notification-area tray
+   *  instead of quitting, so the phone relay host, hook server, notifications and updater keep
+   *  running — the analogue of macOS keeping the app in the Dock. `'auto'` (default) = on for
+   *  Windows, off for Linux (whose tray support depends on the desktop environment). Resolved by
+   *  `resolveBackgroundOnClose` (src/main/background-mode.ts); ignored on macOS (always hides) and
+   *  on the Server Edition (no window). Hand-editable: an unknown value reads as `'auto'`.
+   *  Settings → Behavior (Windows/Linux only). */
+  runInBackgroundOnClose: BackgroundOnCloseSetting
   /** macOS Notch HUD (docs/notch-hud.md): a transparent always-on-top strip by the notch showing
    *  walking agent mascots while agents work, expanding into a mini session panel. Default on;
    *  macOS + desktop only (ignored on other platforms / Server Edition). */
@@ -2476,6 +2487,8 @@ export const DEFAULT_SETTINGS: Settings = {
   // Confirm-before-quit default ON: sessions survive a quit anyway, but an accidental ⌘Q
   // tears down every window at once; the toggle is one switch away for who finds it noisy.
   confirmBeforeQuit: true,
+  // Background mode 'auto' = on for Windows (the tray is always there), off for Linux.
+  runInBackgroundOnClose: 'auto',
   // macOS Notch HUD default ON (guarded to darwin at runtime; a no-op elsewhere).
   notchHud: true,
   notchWidth: 168,

@@ -71,6 +71,8 @@ import {
 import { useDownloads } from '../lib/useDownloads'
 import { fileLinkDialect } from '../terminal/file-link-dialect'
 import { hostPlatformFor } from '../terminal/host-platform'
+import { executeHeldLaunch } from '../terminal/launch-intent'
+import { uuid } from '../lib/uuid'
 import { sshFs } from '../terminal/ssh-fs'
 import type { FsApi, PendingLaunch, PtyApi } from '@shared/types'
 import {
@@ -4010,7 +4012,21 @@ export function TerminalNode({
           cleanup: (cancel: () => void) => { cleanups.push(cancel) }
         }
         const launchWriter = createLaunchWriter({ ...launchWriterOptions,
-          claimAttempt: (manual, command) => commitLaunch(api, id, command, manual)
+          claimAttempt: (manual, command) => commitLaunch(api, id, command, manual),
+          // A local Windows session-host pane runs pwsh/cmd, where the POSIX launch line breaks on
+          // a quote in the prompt: execute the node's held semantic launch there instead. Every
+          // other pane answers 'fallback' without an IPC (terminal/launch-intent.ts).
+          execute: (command) =>
+            executeHeldLaunch(command, {
+              held: () => (getNode(id) as CanvasNode | undefined)?.data.launchIntent,
+              sessionHost: !!sessionHost,
+              source: session.source,
+              hostPlatform: () => hostPlatformFor(api),
+              executeLaunch: api.pty.executeLaunch
+                ? (request) => api.pty.executeLaunch!(id, request)
+                : undefined,
+              newLaunchId: uuid
+            })
         })
         const writeWhenShellReady = (cmd: string): void => {
           whenShellSettled(() => {

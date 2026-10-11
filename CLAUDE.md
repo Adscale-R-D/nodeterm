@@ -39,6 +39,11 @@ means — and what you may assume when writing a feature — is three tiers, not
   platform where they cannot work they must either use a platform-appropriate mechanism or be
   clearly gated off — a feature that throws `EACCES`/`EPERM` on Windows because nobody checked is a
   bug, not an accepted limitation.
+- **Run configurations (launch.json run node) are gated off for process launches on a Windows core**
+  — the launcher is a POSIX `sh` script stopped and hot-reloaded by POSIX signals. The core's
+  `gateEntriesForPlatform` marks those entries unsupported with `RUN_WINDOWS_REASON` (browser
+  configs and browser-only compounds still run), and the add menu / Dock / palette disable the row
+  from the core's own platform (`useCoreIsWindows`). A pwsh launcher is the follow-up.
 - **New code is platform-neutral by default.** Do not hardcode POSIX assumptions. Publish files
   through `renameAtomic`/`writeFileAtomic` (`src/core/fs-atomic.ts`), not a bare `fs.rename` — the
   guard test (`fs-atomic.guard.test.ts`) enforces this. Resolve path separators / absolute-path
@@ -7381,6 +7386,11 @@ the Settings section and ShortcutsPanel start disagreeing about what a chord mea
        layer (`ok:false` changes no facts). Staleness from the status poll likewise needs **two
        consecutive** failed reads (`WORKTREE_STALE_STRIKES`), and the streak is scoped per project
        so a there-and-back tab switch cannot forget it.
+  - **Path identity** — compare worktree/repo paths through `worktreePathKey` (`shared/worktree.ts`),
+    never by string: git prints `C:/r/wt` on Windows while a typed binding says `C:\r\wt` or `c:/…`.
+    The key folds separators + case only for a Windows-SHAPED path (backslash, drive letter, UNC);
+    a POSIX path keeps exact case — keyed on shape because this module runs in the renderer, whose
+    platform is not the core's. The removal guard also refuses a bare drive root.
   - **Destructive safety** — `createdByApp` gates removal: nodeterm deletes only worktrees it
     created; one the user merely **adopted** unbinds by default, and deleting its directory is an
     explicit opt-in that **defaults to off** (its branch is kept either way).

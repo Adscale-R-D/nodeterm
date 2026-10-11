@@ -17,7 +17,8 @@ import {
   type PtyCreateResult,
   type PtyRecycleTarget,
   type Settings,
-  type TmuxStatus
+  type TmuxStatus,
+  type LaunchIntentExecutionResult
 } from '../shared/types'
 import { bundledTmuxPath, findCommand, findFixedTmux, tmuxInstall } from './tmux-hint'
 import { hookServer, PERM_WAIT_SECS_DEFAULT } from './agents/hook-server'
@@ -213,9 +214,17 @@ import {
   sessionHostMessageEnvelope,
   sessionHostSendKeys,
   sessionHostSupported,
+  sessionHostExecuteLaunch,
   SessionHostProtocolCompatibilityError
 } from './session-host-backend'
 import type { SessionHostPty } from './session-host-pty'
+import type { SessionHostShellDialect } from '../session-host/protocol'
+import {
+  executeLaunchIntent,
+  readPromptFileBounded,
+  windowsLaunchDialectForShell,
+  type LaunchIntentDeps
+} from './launch-intent-execute'
 import { NativeWindowsPane } from './native-windows-pane'
 import type { ProjectSpawnOverrides, ProjectSpawnOverridesReader } from './project-spawn-overrides'
 
@@ -863,6 +872,17 @@ interface Session {
    *  so every path that would talk to the tmux socket asks this first. */
   zellij?: boolean
   sessionHost?: boolean
+  /**
+   * Session-host only (`pty:execute-launch`, launch-intent-execute.ts). The dialect the HOST
+   * reported for this exact generation — never re-derived here, because a warm attach after an app
+   * restart must answer with what the live shell actually is, not with today's settings. Absent on
+   * every other backend, on POSIX, and for a generation spawned before the host recorded one.
+   */
+  launchDialect?: SessionHostShellDialect
+  /** The agent this session was spawned for and the PATH it was spawned with: the trusted
+   *  expected owner and the executable search path for an `executeLaunch`. Session-host only. */
+  launchAgentId?: string
+  launchPath?: string
   /**
    * A live link watcher's OWN tmux client (`attach-session -E -f ignore-size,read-only`, spawned by
    * `joinAsWatcher` when no Session was held). Never indexed, and invisible to the persistKey lookups
@@ -2074,6 +2094,53 @@ export class PtyManager {
     platform().handle(IPC.ptyTerminateForeground, (persistKey: string, expectedAgentId?: string) =>
       this.terminateForeground(persistKey, expectedAgentId)
     )
+    platform().handle(IPC.ptyExecuteLaunch, (persistKey: unknown, request: unknown) =>
+      this.executeLaunch(persistKey, request)
+    )
+  }
+
+  /** Test seam: replace any of `executeLaunch`'s machine-reading dependencies. */
+  private launchIntentDepsOverride: Partial<LaunchIntentDeps> = {}
+
+  private launchIntentDeps(): LaunchIntentDeps {
+    return {
+      platform: this.runtimePlatform,
+      customAgents: () => this.getSettings().customAgents ?? [],
+      // Dynamic: both probe modules import from this file, so a static import would be a cycle.
+      sharedIdentityAvailable: async () =>
+        (await (await import('./codex-identity-caps')).codexIdentityCaps()).shared === true,
+      codexCaps: async () => (await import('./codex-cli')).codexCliCaps(),
+      exists: (candidate) => fs.existsSync(candidate),
+      systemRoot: process.env.SystemRoot,
+      readPromptFile: readPromptFileBounded,
+      execute: sessionHostExecuteLaunch,
+      isProtocolIncompatible: (error) => error instanceof SessionHostProtocolCompatibilityError,
+      ...this.launchIntentDepsOverride
+    }
+  }
+
+  /**
+   * `pty:execute-launch`: encode a semantic agent launch for a node's live local Windows
+   * session-host pane and deliver it through the host's exactly-once ledger. Every other session
+   * answers `unsupported-shell` (nothing read, nothing typed) — see launch-intent-execute.ts.
+   */
+  async executeLaunch(persistKey: unknown, request: unknown): Promise<LaunchIntentExecutionResult> {
+    const live = typeof persistKey === 'string' ? this.liveSessionForNode(persistKey) : undefined
+    const s = live?.[1]
+    return executeLaunchIntent(
+      s && typeof persistKey === 'string'
+        ? {
+            name: sessionName(persistKey),
+            sessionHost: !!s.sessionHost,
+            remote: !!s.sshRemote,
+            launchDialect: s.launchDialect,
+            agentId: s.launchAgentId,
+            pathValue: s.launchPath
+          }
+        : undefined,
+      request,
+      this.launchIntentDeps()
+    )
   }
 
   /** Discover the backend for NEW local terminals without starting a session host. */
@@ -2792,6 +2859,9 @@ export class PtyManager {
         }
         fresh = info.fresh
         screen = info.screen
+        // The host's own word on this generation's parser (a warm attach reports the dialect the
+        // shell was spawned with, whatever today's settings say). See `Session.launchDialect`.
+        if (info.launchDialect) spawned.launchDialect = info.launchDialect
         // Session-host registration is provisional until the exact ready barrier above succeeds.
         // Only now is an owner's resurrection real enough to remove a prior deletion tombstone.
         if (spawned.indexKey) this.tombstones.delete(spawned.indexKey)
@@ -4275,6 +4345,9 @@ export class PtyManager {
     }
 
     let proc: pty.IPty
+    const hostLaunchDialect = useSessionHost
+      ? windowsLaunchDialectForShell(localSessionShell, this.runtimePlatform)
+      : undefined
     if (useSessionHost) {
       // Cast to the small `IPty` subset this file actually touches — see `SessionHostPty`'s own
       // doc comment for exactly what it implements and why that is enough. Its constructor kicks
@@ -4303,7 +4376,11 @@ export class PtyManager {
               args: localSessionArgs,
               env,
               cols: options.cols,
-              rows: options.rows
+              rows: options.rows,
+              // Win32 + a Windows-native shell only (pwsh / powershell / cmd): the host then accepts
+              // a trusted `executeLaunch` for this generation. Absent everywhere else, so a POSIX
+              // or Git Bash/WSL spawn request is byte-identical to before.
+              ...(hostLaunchDialect ? { launchDialect: hostLaunchDialect } : {})
             },
             settings.tmuxScrollback
           )) as unknown as pty.IPty
@@ -4405,6 +4482,8 @@ export class PtyManager {
       pausedBy: new Set<string>(),
       accountFallback,
       sessionHost: useSessionHost,
+      ...(useSessionHost && options.agentId ? { launchAgentId: options.agentId } : {}),
+      ...(useSessionHost && env[envPathKey(env)] ? { launchPath: env[envPathKey(env)] } : {}),
       ...(isWatcherCreate(options) ? { watcherClient: true } : {}),
       ...(useLocalZellij ? { zellij: true } : {})
     }

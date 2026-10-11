@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { IPC } from '../shared/ipc'
 import { initPlatform, resetPlatformForTests } from './platform'
 import { fakePlatform, type FakePlatform } from './platform-fake'
+import { DEFAULT_SETTINGS } from '../shared/types'
 
 const backend = vi.hoisted(() => ({
   supported: vi.fn(() => true),
@@ -238,6 +239,66 @@ describe('PtyManager session-host contracts', () => {
       expect(spawn.shell).toBe(process.env.SHELL || 'bash')
     }
     expect(spawn.args).toEqual([])
+  })
+
+  it('sends no launch dialect from a POSIX core, so its spawn request is unchanged', async () => {
+    const { PtyManager } = await import('./pty-manager')
+    for (const runtimePlatform of ['darwin', 'linux'] as const) {
+      backend.create.mockClear()
+      const m = new PtyManager({ runtimePlatform })
+      ;(m as unknown as { getSettings: () => unknown }).getSettings = () => ({
+        ...DEFAULT_SETTINGS,
+        defaultShell: 'pwsh'
+      })
+      m.createDetached({ cols: 80, rows: 24, persistKey: `node-${runtimePlatform}` }, { onData: () => {}, onExit: () => {} })
+      const spawn = backend.create.mock.calls[0][1] as Record<string, unknown>
+      expect('launchDialect' in spawn).toBe(false)
+      await m.killAll()
+    }
+  })
+
+  const PS = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'
+
+  it('records the Windows-native dialect at spawn and keeps the HOST-reported one for execute-launch', async () => {
+    const { PtyManager } = await import('./pty-manager')
+    // The host answers with its own record of the generation's parser (a warm attach reports what
+    // the shell WAS spawned as) — that, not the spawn request, is what the launch is encoded for.
+    backend.create.mockImplementation(() =>
+      fakeSessionHostPty(Promise.resolve({ fresh: true, launchDialect: 'cmd' }) as never)
+    )
+    const m = new PtyManager({ runtimePlatform: 'win32' })
+    manager = m
+    ;(m as unknown as { getSettings: () => unknown }).getSettings = () => ({
+      ...DEFAULT_SETTINGS,
+      defaultShell: 'C:\\Program Files\\PowerShell\\7\\pwsh.exe'
+    })
+    m.registerIpc()
+    await host.handlers[IPC.ptyCreate](7, { cols: 80, rows: 24, persistKey: 'node-win', agentId: 'claude' })
+    const spawn = backend.create.mock.calls[0][1] as { launchDialect?: string }
+    expect(spawn.launchDialect).toBe('pwsh')
+
+    const execute = vi.fn(async () => ({ status: 'executed' as const }))
+    ;(m as unknown as { launchIntentDepsOverride: Record<string, unknown> }).launchIntentDepsOverride = {
+      customAgents: () => [],
+      sharedIdentityAvailable: async () => false,
+      codexCaps: async () => ({ approvalValues: null, noDaemon: null }),
+      exists: (c: string) => c === 'C:\\Tools\\claude.exe' || c === PS,
+      systemRoot: 'C:\\Windows',
+      execute
+    }
+    // The spawn PATH recorded here is this POSIX test host's; point it at a Windows directory.
+    ;(m as unknown as { sessions: Map<string, { launchPath?: string }> }).sessions.forEach((s) => {
+      s.launchPath = 'C:\\Tools'
+    })
+    const result = await host.handlers[IPC.ptyExecuteLaunch]('node-win', {
+      launchId: '123e4567-e89b-42d3-a456-426614174000',
+      intent: { kind: 'agent', action: 'start', agentId: 'claude', prompt: "it's" }
+    })
+    expect(result).toEqual({ ok: true })
+    // Encoded for `cmd` (the host's word), not `pwsh` (the request): the ASCII-only wrapper line.
+    const plan = (execute.mock.calls[0] as unknown[])[2] as { command: string }
+    expect(plan.command.startsWith(`"${PS}" -NoLogo -NoProfile -EncodedCommand `)).toBe(true)
+    expect(plan.command).not.toContain("it's")
   })
 
   it('fails a create closed, parks racing followers, and publishes only the recovered generation', async () => {

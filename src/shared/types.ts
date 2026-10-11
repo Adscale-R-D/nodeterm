@@ -116,6 +116,30 @@ export type LaunchIntentExecutionResult =
   | { ok: true }
   | { ok: false; reason: LaunchIntentFailureReason; message: string }
 
+/**
+ * `pty:execute-launch` request (`PtyApi.executeLaunch`). `launchId` is a fresh UUID v4 per
+ * delivery attempt — the session host's exactly-once ledger key. `promptFile` is the
+ * canvas-control `--prompt-file` path: the core reads it (the file is on the core's machine) and
+ * fills `intent.prompt`, so no shell ever has to expand `$(cat …)`. Only legal on a `start`
+ * intent that carries no `prompt` of its own.
+ */
+export interface LaunchIntentRequest {
+  launchId: string
+  intent: AgentLaunchIntent
+  promptFile?: string
+}
+
+/**
+ * A semantic launch held beside a terminal node's legacy typed line (`data.launchIntent`). Bound
+ * to the EXACT `command` it was assembled with: a writer delivering any other line (a manual Run
+ * now of an edited command, a resume) never uses it. Live node data only — never serialized.
+ */
+export interface HeldLaunchIntent {
+  command: string
+  intent: AgentLaunchIntent
+  promptFile?: string
+}
+
 export interface PtyCreateOptions {
   shell?: string
   /** Arguments for `shell` when it is run as the session program (e.g. ssh args). */
@@ -1347,6 +1371,14 @@ export interface PtyApi {
    *  it. `null` is "could not read", never evidence that the pane is free (see `isAgentPane`'s
    *  three-valued verdict, which is what consumers should decide on). */
   paneOwner(persistKey: string): Promise<PaneOwner | null>
+  /**
+   * Execute a semantic agent launch in a node's live LOCAL Windows session-host pane: the core
+   * encodes it for the pane's own shell (pwsh / Windows PowerShell / cmd) and the host types it
+   * exactly once. Every other session (tmux, SSH, Zellij, plain shell, POSIX core, Git Bash/WSL)
+   * answers `unsupported-shell`, and the caller keeps its legacy typed line. Optional: surfaces
+   * that cannot serve it (relay tabs, test fakes) simply omit it — the caller's answer is the same.
+   */
+  executeLaunch?(persistKey: string, request: LaunchIntentRequest): Promise<LaunchIntentExecutionResult>
   /** Terminate the foreground process group in a node's pane. Returns false when the pane/process
    *  cannot be safely identified; it never kills the pane's login shell. When `expectedAgentId` is
    *  given, the kill happens only if that harness actually owns the foreground group (argv-verified)

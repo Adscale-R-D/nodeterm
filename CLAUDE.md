@@ -39,6 +39,14 @@ means — and what you may assume when writing a feature — is three tiers, not
   platform where they cannot work they must either use a platform-appropriate mechanism or be
   clearly gated off — a feature that throws `EACCES`/`EPERM` on Windows because nobody checked is a
   bug, not an accepted limitation.
+- **Agent launch lines are POSIX source; a Windows-native pane never gets one typed if it can
+  be avoided.** A prompt-bearing builtin agent node carries `data.launchIntent` (bound to its exact
+  `initialCommand`, never serialized); on a local win32 session-host pane whose host recorded a
+  `pwsh`/`windows-powershell`/`cmd` dialect, the launch writer executes it via `pty:execute-launch`
+  (`core/launch-intent-execute.ts` → `prepareAgentLaunch` → `sessionHostExecuteLaunch`). Every
+  other pane answers `unsupported-shell` and keeps the typed line byte-identical. Only a
+  pre-delivery refusal may fall back to typing; `delivery-failed` never does. Details:
+  docs/windows-session-host.md, "Agent launches in a Windows-native shell".
 - **New code is platform-neutral by default.** Do not hardcode POSIX assumptions. Publish files
   through `renameAtomic`/`writeFileAtomic` (`src/core/fs-atomic.ts`), not a bare `fs.rename` — the
   guard test (`fs-atomic.guard.test.ts`) enforces this. Resolve path separators / absolute-path

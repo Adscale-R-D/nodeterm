@@ -499,6 +499,12 @@ anything else. Board-level fields survive every transform — `pullLinks` is one
   arguments and lines above cmd's limit fail explicitly. Keep stdin direct: PowerShell's text
   pipeline changes Unicode and line endings under Windows PowerShell 5.1.
 
+- **Closing the window on Windows hides it to the tray (background mode), it does not quit.** The
+  relay host, hook server and notifications must outlive the window there as they do on macOS. Any
+  new app-initiated quit (updater-style) must set `quitting` before `app.quit()`, or the hidden
+  window's close handler turns the quit back into a hide. Every new raise (`show`/`focus`) needs a
+  user action and an entry in `window-raise.guard.test.ts`.
+
 - **The phone reaches a Windows desktop through the relay only.** Everything the iOS app sends over
   SSH is POSIX sh plus tmux, and Windows OpenSSH hands out `cmd.exe`, so Windows pairing installs no
   SSH key and requires remote access instead of an SSH server (`src/shared/pairing-gate.ts`). Do not

@@ -3275,6 +3275,7 @@ export function TerminalNode({
                       abs: target.abs,
                       dir: target.dir,
                       mac: isMac,
+                      windows: isWindowsPlatform(),
                       systemOpen: systemOpenRefusal(shellCtx(), target.abs) === null
                     }),
                 ev.clientX,

@@ -21,6 +21,7 @@ import { defaultScmScope, type ScmScope } from '@shared/scm-scope'
 import { chipFor, effectiveBindings } from '../lib/keybindingOverrides'
 import { matchesShortcut } from '@shared/shortcut'
 import { isMacPlatform } from '@shared/platform-utils'
+import { localRevealPath, osRevealLabel } from '../lib/osReveal'
 import { gitStatusColor } from '../lib/gitStatusColors'
 
 export interface SourceControlPanelProps {
@@ -781,11 +782,11 @@ export function SourceControlPanel({
               <button
                 className="ctx-item"
                 onClick={() => {
-                  window.nodeTerminal.shell.reveal(`${cwd}/${fileMenu.path}`)
+                  window.nodeTerminal.shell.reveal(localRevealPath(cwd, fileMenu.path))
                   setFileMenu(null)
                 }}
               >
-                Reveal in Finder
+                {osRevealLabel()}
               </button>
             </div>
           </>,

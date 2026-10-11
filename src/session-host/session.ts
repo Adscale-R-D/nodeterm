@@ -2,7 +2,9 @@ import type { Socket } from 'net'
 import { createHash, randomUUID } from 'crypto'
 import * as pty from 'node-pty'
 import { TerminalEmulator } from './terminal-emulator'
+import { CwdReportScanner } from './cwd-report'
 import type {
+  CaptureVisibleResult,
   ExecuteLaunchResult,
   SessionHostShellDialect,
   SessionHostSpawnOptions
@@ -91,6 +93,7 @@ interface AttachmentState {
   geometry?: Geometry
   explicitPaused: boolean
   subscribed: boolean
+  watching: boolean
 }
 
 /** A warm attach must temporarily claim geometry and (on reconnect) restore its explicit pause
@@ -148,6 +151,14 @@ export class HostSession {
   /** Each app connection contributes one componentwise geometry claim. The effective PTY size is
    * the minimum across live claims so every viewer fits; removing the smallest claim grows it. */
   private readonly geometryClaims = new Map<Socket, Geometry>()
+  /** Subscribed connections attached in `watch` mode (`watch-attach` feature): they receive output
+   *  but hold NO geometry claim, so a live link / relay viewer can never size the pty. A claim-
+   *  carrying attach on the same connection takes it out of this set again. */
+  private readonly watchers = new Set<Socket>()
+  /** The cwd the pane last REPORTED in its output (OSC 7 / 9;9 / 633 — see cwd-report.ts). Null
+   *  until one arrives; deliberately never seeded with the spawn cwd. */
+  private reportedCwd: string | null = null
+  private readonly cwdScanner = new CwdReportScanner()
   /** A detach/close increments the socket epoch before clearing state. A delayed prepare/rollback
    * from the prior epoch can then observe cancellation instead of resurrecting a ghost socket. */
   private readonly attachmentEpochs = new WeakMap<Socket, number>()
@@ -262,6 +273,29 @@ export class HostSession {
     return settled
   }
 
+  /** Scan one PTY-output chunk for a cwd report. Synchronous and independent of the emulator queue:
+   *  it is called for every chunk, including private launch echo (a cwd is not launch material). */
+  noteOutput(data: string): void {
+    const cwd = this.cwdScanner.push(data)
+    if (cwd !== undefined) this.reportedCwd = cwd
+  }
+
+  /** `paneCwd`: the last REPORTED cwd, or null when the pane never reported one. */
+  get paneCwd(): string | null {
+    return this.reportedCwd
+  }
+
+  /** Is this connection subscribed in watch mode (no geometry claim)? */
+  isWatching(socket: Socket): boolean {
+    return this.watchers.has(socket)
+  }
+
+  /** The visible-screen keyframe, behind the same output barrier as `serialize`. */
+  async captureVisible(): Promise<CaptureVisibleResult> {
+    await this.outputTail
+    return this.term.captureVisible()
+  }
+
   /** Wait until every PTY-output chunk observed before this call has reached xterm. */
   settleOutput(): Promise<void> {
     return this.outputTail
@@ -312,16 +346,35 @@ export class HostSession {
     rows: number,
     paused: boolean
   ): Promise<PreparedHostAttachment> {
+    return this.stageAttachment(socket, normalizedGeometry(cols, rows), paused)
+  }
+
+  /** `watch-attach`: the same transaction with NO geometry claim. A connection that held one gives
+   *  it up (its last voting subscriber left), and the pty's size is re-derived from the remaining
+   *  claims — with none left it keeps the size it has. Never spawns: callers reach this only for an
+   *  existing generation. Any explicit pause the connection held is returned. */
+  prepareWatchAttachment(socket: Socket): Promise<PreparedHostAttachment> {
+    // Never paused: a viewer holds no flow ticket on the shared pty (see `pauseFor`).
+    return this.stageAttachment(socket, null, false)
+  }
+
+  private async stageAttachment(
+    socket: Socket,
+    claim: Geometry | null,
+    paused: boolean
+  ): Promise<PreparedHostAttachment> {
     const epoch = (this.attachmentEpochs.get(socket) ?? 0) + 1
     this.attachmentEpochs.set(socket, epoch)
     const previous: AttachmentState = {
       geometry: this.geometryClaims.get(socket),
       explicitPaused: this.explicitPauseOwners.has(socket),
-      subscribed: this.subscribers.has(socket)
+      subscribed: this.subscribers.has(socket),
+      watching: this.watchers.has(socket)
     }
     this.setSocketPauseOwner(this.explicitPauseOwners, socket, paused)
     try {
-      await this.setGeometryClaim(socket, cols, rows)
+      if (claim) await this.setGeometryClaim(socket, claim.cols, claim.rows)
+      else if (this.geometryClaims.delete(socket)) await this.applyEffectiveGeometry()
     } catch (error) {
       await this.restoreAttachment(socket, previous, epoch)
       throw error
@@ -335,6 +388,8 @@ export class HostSession {
         finished = true
         if (this.attachmentEpochs.get(socket) !== epoch || socket.destroyed) return false
         this.subscribers.add(socket)
+        if (claim) this.watchers.delete(socket)
+        else this.watchers.add(socket)
         // A response written before this attach may already have filled the socket. The new
         // session must inherit that socket-wide transport ticket before any live frame can add to
         // the same queue.
@@ -368,11 +423,15 @@ export class HostSession {
   /** Update only the requesting subscriber's geometry claim. */
   async resizeFor(socket: Socket, cols: number, rows: number): Promise<void> {
     if (!this.subscribers.has(socket)) return
+    // A watch-mode connection has no claim to update, and must never acquire one by resizing.
+    if (this.watchers.has(socket)) throw new Error('a watch attachment cannot resize the terminal')
     await this.setGeometryClaim(socket, cols, rows)
   }
 
   pauseFor(socket: Socket): void {
     if (!this.subscribers.has(socket)) return
+    // A viewer never slows the owner's terminal: a watch-mode connection takes no pause ticket.
+    if (this.watchers.has(socket)) return
     this.setSocketPauseOwner(this.explicitPauseOwners, socket, true)
   }
 
@@ -396,6 +455,7 @@ export class HostSession {
     this.attachmentEpochs.set(socket, (this.attachmentEpochs.get(socket) ?? 0) + 1)
     const wasPaused = this.hasPauseOwner()
     this.subscribers.delete(socket)
+    this.watchers.delete(socket)
     this.explicitPauseOwners.delete(socket)
     this.transportPauseOwners.delete(socket)
     this.reconcileProcFlow(wasPaused)
@@ -426,6 +486,7 @@ export class HostSession {
     this.transportPauseOwners.clear()
     this.emulatorPauseOwner = false
     this.geometryClaims.clear()
+    this.watchers.clear()
     this.term.dispose()
   }
 
@@ -676,6 +737,8 @@ export class HostSession {
     else this.explicitPauseOwners.delete(socket)
     if (previous.subscribed) this.subscribers.add(socket)
     else this.subscribers.delete(socket)
+    if (previous.watching) this.watchers.add(socket)
+    else this.watchers.delete(socket)
     this.reconcileProcFlow(wasPaused)
 
     if (previous.geometry) this.geometryClaims.set(socket, previous.geometry)

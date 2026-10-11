@@ -29,6 +29,8 @@ import {
   type HasSessionResult,
   type PaneCommandResult,
   type CaptureResult,
+  type CaptureVisibleResult,
+  type PaneCwdResult,
   type KillSessionResult,
   type ListSessionsResult,
   type ShutdownResult
@@ -342,6 +344,10 @@ async function main(): Promise<void> {
    *  session and exit (issue #829): the command is destructive, so an app build that never asked
    *  for it can never trigger it by accident. */
   const shutdownSockets = new WeakSet<net.Socket>()
+  /** Connections that negotiated `watch-attach`: only these may subscribe without a geometry claim.
+   *  `captureVisible` / `paneCwd` are plain reads and need no per-socket gate — a client that did not
+   *  negotiate them never sends them, and an older host answers `unknown command`. */
+  const watchSockets = new WeakSet<net.Socket>()
   /** Set while a `shutdown` is ending sessions. New sessions (attach / attachExisting / launches)
    *  are refused for its duration; cleared again only if the shutdown could not end everything. */
   let shuttingDown = false
@@ -379,6 +385,7 @@ async function main(): Promise<void> {
       : []
     if (features.includes('geometry')) geometrySockets.add(socket)
     if (features.includes('shutdown')) shutdownSockets.add(socket)
+    if (features.includes('watch-attach')) watchSockets.add(socket)
     return features.length > 0
       ? { protocolVersion: currentProtocolVersion(), features }
       : { protocolVersion: currentProtocolVersion() }
@@ -464,6 +471,7 @@ async function main(): Promise<void> {
       // node-pty may flush a queued data callback after its exit callback. Once endSession has
       // disposed the emulator and broadcast exit, no data may touch or appear after that boundary.
       if (session.exited) return
+      session.noteOutput(data)
       // Trusted launch input is typed through the same ConPTY and therefore echoed by the shell.
       // While HostSession verifies that echo, keep the entire chunk out of both renderer push
       // frames and the reconstructable screen so executable/argv/prompt material stays core-only.
@@ -644,12 +652,13 @@ async function main(): Promise<void> {
       if (req.expectedGeneration && req.expectedGeneration !== existing.generation) {
         throw new Error(`session '${req.name}' was replaced by a different generation`)
       }
-      const attachment = await existing.prepareExistingAttachment(
-        socket,
-        req.paused === true,
-        req.cols,
-        req.rows
-      )
+      if (req.watch === true && !watchSockets.has(socket)) {
+        throw new Error('watch attach requires the watch-attach feature negotiated at hello')
+      }
+      const attachment =
+        req.watch === true
+          ? await existing.prepareWatchAttachment(socket)
+          : await existing.prepareExistingAttachment(socket, req.paused === true, req.cols, req.rows)
       try {
         const screen = await existing.serialize()
         if (!attachment.isCurrent()) {
@@ -662,7 +671,10 @@ async function main(): Promise<void> {
           return RETRY_SESSION_GENERATION
         }
         if (!attachment.commit()) throw new Error('attachExisting cancelled before activation')
-        log(`attach-existing name=${req.name} subscribers=${existing.subscribers.size}`)
+        log(
+          `attach-existing name=${req.name} subscribers=${existing.subscribers.size}` +
+            (req.watch === true ? ' watch' : '')
+        )
         return {
           fresh: false,
           screen: screen || undefined,
@@ -942,6 +954,8 @@ async function main(): Promise<void> {
         const s = sessions.get(req.name)
         if (!s || s.exited) return { ok: false, error: 'no such session' }
         if (!s.subscribers.has(socket)) return { ok: false, error: 'not attached to session' }
+        // A watch attachment (live link / relay viewer) is read-only end to end.
+        if (s.isWatching(socket)) return { ok: false, error: 'watch attachment is read-only' }
         s.proc.write(req.data)
         return { ok: true }
       }
@@ -949,6 +963,8 @@ async function main(): Promise<void> {
         const s = sessions.get(req.name)
         if (!s || s.exited) return { ok: false, error: 'no such session' }
         if (!s.subscribers.has(socket)) return { ok: false, error: 'not attached to session' }
+        // No claim to update, and a viewer must never acquire one (`watch-attach`).
+        if (s.isWatching(socket)) return { ok: false, error: 'watch attachment cannot resize' }
         await s.resizeFor(socket, req.cols, req.rows)
         return { ok: true }
       }
@@ -1001,6 +1017,18 @@ async function main(): Promise<void> {
           return { ok: true, result: { text: '' } satisfies CaptureResult }
         }
         return { ok: true, result: { text } satisfies CaptureResult }
+      }
+      case 'captureVisible': {
+        const s = sessions.get(req.name)
+        if (!s || s.exited) return { ok: false, error: 'no such session' }
+        const result = await s.captureVisible()
+        if (s.exited || sessions.get(req.name) !== s) return { ok: false, error: 'no such session' }
+        return { ok: true, result: result satisfies CaptureVisibleResult }
+      }
+      case 'paneCwd': {
+        const s = sessions.get(req.name)
+        const cwd = s && !s.exited ? s.paneCwd : null
+        return { ok: true, result: { cwd } satisfies PaneCwdResult }
       }
       case 'executeLaunch': {
         if (clientProtocolVersion === 1) {

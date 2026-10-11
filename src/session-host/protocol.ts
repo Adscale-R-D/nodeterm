@@ -87,6 +87,11 @@ export type SessionHostRequest =
       cols?: number
       rows?: number
       paused?: boolean
+      /** `watch-attach` feature only: subscribe this connection WITHOUT a geometry claim (a live
+       * link viewer / relay viewer's read-only view). Carries no cols/rows; never spawns. On a
+       * connection already attached it WITHDRAWS that connection's claim (its last voting
+       * subscriber left). A later claim-carrying attach upgrades it again. */
+      watch?: boolean
     }
   | { id: number; cmd: 'hasSession'; name: string }
   | { id: number; cmd: 'write'; name: string; data: string }
@@ -99,6 +104,12 @@ export type SessionHostRequest =
   | { id: number; cmd: 'messagePasteReadyV1'; name: string }
   | { id: number; cmd: 'messageEnvelopeV1'; name: string; envelope: string; expected: PaneOwner }
   | { id: number; cmd: 'capture'; name: string; full: boolean }
+  /** `captureVisible` feature only: the VISIBLE rows (no history) plus cursor + active buffer — a
+   *  live link's keyframe. Never sent to a host that did not advertise it. */
+  | { id: number; cmd: 'captureVisible'; name: string }
+  /** `paneCwd` feature only: the last cwd the pane REPORTED (OSC 7 / 9;9 / 633), never the spawn
+   *  cwd. */
+  | { id: number; cmd: 'paneCwd'; name: string }
   | {
       id: number
       cmd: 'executeLaunch'
@@ -205,8 +216,14 @@ export interface AttachResult {
   geometry?: { cols: number; rows: number }
 }
 /** Additive, independently negotiated capabilities (see the `hello` request). */
-export type SessionHostFeature = 'geometry' | 'shutdown'
-export const SESSION_HOST_FEATURES: readonly SessionHostFeature[] = ['geometry', 'shutdown']
+export type SessionHostFeature = 'geometry' | 'shutdown' | 'watch-attach' | 'captureVisible' | 'paneCwd'
+export const SESSION_HOST_FEATURES: readonly SessionHostFeature[] = [
+  'geometry',
+  'shutdown',
+  'watch-attach',
+  'captureVisible',
+  'paneCwd'
+]
 
 /** `result` of a successful `shutdown`: the session names whose process trees were ended. The
  *  host exits right after this reply is flushed. A shutdown that could not confirm every kill
@@ -240,6 +257,17 @@ export interface PaneCommandResult {
 }
 export interface CaptureResult {
   text: string
+}
+/** `result` of `captureVisible`. `screen` is one `\n`-terminated line per visible row with SGR (the
+ *  shape `capture-pane -p -e` prints), '' for a session that never painted; `cursor` is 0-based and
+ *  viewport-relative; `altScreen` is the emulator's ACTIVE buffer. A missing session is an error. */
+export interface CaptureVisibleResult {
+  screen: string
+  cursor: { x: number; y: number } | null
+  altScreen: boolean
+}
+export interface PaneCwdResult {
+  cwd: string | null
 }
 export interface ListSessionsResult {
   names: string[]

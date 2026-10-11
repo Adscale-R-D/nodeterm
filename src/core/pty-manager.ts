@@ -165,7 +165,7 @@ import { NODE_ID_MAX, isSafeNodeId, isSafeRemoteHome } from './remote-safety'
 import { remoteAccountScopeEnvArgs } from './remote-account-env'
 import { presenceHub } from './presence/hub'
 import {
-  codexLauncherDir,
+  codexLauncherPathDir,
   forgetCodexThreadIdentitiesForNode,
   installCodexLauncher
 } from './codex-identity-proxy'
@@ -3806,14 +3806,19 @@ export class PtyManager {
     // managed launcher by NAME, so its directory goes first on THIS session's PATH only. A plain
     // terminal, and every other agent, sees the PATH it always saw. The launcher itself falls back
     // to the bare CLI, so a session that gets the PATH but no identity is still a working session.
-    if (options.agentId && hasSharedIdentity(options.agentId as AgentId) && !options.sshRemote) {
-      // Windows exposes the inherited variable as `Path`; reading only the POSIX spelling
+    // `codexLauncherPathDir()` is null on Windows, where shared identity is gated off (phase 1).
+    const launcherDir =
+      options.agentId && hasSharedIdentity(options.agentId as AgentId) && !options.sshRemote
+        ? codexLauncherPathDir()
+        : null
+    if (launcherDir) {
+      // (Path-key aware for when Windows support lands — phase 2.) Windows exposes the inherited variable as `Path`; reading only the POSIX spelling
       // silently drops the user's PATH and leaves the managed launcher unable to find `codex`.
       // Prepend onto the key the environment ALREADY uses: a spread of Windows' `process.env` spells
       // it `Path`, and adding a second `PATH` beside it hands the child two case-insensitively equal
       // variables — which one it reads is up to the child's runtime.
       const pathKey = envPathKey(env)
-      env[pathKey] = `${codexLauncherDir()}${path.delimiter}${env[pathKey] ?? ''}`
+      env[pathKey] = `${launcherDir}${path.delimiter}${env[pathKey] ?? ''}`
     }
 
     // Managed Claude account: the whole session runs under the account's private config

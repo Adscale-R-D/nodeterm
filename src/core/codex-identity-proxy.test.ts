@@ -7,6 +7,7 @@ import {
   accountScope,
   bindCodexThreadIdentity,
   codexLauncherDir,
+  codexLauncherPathDir,
   codexThreadIdentityHasLiveConflict,
   forgetCodexThreadIdentitiesForNode,
   codexThreadIdentityRoot,
@@ -105,6 +106,12 @@ describe('codex thread identity store', () => {
     // server keeps its state, and nothing behind CorePlatform can be swapped for it.
     expect(codexThreadIdentityRoot()).toBe(path.join(dir, 'codex-thread-nodes'))
     expect(codexLauncherDir()).toBe(path.join(dir, 'codex-bin'))
+  })
+
+  it('puts the launcher dir on a session PATH everywhere but Windows (gated off there, phase 1)', () => {
+    expect(codexLauncherPathDir('darwin')).toBe(path.join(dir, 'codex-bin'))
+    expect(codexLauncherPathDir('linux')).toBe(path.join(dir, 'codex-bin'))
+    expect(codexLauncherPathDir('win32')).toBeNull()
   })
 
   it('round-trips a record and resolves its owning node', () => {

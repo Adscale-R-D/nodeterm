@@ -3691,6 +3691,10 @@ export interface CodexIdentityCaps {
    *  flag in its help and no such runtime, so it can never serve a shared identity. Unknown ⇒
    *  false ⇒ plain codex. */
   appServer: boolean
+  /** Why shared identity is off by DESIGN rather than by probe, when it is. `unsupported-platform`
+   *  = a Windows core (phase 1: not wired there yet; every node runs its own codex). Absent on
+   *  every other answer — an older core never sends it. */
+  unavailableReason?: 'unsupported-platform'
 }
 
 /** The answer before the probe has run, and the one the Server Edition gives on purpose. */

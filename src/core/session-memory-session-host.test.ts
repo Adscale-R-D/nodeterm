@@ -8,7 +8,7 @@ import {
   WIN32_PROCESS_TABLE_SCRIPT,
   type ProcEntry
 } from './session-memory'
-import { cimRows, powershellArgs, POWERSHELL_EXE } from './win32-powershell'
+import { cimRows, powershellArgs, powershellExe } from './win32-powershell'
 import type { SessionHostListing } from './session-host-client'
 import { sessionName } from './tmux-naming'
 
@@ -65,7 +65,7 @@ describe('parseWin32ProcessTable', () => {
       return '{"ProcessId":7,"ParentProcessId":1,"WorkingSetSize":1024}'
     })
     expect(table).toEqual([P(7, 1, 1)])
-    expect(calls).toEqual([{ bin: POWERSHELL_EXE, args: powershellArgs(WIN32_PROCESS_TABLE_SCRIPT) }])
+    expect(calls).toEqual([{ bin: powershellExe(), args: powershellArgs(WIN32_PROCESS_TABLE_SCRIPT) }])
     await expect(
       win32ProcessTable(async () => {
         throw new Error('exit 1')
@@ -109,7 +109,7 @@ describe('collectSessionHostMemory', () => {
         return JSON.stringify([{ ProcessId: 100, ParentProcessId: 1, WorkingSetSize: 4 * 1024 * 1024 }])
       }
     })
-    expect(bins).toEqual([POWERSHELL_EXE])
+    expect(bins).toEqual([powershellExe()])
     expect(r.rows[0]).toMatchObject({ session: 'nt-a', totalMb: 4 })
   })
 

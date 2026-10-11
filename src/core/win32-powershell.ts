@@ -2,8 +2,18 @@
 // dev-server ports' listeners). Pure argv + parsing; the subprocess itself always runs through the
 // caller's injectable exec seam, so every consumer stays testable on any CI host.
 
-/** Windows PowerShell 5.1 ships with every supported Windows; `pwsh` is optional and not assumed. */
-export const POWERSHELL_EXE = 'powershell.exe'
+/**
+ * Windows PowerShell 5.1 ships with every supported Windows at this exact path; `pwsh` is optional
+ * and not assumed. ABSOLUTE, never a bare `powershell.exe`: Windows' executable search tries the
+ * CURRENT DIRECTORY before PATH, so a bare name run from a user-writable cwd (the Server Edition's
+ * working directory, say) would execute whatever `powershell.exe` sits there — and a GUI-launched
+ * app's PATH may not carry the PowerShell directory at all. Same resolution as
+ * `session-host-runtime.ts`'s process query and pty-manager's shell fallback.
+ */
+export function powershellExe(env: NodeJS.ProcessEnv = process.env): string {
+  const systemRoot = env.SystemRoot || env.WINDIR || 'C:\\Windows'
+  return `${systemRoot}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`
+}
 
 /**
  * Argv for one unattended script. `-NoProfile`: a user profile can take seconds and print into the

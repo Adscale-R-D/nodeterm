@@ -28,7 +28,7 @@ import { fencedListPanesCommand, parseFencedPanes } from './session-memory-remot
 import { TMUX_SOCKET } from './tmux-naming'
 import { RMT_TMUX_SOCKET } from './remote-ssh/control-master'
 import type { SessionHostListing } from './session-host-client'
-import { cimRows, powershellArgs, POWERSHELL_EXE } from './win32-powershell'
+import { cimRows, powershellArgs, powershellExe } from './win32-powershell'
 
 const runAsync = promisify(execFile)
 
@@ -559,7 +559,7 @@ export async function collectWin32DevPorts(
     .map((row) => ({ session: row.name, panePid: row.pid, command: '' }))
   if (panes.length === 0) return { ok: true, nodes: {} }
   try {
-    return parseWin32DevPortsProbe(await exec(POWERSHELL_EXE, powershellArgs(WIN32_DEV_PORTS_SCRIPT)), panes)
+    return parseWin32DevPortsProbe(await exec(powershellExe(), powershellArgs(WIN32_DEV_PORTS_SCRIPT)), panes)
   } catch {
     return fail('unreachable')
   }

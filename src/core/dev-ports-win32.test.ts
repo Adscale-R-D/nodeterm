@@ -11,7 +11,7 @@ import {
   parseWinNetTcpListeners,
   WIN32_DEV_PORTS_SCRIPT
 } from './dev-ports'
-import { powershellArgs, POWERSHELL_EXE } from './win32-powershell'
+import { powershellArgs, powershellExe } from './win32-powershell'
 import type { SessionHostListing } from './session-host-client'
 
 const PROCS_JSON = JSON.stringify([
@@ -133,7 +133,7 @@ describe('collectWin32DevPorts / collectLocalDevPorts(win32)', () => {
         return probe('nettcp', NETTCP_JSON)
       }
     })
-    expect(calls).toEqual([{ bin: POWERSHELL_EXE, args: powershellArgs(WIN32_DEV_PORTS_SCRIPT) }])
+    expect(calls).toEqual([{ bin: powershellExe(), args: powershellArgs(WIN32_DEV_PORTS_SCRIPT) }])
     expect(r.ok).toBe(true)
     expect(r.nodes.web?.[0].port).toBe(5173)
   })

@@ -16,7 +16,7 @@ import type { MemInfo, SessionMemoryRow, SessionMemoryReport } from '../shared/t
 import { TMUX_SOCKET } from './tmux-naming'
 import { RMT_TMUX_SOCKET } from './remote-ssh/control-master'
 import type { SessionHostListing } from './session-host-client'
-import { cimRows, powershellArgs, POWERSHELL_EXE } from './win32-powershell'
+import { cimRows, powershellArgs, powershellExe } from './win32-powershell'
 
 export type { MemInfo, SessionMemoryRow, SessionMemoryReport }
 
@@ -496,7 +496,7 @@ export async function win32ProcessTable(
   exec: (bin: string, args: string[]) => Promise<string>
 ): Promise<ProcEntry[] | null> {
   try {
-    return parseWin32ProcessTable(await exec(POWERSHELL_EXE, powershellArgs(WIN32_PROCESS_TABLE_SCRIPT)))
+    return parseWin32ProcessTable(await exec(powershellExe(), powershellArgs(WIN32_PROCESS_TABLE_SCRIPT)))
   } catch {
     return null
   }

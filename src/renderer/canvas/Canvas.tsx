@@ -57,7 +57,12 @@ import {
 } from '../nodes/TerminalNode'
 import { solveFitPadding } from './fit-view'
 import { FloatingEdge } from './FloatingEdge'
-import { MacWheelGestureRouter, trackpadRoutingEnabled } from './wheel-gesture'
+import {
+  MacWheelGestureRouter,
+  trackpadRoutingEnabled,
+  trackpadRoutingSupported,
+  wheelGestureReporting
+} from './wheel-gesture'
 import { isBrowserRuntime } from '@renderer/bridge/runtime'
 import { WheelZoomBurstLimiter, clampWheelZoomSpeed, nextWheelZoom } from './wheel-zoom'
 import { canCopyFilesToClipboard, selectedLocalFilePaths } from './canvas-file-copy'
@@ -5028,7 +5033,11 @@ export function Canvas() {
   const wheelZoomSpeed = clampWheelZoomSpeed(settings.wheelZoomSpeed)
   // The escape hatch, resolved ONCE: the router and React Flow's panOnScroll below must agree, or
   // a gesture neither of them pans is a gesture that does nothing.
-  const trackpadRouting = trackpadRoutingEnabled(isMac, settings.trackpadPan)
+  // macOS and Windows (heuristic there — see trackpadRoutingSupported); never Linux.
+  const trackpadRouting = trackpadRoutingEnabled(
+    trackpadRoutingSupported({ mac: isMac, windows: isWindowsPlatform() }),
+    settings.trackpadPan
+  )
   useEffect(() => {
     const wrap = flowWrapRef.current
     if (!wrap) return
@@ -5036,7 +5045,7 @@ export function Canvas() {
     // router routes by device FACT instead of delta-shape guessing — a precise-pixel mouse
     // (MX Master) zooms while the trackpad pans, both settings on. The browser (Server Edition)
     // has no such stream: reporting stays off and the router keeps its heuristics.
-    const gestureReporting = isMac && !isBrowserRuntime()
+    const gestureReporting = wheelGestureReporting({ mac: isMac, browser: isBrowserRuntime() })
     const wheelRouting = new MacWheelGestureRouter(gestureReporting)
     const offGesture = gestureReporting
       ? window.nodeTerminal.onCanvasTrackpadGesture?.((active) => wheelRouting.noteGesture(active))

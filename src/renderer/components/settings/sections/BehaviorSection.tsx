@@ -7,7 +7,8 @@ import { NumberField } from '@renderer/ui/NumberField'
 import { Select } from '@renderer/ui/Select'
 import { SegmentedPill } from '@renderer/ui/SegmentedPill'
 import { Input } from '@renderer/ui/Input'
-import { hintLabel } from '@shared/platform-utils'
+import { hintLabel, isMacPlatform, isWindowsPlatform } from '@shared/platform-utils'
+import { trackpadRoutingSupported } from '@renderer/canvas/wheel-gesture'
 import { clampWheelZoomSpeed } from '@renderer/canvas/wheel-zoom'
 import { DEFAULT_WORKTREE_PATH_TEMPLATE } from '@shared/worktree'
 
@@ -75,7 +76,7 @@ const ROWS = {
   },
   trackpadPan: {
     title: 'Trackpad scroll pans',
-    keywords: ['trackpad', 'pan', 'scroll', 'zoom', 'magic', 'mouse', 'two-finger', 'macos']
+    keywords: ['trackpad', 'pan', 'scroll', 'zoom', 'magic', 'mouse', 'two-finger', 'macos', 'windows', 'touchpad']
   },
   dragMode: {
     title: 'Canvas left-drag',
@@ -397,21 +398,23 @@ export function BehaviorSection({ isActive }: { isActive: boolean }): React.JSX.
           />
         </SearchableRow>
       </div>
-      <SearchableRow {...ROWS.trackpadPan}>
-        <FieldRow
-          label="Trackpad scroll pans"
-          description={hintLabel(
-            'macOS: a two-finger trackpad scroll pans the canvas even with wheel zoom on. The desktop app tells mouse and trackpad apart directly, so a wheel mouse still zooms; in the browser (Server Edition) detection is heuristic — turn off there if a precise-pixel mouse (Magic Mouse, MX) pans when you meant to zoom.'
-          )}
-          control={
-            <Switch
-              checked={settings.trackpadPan}
-              onChange={(v) => update({ trackpadPan: v })}
-              ariaLabel="Trackpad scroll pans"
-            />
-          }
-        />
-      </SearchableRow>
+      {trackpadRoutingSupported({ mac: isMacPlatform(), windows: isWindowsPlatform() }) && (
+        <SearchableRow {...ROWS.trackpadPan}>
+          <FieldRow
+            label="Trackpad scroll pans"
+            description={hintLabel(
+              'A two-finger trackpad scroll pans the canvas even with wheel zoom on, while a wheel mouse still zooms. The macOS desktop app tells mouse and trackpad apart directly; on Windows and in the browser (Server Edition) detection is heuristic — turn off if a smooth-scrolling mouse (Magic Mouse, MX) pans when you meant to zoom.'
+            )}
+            control={
+              <Switch
+                checked={settings.trackpadPan}
+                onChange={(v) => update({ trackpadPan: v })}
+                ariaLabel="Trackpad scroll pans"
+              />
+            }
+          />
+        </SearchableRow>
+      )}
       <SearchableRow {...ROWS.dragMode}>
         <FieldRow
           label="Canvas left-drag"

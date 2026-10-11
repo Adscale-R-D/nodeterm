@@ -22,6 +22,7 @@ const logBuffer = new LogBuffer()
 installLogSink(logBuffer)
 import { nativeMux, setNativeWindowsAgentOptIn, useNativeSsh } from '../core/remote-ssh/native/native-runtime'
 import { writeFilesToClipboard } from './clipboard-files'
+import { writeWindowsFileDrop } from './clipboard-files-win'
 import { pickProjectIcon } from './project-icon-upload'
 import { allowGuestNavigation } from './webview-nav'
 import { appEntryUrlFor, decideMainFrameNavigation, isSafeExternalUrl } from './navigation-guard'
@@ -1726,7 +1727,8 @@ app.whenReady().then(async () => {
     writeFilesToClipboard(paths, {
       platform: process.platform,
       isFile: (path) => statSync(path).isFile(),
-      writeBuffer: (format, buffer) => clipboard.writeBuffer(format, buffer)
+      writeBuffer: (format, buffer) => clipboard.writeBuffer(format, buffer),
+      writeWindowsFileDrop: (paths) => writeWindowsFileDrop(paths)
     })
   )
 

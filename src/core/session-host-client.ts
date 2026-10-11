@@ -1645,6 +1645,34 @@ export class SessionHostClient {
     } catch { return false }
   }
 
+  /** `terminateOwnerV1`. `'unsupported'` = the live host predates the verb (it answered `unknown
+   *  command`) — distinct from `false`, so the UI can say "restart the app" instead of "busy". Any
+   *  other failure, a lost reply included, is `false`: the caller then refuses to recycle. Never
+   *  retried — a second kill aimed at a re-proven owner is the host's job, not a resend's. */
+  async terminateOwner(name: string, expected: PaneOwner): Promise<boolean | 'unsupported'> {
+    try {
+      const result = await this.request<{ terminated?: unknown } | undefined>({ cmd: 'terminateOwnerV1', name, expected })
+      return result?.terminated === true
+    } catch (error) {
+      return error instanceof SessionHostRequestRejectedError && error.message === 'unknown command'
+        ? 'unsupported'
+        : false
+    }
+  }
+
+  /** `writeDetachedV1`: raw bytes into a session this process holds no attachment on. True only on
+   *  the host's acknowledgement. NEVER retried and never re-routed through `sendKeys`: a lost reply
+   *  may still have been typed, and an older host's refusal never reached the pty at all — either
+   *  way a second attempt risks typing the input twice or in a different shape. */
+  async writeDetached(name: string, data: string): Promise<boolean> {
+    try {
+      await this.request<unknown>({ cmd: 'writeDetachedV1', name, data })
+      return true
+    } catch {
+      return false
+    }
+  }
+
   async capture(name: string, full: boolean): Promise<string> {
     const result = await this.request<CaptureResult>({ cmd: 'capture', name, full })
     return result.text

@@ -241,6 +241,63 @@ describe('SessionHostClient handshake transition', () => {
     expect(commands).toEqual(['hello', 'sendKeysV2'])
   })
 
+  const WIN_OWNER = {
+    panePid: 42, tty: 'win32-console:42', paneId: 'win32:g:b', command: 'node', argv: ['claude'],
+    pids: [43], processBirths: ['b43']
+  }
+
+  it("maps an older host's unknown terminateOwnerV1 to 'unsupported' and anything else to false", async () => {
+    const { userDataDir, paths } = createUserData('terminate-owner-refusals')
+    const commands: string[] = []
+    const answers = ['unknown command', 'no such session']
+    await serve(paths.endpoint, (request, socket) => {
+      commands.push(request.cmd)
+      if (request.cmd === 'hello') socket.write(acceptedHello(request.id))
+      else socket.write(encodeFrame({ id: request.id, ok: false, error: answers.shift() ?? 'x' }))
+    })
+    const client = new SessionHostClient({ userDataDir, repoRoot: userDataDir })
+    expect(await within(client.terminateOwner('nt-a', WIN_OWNER))).toBe('unsupported')
+    expect(await within(client.terminateOwner('nt-a', WIN_OWNER))).toBe(false)
+    // Exactly one request per call: no retry, no fallback to a write or a kill.
+    expect(commands).toEqual(['hello', 'terminateOwnerV1', 'terminateOwnerV1'])
+  })
+
+  it('returns terminated only when the host says so, carrying the expected owner verbatim', async () => {
+    const { userDataDir, paths } = createUserData('terminate-owner-ok')
+    const seen: unknown[] = []
+    const results = [{ terminated: true }, { terminated: false }, undefined]
+    await serve(paths.endpoint, (request, socket) => {
+      if (request.cmd === 'hello') return void socket.write(acceptedHello(request.id))
+      seen.push(request)
+      socket.write(encodeFrame({ id: request.id, ok: true, result: results.shift() }))
+    })
+    const client = new SessionHostClient({ userDataDir, repoRoot: userDataDir })
+    expect(await within(client.terminateOwner('nt-a', WIN_OWNER))).toBe(true)
+    expect(await within(client.terminateOwner('nt-a', WIN_OWNER))).toBe(false)
+    expect(await within(client.terminateOwner('nt-a', WIN_OWNER))).toBe(false)
+    expect(seen[0]).toMatchObject({ cmd: 'terminateOwnerV1', name: 'nt-a', expected: WIN_OWNER })
+  })
+
+  it('writeDetached sends the raw bytes once and never retries or falls back on a refusal', async () => {
+    const { userDataDir, paths } = createUserData('write-detached')
+    const seen: Array<{ cmd: string; data?: string }> = []
+    const answers = [true, false]
+    await serve(paths.endpoint, (request, socket) => {
+      if (request.cmd === 'hello') return void socket.write(acceptedHello(request.id))
+      seen.push(request as { cmd: string; data?: string })
+      socket.write(answers.shift()
+        ? encodeFrame({ id: request.id, ok: true })
+        : encodeFrame({ id: request.id, ok: false, error: 'unknown command' }))
+    })
+    const client = new SessionHostClient({ userDataDir, repoRoot: userDataDir })
+    expect(await within(client.writeDetached('nt-a', '\x1b[A'))).toBe(true)
+    expect(await within(client.writeDetached('nt-a', 'y'))).toBe(false)
+    expect(seen).toEqual([
+      { id: expect.any(Number), cmd: 'writeDetachedV1', name: 'nt-a', data: '\x1b[A' },
+      { id: expect.any(Number), cmd: 'writeDetachedV1', name: 'nt-a', data: 'y' }
+    ])
+  })
+
   it('hands the socket to the production listener before the first attach response and data', async () => {
     const { userDataDir, paths, token } = createUserData('test-token-kept-off-argv')
 

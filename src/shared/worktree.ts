@@ -333,9 +333,10 @@ export function worktreeFromCreate(v: WorktreeCreateValue): GroupWorktree {
     repoPath: v.repoPath.trim(),
     branch: v.branch.trim(),
     baseRef: v.baseRef.trim() || DEFAULT_BASE_REF,
-    // '/'-separated (case kept), the shape `git worktree list` prints on every platform, so the
-    // binding and git agree without a key fold. A POSIX path has no backslash: unchanged.
-    path: v.path.trim().replace(/\\/g, '/'),
+    // A Windows path is stored '/'-separated (case kept), the shape `git worktree list` prints, so
+    // the binding and git agree without a key fold. A POSIX path is untouched — a backslash is a
+    // legal filename character there, not a separator.
+    path: isWindowsShapedPath(v.path.trim()) ? v.path.trim().replace(/\\/g, '/') : v.path.trim(),
     createdByApp: true
   }
 }
@@ -401,9 +402,9 @@ export function parseWorktreePorcelain(out: string): WorktreeEntry[] {
 /**
  * The identity key of a worktree/repo path, for COMPARING paths — never for using one. Git prints
  * `C:/r/wt` on Windows while a typed or pasted binding says `C:\r\wt` (or `c:/…`), and NTFS is
- * case-insensitive by default, so a Windows-shaped path (any backslash, a drive letter, or UNC
- * `//`) is folded to forward slashes and lower case. A POSIX path keeps its exact case and is only
- * stripped of trailing slashes — byte-identical to the comparison this replaced. Keyed on the
+ * case-insensitive by default, so a Windows-shaped path (a drive letter or UNC — see
+ * `isWindowsShapedPath`) is folded to forward slashes and lower case. A POSIX path keeps its exact
+ * case and is only stripped of trailing slashes — byte-identical to the comparison this replaced. Keyed on the
  * path's SHAPE, not on `process.platform`: this module runs in the renderer, whose platform is not
  * the core's.
  */
@@ -411,9 +412,16 @@ export function worktreePathKey(p: string): string {
   return pathKey(p.trim())
 }
 
+/** An absolute Windows path: a drive letter (`C:`) or UNC (`\\server`, or `//server` as git prints
+ *  it). Shape, not a stray backslash: on POSIX `\\` is a legal filename character, and folding such
+ *  a path's case would make two distinct POSIX directories compare equal. */
+export function isWindowsShapedPath(t: string): boolean {
+  return /^[A-Za-z]:|^[\\/]{2}/.test(t)
+}
+
 /** `worktreePathKey` without the trim — `isAncestorPath` and the removal guard never trimmed. */
 function pathKey(t: string): string {
-  if (!/\\|^[A-Za-z]:|^\/\//.test(t)) return t.replace(/\/+$/, '')
+  if (!isWindowsShapedPath(t)) return t.replace(/\/+$/, '')
   return t.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
 }
 

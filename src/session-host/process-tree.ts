@@ -1,4 +1,5 @@
 import { execFile } from 'child_process'
+import { isShellCommand } from '../shared/agents/pane'
 
 /**
  * The `#{pane_current_command}` equivalent for a backend with no tmux underneath it. tmux tracks
@@ -18,7 +19,7 @@ import { execFile } from 'child_process'
  * known limitation in docs/windows-session-host.md rather than pretended away.
  */
 
-interface ProcRow {
+export interface ProcRow {
   pid: number
   ppid: number
   name: string
@@ -88,22 +89,43 @@ function readPosix(): Promise<ProcRow[]> {
   })
 }
 
-/** The deepest live descendant of `rootPid` (the pty's own child), by name — or null when the
- *  process table couldn't be read or `rootPid` is no longer in it (the session just exited). */
-export async function paneCommand(rootPid: number): Promise<string | null> {
-  const rows = process.platform === 'win32' ? await readWin32() : await readPosix()
-  if (rows.length === 0) return null
+/**
+ * The pane-command answer for `rootPid` over one process-table read, or null when `rootPid` is
+ * not in it. Pure, so the rule is testable on any platform.
+ *
+ * A SHELL name is answered only when every live process in the tree is a shell. Callers read a
+ * shell answer as "the CLI has let go of the pane" (restart exit poll, wake, trigger delivery,
+ * RunBar), so a shell that is merely a LEAF somewhere under a running agent (claude's Bash tool
+ * runs `bash.exe`, its PowerShell tool `pwsh.exe`, an MCP server is launched via `cmd /c npx`)
+ * must not answer for the pane. Once `isShellCommand` learned the Windows image names, that leaf
+ * stopped being an unrecognised (= "not yet") answer, so this walk has to say "non-shell"
+ * whenever one exists. A non-shell answer is the deepest-visited non-shell, as before.
+ */
+export function paneCommandFromRows(rows: readonly ProcRow[], rootPid: number): string | null {
   const { table, kids } = indexRows(rows)
   if (!table.has(rootPid)) return null
   let deepest = rootPid
+  let deepestNonShell: number | null = isShellCommand(table.get(rootPid)?.name) ? null : rootPid
   const seen = new Set<number>([rootPid])
   const stack = [...(kids.get(rootPid) ?? [])]
   while (stack.length > 0) {
     const pid = stack.pop() as number
     if (seen.has(pid)) continue
     seen.add(pid)
-    if (table.has(pid)) deepest = pid
+    const row = table.get(pid)
+    if (row) {
+      deepest = pid
+      if (!isShellCommand(row.name)) deepestNonShell = pid
+    }
     for (const k of kids.get(pid) ?? []) stack.push(k)
   }
-  return table.get(deepest)?.name || null
+  return table.get(deepestNonShell ?? deepest)?.name || null
+}
+
+/** The pane-command answer for the pty's own child (`paneCommandFromRows`) — or null when the
+ *  process table couldn't be read or `rootPid` is no longer in it (the session just exited). */
+export async function paneCommand(rootPid: number): Promise<string | null> {
+  const rows = process.platform === 'win32' ? await readWin32() : await readPosix()
+  if (rows.length === 0) return null
+  return paneCommandFromRows(rows, rootPid)
 }

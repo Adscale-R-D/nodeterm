@@ -9150,11 +9150,17 @@ Squirrel was not adopted. Builds are **unsigned** (no Windows cert; electron-bui
 signing when no cert env is present; SmartScreen warns on install). Release wiring is
 `release.yml`'s `release-win` job: on every version tag it uploads the NSIS installer + zip as
 GitHub Release assets — **best-effort by design** (the `publish` promote gate does not wait on
-it, so a Windows failure never strands the mac+linux release) and with **no update-feed leg**:
-`dist:win` stamps `nodeTermUpdates=disabled`, so the shipped app's updater is cleanly off (no
-latest.yml anywhere, no 404 polling; users update by downloading the next installer). Do not
-add `*.yml`/`*.blockmap` to that job's upload globs — that IS the auto-update leg, and it waits
-on signing. `bootstrap-windows.bat` (repo root) takes a fresh Windows
+it, so a Windows failure never strands the mac+linux release) and with a **passive notice feed
+only**: it builds `dist:win:release`, which stamps `nodeTermUpdates=manual` →
+`updateDelivery` = `manual-install` (the marker wins over the platform), and uploads `latest.yml`
+beside the installer + zip. The app checks the feed and shows the same "vX is available —
+Download" card a Linux .deb gets; it never downloads, never installs on quit, and main refuses
+`appRestartToUpdate` for any build that is not `self-install`/`dev` (`mayQuitAndInstall`), so
+`quitAndInstall` cannot run on the unsigned beta whatever the renderer sends. Local `dist:win`
+keeps `disabled` (never polls). Do not add `*.blockmap` (or a broad `*.yml`) to that job's
+upload globs — differential downloads are the self-install leg, and it waits on signing; guarded
+by `src/main/release-win-workflow.test.ts`. The nodeterm.dev/updates mirror serving `latest.yml`
+lives outside this repo. `bootstrap-windows.bat` (repo root) takes a fresh Windows
 machine to a built checkout: it verifies Node ≥ 20 / VS Build Tools C++ / Python 3 with exact
 winget hints (it never installs machine-wide tools itself, and the full bootstrap refuses to run
 elevated) and runs `npm ci`. Its `--check-vs-build-tools` mode is the narrow exception used by
@@ -9236,9 +9242,9 @@ of a version). Rules a refactor must not undo:
   (protocol v1/v2 + `hello` features); an unsupported one is left running and reported
   (`SessionHostProtocolCompatibilityError`), never killed. ~250 MB of disk per staged version.
 
-**Follow-ups, in order:** code signing, then Windows auto-update wiring (electron-updater NSIS leg
-+ `latest.yml` on the nodeterm.dev feed — blocked on signing: an unsigned auto-update is a
-downgrade in trust), and the fork's PE-identity polish (electron-builder leaves `OriginalFilename`
+**Follow-ups, in order:** code signing, then Windows self-install (drop the `manual` marker from
+`dist:win:release` and upload blockmaps — blocked on signing: an unsigned auto-update is a
+downgrade in trust; the passive notice already ships), and the fork's PE-identity polish (electron-builder leaves `OriginalFilename`
 empty; the fork's
 `resedit`-based afterSign hook fixes it — cosmetic for NSIS, load-bearing only for Squirrel).
 

@@ -35,7 +35,14 @@ import { ChatPanelFallback } from './ChatPanelFallback'
 // shell has the panel's exact geometry, so a fast load still reads as the panel appearing.
 const ChatPanel = lazy(() => import('./ChatPanel').then((m) => ({ default: m.ChatPanel })))
 import { LocalTransport } from '../terminal/local-transport'
-import { clipboardImages, droppedPaths, pasteHasText, pastedFiles } from '../terminal/file-drop'
+import {
+  clipboardImages,
+  dropDialect,
+  droppedPaths,
+  pasteHasText,
+  pastedFiles,
+  type DropDialect
+} from '../terminal/file-drop'
 import type { TerminalTransport } from '../terminal/transport'
 import { guardMiddleClickPaste } from '../terminal/middle-click'
 import { attachCopyOnSelect } from '../terminal/copy-on-select'
@@ -5723,6 +5730,18 @@ export function TerminalNode({
   }
   // Uploads go over the master this node's PTY runs on (`nodeUploadScope`).
   const dropProjectId = (): string => nodeUploadScope(data.ssh as SshConnection | undefined)
+  // How a LOCAL path is spelled for this pane: POSIX escapes everywhere except a Windows core,
+  // where `\` is the separator and the shell / agent CLI wants quotes. Same core-platform source
+  // as the file links and the kill line — the filesystem-owning core, never the viewer.
+  const dropDialectFor = (agentPane: boolean): DropDialect =>
+    dropDialect({
+      corePlatform: corePlatformRef.current,
+      remote: remoteSession,
+      shell: data.shell || useSettings.getState().settings.defaultShell || undefined,
+      agentPane,
+      localDesktop: session.source === 'local' && !isBrowserRuntime(),
+      viewerWindows: isWindowsPlatform()
+    })
   /**
    * Files arriving by DROP or by PASTE become paths in the terminal — what a native terminal does
    * on a drop, and the only thing a shell (or an agent reading its prompt) can act on. Shared so
@@ -5736,6 +5755,10 @@ export function TerminalNode({
     // one before there is a path to paste — worth the same "this is going somewhere" overlay the
     // SSH upload gets, since neither is instant and both paste nothing until they finish.
     const needsWrite = files.some((f) => !window.nodeTerminal.getPathForFile(f))
+    const st = agentStatusStore.getState().byId[id]
+    const paneAgent = agentId ?? st?.agentId
+    const agentPane = agentProcessInPane(paneAgent, st)
+    const dialect = dropDialectFor(agentPane)
 
     let paths: string[]
     if (data.sshRemoteTmux) {
@@ -5760,7 +5783,7 @@ export function TerminalNode({
       if (uploadNoteTimer.current) clearTimeout(uploadNoteTimer.current)
       setUploadNote({ text: 'Saving pasted file…' })
       try {
-        paths = await droppedPaths(files, { sshRemoteTmux: false, projectId: '' })
+        paths = await droppedPaths(files, { sshRemoteTmux: false, projectId: '', dialect })
       } finally {
         setUploadNote(null)
       }
@@ -5769,7 +5792,7 @@ export function TerminalNode({
         uploadNoteTimer.current = setTimeout(() => setUploadNote(null), 2500)
       }
     } else {
-      paths = await droppedPaths(files, { sshRemoteTmux: false, projectId: '' })
+      paths = await droppedPaths(files, { sshRemoteTmux: false, projectId: '', dialect })
     }
     if (!paths.length) return
     // Enter the terminal and paste the path(s) like a real drop (trailing space to continue).
@@ -5783,13 +5806,11 @@ export function TerminalNode({
     useTerminalFocus.getState().remember(id)
     // A pasted image is only reported as attached once the agent's own pane shows it (claude's
     // `[Image #N]`); otherwise the receipt says the path went in, unconfirmed.
-    const st = agentStatusStore.getState().byId[id]
-    const paneAgent = agentId ?? st?.agentId
     pasteWithImageReceipt(
       term,
       paths.join(' ') + ' ',
       paths,
-      agentProcessInPane(paneAgent, st) ? paneAgent : undefined,
+      agentPane ? paneAgent : undefined,
       pasteReceipt.report
     )
     useAgentStatus.getState().setActive(id, true)
@@ -6843,7 +6864,9 @@ export function TerminalNode({
                 pathsForFiles={(files) =>
                   droppedPaths(files, {
                     sshRemoteTmux: !!data.sshRemoteTmux,
-                    projectId: data.sshRemoteTmux ? dropProjectId() : ''
+                    projectId: data.sshRemoteTmux ? dropProjectId() : '',
+                    // The composer feeds the agent CLI, never the shell.
+                    dialect: dropDialectFor(true)
                   })
                 }
                 // `@` lists this node's files where they live: the host's for an SSH node, over the

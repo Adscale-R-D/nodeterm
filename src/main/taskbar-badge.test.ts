@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest'
+import { readFileSync } from 'fs'
+import { join } from 'path'
 import { badgeLabel, planBadge, rasterizeBadge } from './taskbar-badge'
 
 describe('planBadge', () => {
@@ -19,6 +21,16 @@ describe('planBadge', () => {
   it('Windows: a fall or a resend of the same count does not flash', () => {
     expect(planBadge('win32', 1, 2, false).flash).toBe(false)
     expect(planBadge('win32', 2, 2, false).flash).toBe(false)
+  })
+  it('Windows: the first report (persisted unread restored at boot) is a baseline — draws, never flashes', () => {
+    expect(planBadge('win32', 3, null, false)).toEqual({
+      overlay: { label: '3', description: '3 unread sessions' },
+      flash: false
+    })
+  })
+  it('main seeds the baseline as null, not 0 (source guard)', () => {
+    const src = readFileSync(join(__dirname, 'index.ts'), 'utf-8')
+    expect(src).toMatch(/let lastBadgeCount: number \| null = null/)
   })
   it('Linux: nothing', () => {
     expect(planBadge('linux', 5, 0, false)).toEqual({})

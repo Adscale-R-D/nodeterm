@@ -1749,10 +1749,10 @@ export interface ZoomActualSizeModifiers {
   control: boolean
 }
 
-/** User-configurable application settings (settings.json). */
 /** `settings.runInBackgroundOnClose` — see the field's doc. */
 export type BackgroundOnCloseSetting = 'auto' | 'on' | 'off'
 
+/** User-configurable application settings (settings.json). */
 export interface Settings {
   fontSize: number
   fontFamily: string

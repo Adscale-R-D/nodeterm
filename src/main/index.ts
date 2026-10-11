@@ -906,10 +906,6 @@ const browserGuests = new Map<number, BrowserGuest>()
 const nodeContextSession = new Map<string, string>()
 const nodeSubagents = new Map<string, Set<string>>() // nodeId → active subagent tool_use_ids
 
-// Enforce a single instance. A second instance would re-attach every node's tmux session
-// (`new-session -A -D`), whose `-D` detaches the first instance's clients — leaving
-// "[detached (from session ...)]" dead terminals. Bail out and focus the existing window
-// instead. (This guards against a stray real GUI launch.)
 // Windows toast identity, BEFORE any Notification and before ready (src/main/app-identity.ts):
 // without it Electron's generated `electron.app.<name>` id matches no Start-menu shortcut and
 // toasts are dropped or mis-attributed — silently. Null (no call) on macOS/Linux.
@@ -917,6 +913,11 @@ const nodeSubagents = new Map<string, Set<string>>() // nodeId → active subage
   const aumid = appUserModelIdFor({ platform: process.platform, isPackaged: app.isPackaged, execPath: process.execPath })
   if (aumid) app.setAppUserModelId(aumid)
 }
+
+// Enforce a single instance. A second instance would re-attach every node's tmux session
+// (`new-session -A -D`), whose `-D` detaches the first instance's clients — leaving
+// "[detached (from session ...)]" dead terminals. Bail out and focus the existing window
+// instead. (This guards against a stray real GUI launch.)
 const gotSingleInstanceLock = NT_MULTI || app.requestSingleInstanceLock()
 if (!gotSingleInstanceLock) {
   app.quit()
@@ -1839,7 +1840,7 @@ app.whenReady().then(async () => {
   // Windows → a taskbar overlay icon + a flash when the count rises in the background; Linux →
   // nothing. The decision is the pure `planBadge` (taskbar-badge.ts). The same count feeds the
   // background-mode tray's tooltip/menu (de-duplicated there, so a resend rebuilds nothing).
-  let lastBadgeCount = 0
+  let lastBadgeCount: number | null = null // null until the first report: that one is a baseline
   ipcMain.on(IPC.appSetBadge, (_e, count: number) => {
     const n = normalizeUnread(count)
     const win = getMainWindow() as unknown as BrowserWindow | null

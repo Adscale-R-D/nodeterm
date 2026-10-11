@@ -22,7 +22,10 @@ export function badgeLabel(count: number): string {
 export function planBadge(
   platform: NodeJS.Platform | string,
   count: number,
-  prevCount: number,
+  /** The previous report's count, or `null` for the FIRST report of this process. The renderer
+   *  restores persisted unread flags at boot and reports them at once — before the window has
+   *  focus — so a first report is a baseline, not "something new finished while you were away". */
+  prevCount: number | null,
   focused: boolean
 ): BadgePlan {
   const n = Number.isFinite(count) && count > 0 ? Math.floor(count) : 0
@@ -32,7 +35,7 @@ export function planBadge(
       overlay: n > 0 ? { label: badgeLabel(n), description: n === 1 ? '1 unread session' : `${n} unread sessions` } : null,
       // Only a RISE means "something new finished while you were away" — a falling count is the
       // user catching up, and re-flashing on every badge sync would be noise.
-      flash: n > prevCount && !focused
+      flash: prevCount !== null && n > prevCount && !focused
     }
   }
   return {}

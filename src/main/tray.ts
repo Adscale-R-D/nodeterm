@@ -1,4 +1,4 @@
-// Windows/Linux background-mode tray (docs: CLAUDE.md "Window lifecycle"). Created only when
+// Windows/Linux background-mode tray (docs: CLAUDE.md, "Window close off macOS = background mode"). Created only when
 // background mode resolves on (`resolveBackgroundOnClose`), never on macOS — the Dock is the
 // analogue there. All decisions live in the pure ./tray-model; this file is the Electron glue.
 

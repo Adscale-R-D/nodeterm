@@ -99,6 +99,8 @@ interface Conn {
   /** `-L` listeners this connection holds, by spec (see `localForwardKey`). They close with it,
    *  as an OpenSSH master's listeners die with the master process. */
   localForwards: Map<string, LocalListener>
+  /** `-L` specs whose listen is still in flight, so a concurrent duplicate shares its answer. */
+  localPending: Map<string, Promise<void>>
   target: SshTarget
   options: SshOptions
   /** Channels open on this connection right now. */
@@ -529,8 +531,23 @@ export class NativeMux {
   async forwardLocal(controlPath: string, fwd: LocalForward): Promise<void> {
     const conn = this.conns.get(controlPath)
     if (!conn?.alive) throw new Error(noMasterMessage(controlPath))
-    await conn.ready
     const key = localForwardKey(fwd)
+    // A second request for a spec whose listen is still in flight shares that answer — otherwise it
+    // would race our own listener to EADDRINUSE and report "Port forwarding failed" for a forward
+    // that is in fact ours (the duplicate OpenSSH would simply acknowledge).
+    const inFlight = conn.localPending.get(key)
+    if (inFlight) return inFlight
+    const p = this.listenLocal(controlPath, conn, fwd, key)
+    conn.localPending.set(key, p)
+    try {
+      await p
+    } finally {
+      if (conn.localPending.get(key) === p) conn.localPending.delete(key)
+    }
+  }
+
+  private async listenLocal(controlPath: string, conn: Conn, fwd: LocalForward, key: string): Promise<void> {
+    await conn.ready
     if (conn.localForwards.has(key)) return
     const sockets = new Set<net.Socket>()
     const server = net.createServer((sock) => {
@@ -631,6 +648,7 @@ export class NativeMux {
       closed,
       forwards: new Map(),
       localForwards: new Map(),
+      localPending: new Map(),
       target,
       options,
       channels: 0,

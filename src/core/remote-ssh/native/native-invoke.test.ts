@@ -267,6 +267,23 @@ describe('native-invoke', () => {
       }
     })
 
+    it('two concurrent requests for one spec are both acknowledged (one listener, not a self-race)', async () => {
+      const { srv, port: remotePort } = await echo()
+      try {
+        const m = mux()
+        await runSshArgv(m, childArgs(conn(), CP(), 'true'))
+        const lport = await freePort()
+        const args = localForwardArgs(conn(), CP(), lport, '127.0.0.1', remotePort)
+        const [a, b] = await Promise.all([runSshArgv(m, args), runSshArgv(m, args)])
+        expect([a.code, b.code]).toEqual([0, 0])
+        expect(await roundTrip(lport, 'both')).toBe('both')
+        expect((await runSshArgv(m, localForwardCancelArgs(conn(), CP(), lport, '127.0.0.1', remotePort))).code).toBe(0)
+        expect(await canListen(lport)).toBe(true)
+      } finally {
+        srv.close()
+      }
+    })
+
     it('a port someone else holds is OpenSSH\'s "Port forwarding failed", exit 255', async () => {
       const m = mux()
       await runSshArgv(m, childArgs(conn(), CP(), 'true'))

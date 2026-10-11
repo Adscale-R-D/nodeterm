@@ -90,9 +90,11 @@ describe('dropDialect', () => {
     expect(dropDialect({ ...win, shell: 'C:\\Program Files\\Git\\bin\\bash.exe' })).toBe('posix')
   })
 
-  it('an unknown shell on Windows reads as cmd (double quotes, which pwsh also accepts)', () => {
-    expect(dropDialect({ ...win })).toBe('win-cmd')
-    expect(dropDialect({ ...win, shell: 'nu' })).toBe('win-cmd')
+  it("an unset or unknown shell on Windows reads as PowerShell, the core's own default", () => {
+    expect(dropDialect({ ...win })).toBe('win-pwsh')
+    expect(dropDialect({ ...win, shell: 'nu' })).toBe('win-pwsh')
+    // So a `$` path is not expanded by the default shell.
+    expect(quoteDroppedPath('C:\\a$b\\x.png', dropDialect({ ...win }))).toBe("'C:\\a$b\\x.png'")
   })
 
   it('an agent pane on Windows is quoted for the CLI, whatever the shell under it', () => {
@@ -101,7 +103,7 @@ describe('dropDialect', () => {
   })
 
   it('an unobserved core platform falls back to the viewer ONLY for the local desktop core', () => {
-    expect(dropDialect({ corePlatform: null, remote: false, localDesktop: true, viewerWindows: true })).toBe('win-cmd')
+    expect(dropDialect({ corePlatform: null, remote: false, localDesktop: true, viewerWindows: true })).toBe('win-pwsh')
     // A Windows browser on a Server Edition / relay tab says nothing about the host.
     expect(dropDialect({ corePlatform: null, remote: false, localDesktop: false, viewerWindows: true })).toBe('posix')
     expect(dropDialect({ corePlatform: null, remote: false, localDesktop: true, viewerWindows: false })).toBe('posix')

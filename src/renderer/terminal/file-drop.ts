@@ -35,7 +35,8 @@ export interface DropDialectFacts {
   corePlatform: string | null
   /** The pane runs on another (POSIX) machine: an SSH project, or a standalone `ssh` node. */
   remote: boolean
-  /** The node's shell, or the resolved default. Unknown is fine — it reads as cmd's rules. */
+  /** The node's shell, or the resolved default. Unknown reads as PowerShell — the core's own
+   *  Windows default. */
   shell?: string | null
   /** An agent CLI owns the pane, so the reader is its composer, not the shell. */
   agentPane?: boolean
@@ -58,7 +59,12 @@ export function dropDialect(f: DropDialectFacts): DropDialect {
   if (exe === 'pwsh' || exe === 'powershell') return 'win-pwsh'
   // Git Bash / MSYS / WSL bash read backslash escapes; `C:\\Users\\Jane\ Doe` is right there.
   if (exe === 'bash' || exe === 'sh' || exe === 'zsh' || exe === 'fish' || exe === 'wsl') return 'posix'
-  return 'win-cmd'
+  if (exe === 'cmd') return 'win-cmd'
+  // No shell configured (or one we do not recognise): the core's own Windows default is PowerShell
+  // (`resolveWindowsShell`: pwsh, then the powershell.exe every install ships; COMSPEC only after
+  // both), so spell it for PowerShell. The two dialects differ only for a `$`/backtick path, which
+  // double quotes would let PowerShell expand into a different path.
+  return 'win-pwsh'
 }
 
 /** Extension for a clipboard blob that arrives with no filename, keyed off its MIME type. A

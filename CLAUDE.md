@@ -1697,9 +1697,13 @@ session.
   `quoteDroppedPath`, `terminal/file-drop.ts`): POSIX backslash-escaping everywhere — every SSH
   pane and Git Bash included, byte-identical to before — except a Windows core, where `\` is the
   separator and is never doubled: bare when nothing needs quoting, else double-quoted (pwsh/agent
-  panes single-quote a path holding `$` or a backtick). The image receipt strips one pair of quotes
-  before reading the extension. `isShellCommand` likewise normalises the session host's image names
-  (`pwsh.exe`, `C:\…\cmd.exe`) — leading `-`, either separator, case, `.exe`. A path an
+  panes single-quote a path holding `$` or a backtick; an UNSET shell is spelled for PowerShell,
+  the core's own Windows default, so a `$` path is not expanded). The image receipt strips one pair
+  of quotes before reading the extension. `isShellCommand` likewise normalises the session host's
+  image names (`pwsh.exe`, `C:\…\cmd.exe`) — leading `-`, either separator, case, `.exe` — which is
+  why the session host's `paneCommand` walk (`process-tree.ts`) answers a shell name only when EVERY
+  process in the tree is a shell: claude's Bash/PowerShell tool or a `cmd /c npx` MCP launcher is a
+  shell LEAF under a live agent, and must not read as "the CLI let go of the pane". A path an
   agent TUI wrapped under a **hanging indent** (Codex: 2 spaces, broken after a `/` or at a space)
   is neither a soft nor a hard wrap, so it is offered as extra READINGS (`hangingReadings` — the
   seam as nothing, and as one space), tried BEFORE the plain row's tokens by both the provider and

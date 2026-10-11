@@ -18,6 +18,21 @@ describe('expandProxyTokens', () => {
   it('%k is HostKeyAlias when one is set', () => {
     expect(expandProxyTokens('x %k', { ...T, hostKeyAlias: 'alias' })).toBe('x alias')
   })
+  it.each([
+    ['%h', { hostname: 'a&calc' }],
+    ['%h', { hostname: 'a;rm -rf ~' }],
+    ['%n', { originalHost: 'box|x' }],
+    ['%n', { originalHost: '$(id)' }],
+    ['%r', { user: 'dev`id`' }],
+    ['%r', { user: '-oProxyCommand=x' }],
+    ['%k', { hostKeyAlias: 'a^b' }],
+    ['%h', { hostname: '100%x' }]
+  ])('a %s value carrying a shell/cmd metacharacter is refused, never interpolated', (tok, over) => {
+    expect(() => expandProxyTokens(`nc ${tok} %p`, { ...T, ...over })).toThrow(/not allowed in a host or user name/)
+  })
+  it('ordinary values (IPv6, dotted names, user with dot/underscore) still expand', () => {
+    expect(expandProxyTokens('nc %h %p %r', { ...T, hostname: 'fe80::1', user: 'first.last_x' })).toBe('nc fe80::1 2222 first.last_x')
+  })
   it('an unknown token is an error by name, never passed through', () => {
     expect(() => expandProxyTokens('nc %h %C', T)).toThrow(/unknown token %C/)
     expect(() => expandProxyTokens('trailing %', T)).toThrow(/unknown token %/)
@@ -104,6 +119,30 @@ describe('proxyCommandSocket', () => {
     const exited = new Promise((r) => children[0].once('exit', r))
     sock.destroy()
     await exited
+  })
+
+  it('Windows: destroying the stream kills the whole TREE (cmd.exe and the proxy under it)', async () => {
+    const children: import('child_process').ChildProcess[] = []
+    const killed: number[] = []
+    const sock = proxyCommandSocket('x', {
+      timeoutMs: 5000,
+      platform: 'win32',
+      env: { ComSpec: 'cmd.exe' },
+      killTree: (pid) => {
+        killed.push(pid)
+        children[0].kill()
+      },
+      spawn: (f, a, o) => {
+        const c = nodeSpawn(`process.stdout.write('SSH-2.0-x\\r\\n');setInterval(()=>{},1000)`)(f, a, o)
+        children.push(c)
+        return c
+      }
+    })
+    await new Promise((r) => sock.once('data', r))
+    const exited = new Promise((r) => children[0].once('exit', r))
+    sock.destroy()
+    await exited
+    expect(killed).toEqual([children[0].pid])
   })
 
   it('a spawn that fails is an error, not a hang', async () => {

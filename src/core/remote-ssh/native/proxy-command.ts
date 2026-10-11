@@ -10,7 +10,7 @@
 // `ProxyUseFdpass yes` (the proxy hands back a connected fd over a unix socket) cannot be served
 // from Node and is refused by name by the caller.
 
-import { spawn as nodeSpawn, type ChildProcess } from 'child_process'
+import { execFile, spawn as nodeSpawn, type ChildProcess } from 'child_process'
 import { Duplex } from 'stream'
 
 /** The values OpenSSH substitutes into a ProxyCommand (sshconnect.c `expand_proxy_command`). */
@@ -27,22 +27,37 @@ export interface ProxyTokens {
   hostKeyAlias?: string
 }
 
-/** Expand `%h %p %r %n %k %%`; throws on any other `%x`, naming it. */
+/**
+ * Characters a substituted VALUE may not carry: the expanded line is handed to `/bin/sh -c` or
+ * `cmd.exe /c`, so a host or user holding a shell or cmd metacharacter would run as a command.
+ * OpenSSH >= 9.6 refuses the same class for user/host (CVE-2023-51385); Windows ships 9.5, and the
+ * no-binary path never asks OpenSSH at all — so the check lives here, at the interpolation site.
+ */
+const UNSAFE_TOKEN_VALUE = /[\s'"`$\\;&<>|(){}^%!*?[\]\x00-\x1f\x7f]/
+
+function safeValue(k: string, v: string): string {
+  if (!v || v.startsWith('-') || UNSAFE_TOKEN_VALUE.test(v)) {
+    throw new Error(`ssh: ProxyCommand: %${k} value ${JSON.stringify(v)} contains characters that are not allowed in a host or user name`)
+  }
+  return v
+}
+
+/** Expand `%h %p %r %n %k %%`; throws on any other `%x`, naming it, and on an unsafe value. */
 export function expandProxyTokens(cmd: string, t: ProxyTokens): string {
   return cmd.replace(/%(.?)/g, (_m, k: string) => {
     switch (k) {
       case '%':
         return '%'
       case 'h':
-        return t.hostname
+        return safeValue(k, t.hostname)
       case 'p':
         return String(t.port)
       case 'r':
-        return t.user
+        return safeValue(k, t.user)
       case 'n':
-        return t.originalHost
+        return safeValue(k, t.originalHost)
       case 'k':
-        return t.hostKeyAlias ?? t.originalHost
+        return safeValue(k, t.hostKeyAlias ?? t.originalHost)
       default:
         throw new Error(`ssh: ProxyCommand: unknown token %${k} in "${cmd}"`)
     }
@@ -68,6 +83,13 @@ export type ProxySpawn = (file: string, args: string[], opts: { verbatim: boolea
 const defaultSpawn: ProxySpawn = (file, args, opts) =>
   nodeSpawn(file, args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, windowsVerbatimArguments: opts.verbatim })
 
+/** `taskkill /t /f` — the same tree kill project-setup-runner-local.ts uses. Best-effort. */
+function defaultKillTree(pid: number): void {
+  execFile('taskkill', ['/pid', String(pid), '/t', '/f'], { windowsHide: true }, () => {
+    // ENOENT / "not found": it already exited.
+  })
+}
+
 /** How much of the proxy's stderr is kept for an error message. */
 const STDERR_KEEP = 4096
 
@@ -79,14 +101,29 @@ const STDERR_KEEP = 4096
  */
 export function proxyCommandSocket(
   cmd: string,
-  opts: { timeoutMs: number; platform?: NodeJS.Platform; spawn?: ProxySpawn; env?: NodeJS.ProcessEnv }
+  opts: {
+    timeoutMs: number
+    platform?: NodeJS.Platform
+    spawn?: ProxySpawn
+    env?: NodeJS.ProcessEnv
+    /** Test seam: kill a Windows process TREE by pid (default `taskkill /pid <pid> /t /f`). */
+    killTree?: (pid: number) => void
+  }
 ): Duplex {
-  const { file, args, verbatim } = proxyCommandArgv(cmd, opts.platform, opts.env)
+  const platform = opts.platform ?? process.platform
+  const { file, args, verbatim } = proxyCommandArgv(cmd, platform, opts.env)
   let stderr = ''
   let gotData = false
   let child: ChildProcess | null = null
   const kill = (): void => {
-    if (child && child.exitCode === null && child.signalCode === null) child.kill()
+    if (!child || child.exitCode !== null || child.signalCode !== null) return
+    // Windows: the child is cmd.exe, and the proxy (ncat, ssh -W, …) is ITS child — killing cmd.exe
+    // alone orphans the proxy holding the connection. POSIX needs no tree: `exec` replaced the sh.
+    if (platform === 'win32' && child.pid) {
+      ;(opts.killTree ?? defaultKillTree)(child.pid)
+      return
+    }
+    child.kill()
   }
   const why = (msg: string): Error => {
     const tail = stderr.trim().split(/\r?\n/).pop()

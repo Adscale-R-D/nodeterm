@@ -8486,12 +8486,18 @@ unix-socket forward and dev-server `-L` forward over it. POSIX keeps OpenSSH unt
   **ProxyCommand** (`proxy-command.ts`) runs on the target or the FIRST hop, as OpenSSH does:
   `%h %p %r %n %k %%` expanded (an unknown `%x` is an error by name), POSIX `sh -c 'exec …'`,
   Windows `cmd.exe /d /s /c`, the child's stdio is the socket, its stderr is in the connect error,
-  ConnectTimeout covers the wait for its first byte, and it is killed with the connection.
+  ConnectTimeout covers the wait for its first byte, and it is killed with the connection (on
+  Windows as a TREE, `taskkill /t /f` — the proxy is cmd.exe's child, and killing cmd.exe alone
+  orphans it). Every substituted VALUE (`%h %r %n %k`) is refused if it carries a shell/cmd
+  metacharacter or a leading `-`: the line goes to `sh -c` / `cmd.exe /c`, and Windows' OpenSSH
+  (9.5) predates the CVE-2023-51385 host/user check.
   `ProxyUseFdpass yes` is refused by name. ProxyJump wins when `ssh -G` prints both.
 - **Other honored `~/.ssh/config` options:** `ForwardAgent` (yes / path / `$VAR`) — requested on
-  the TARGET connection's PTY channels only, never on a hop or a background exec/SFTP channel (that
-  would hand the agent to every status probe), and a server that refuses it costs one log line, not
-  the terminal. Options it does NOT honor (`certificatefile`, config `Local/Remote/DynamicForward`)
+  the TARGET connection's PTY channels only, never on a hop or a background exec/SFTP channel, and
+  a server that refuses it costs one log line, not the terminal. Note what that does NOT buy: sshd
+  creates the agent socket once per CONNECTION, so after the first terminal asks, later sessions on
+  that shared connection (background execs included) also see `SSH_AUTH_SOCK` — exactly what an
+  OpenSSH ControlMaster does. Do not document it as "background calls never get the agent". Options it does NOT honor (`certificatefile`, config `Local/Remote/DynamicForward`)
   are named in ONE warning per connection (`UNSUPPORTED_OPTIONS`), never silently dropped; user and
   `@cert-authority` certificates are a later phase.
 - **`-L` dev-server forwards** (`NativeMux.forwardLocal`): the parser accepts ONLY the loopback spec

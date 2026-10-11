@@ -114,6 +114,8 @@ interface ResolvedAgentConfig {
   launchCmd: string;
   promptInjectionMode: PromptInjectionMode;
   argvPromptSeparator?: string;
+  /** `flag-interactive` only: the builtin's own interactive-prompt flag (agy's differs). */
+  promptFlag?: string;
   builtin: boolean;
 }
 
@@ -242,6 +244,7 @@ function resolveTrustedAgentConfig(
       launchCmd: config.launchCmd,
       promptInjectionMode: config.promptInjectionMode,
       argvPromptSeparator: config.argvPromptSeparator,
+      promptFlag: config.promptFlag,
       builtin: true,
     };
   }
@@ -410,12 +413,21 @@ function logicalLaunch(
     };
   }
 
-  if (promptInjectionMode === "flag-prompt") {
+  if (
+    promptInjectionMode === "flag-prompt" ||
+    promptInjectionMode === "flag-interactive"
+  ) {
+    // Same flag choice as `assembleLaunchCommand`: copilot's `--interactive`, agy's own
+    // `--prompt-interactive`. A positional here would be read as a subcommand by both.
+    const flag =
+      promptInjectionMode === "flag-prompt"
+        ? "--prompt"
+        : (config.promptFlag ?? "--interactive");
     return {
       executable,
       args: [
         ...baseArgs,
-        ...(hasPrompt ? ["--prompt", prompt as string] : []),
+        ...(hasPrompt ? [flag, prompt as string] : []),
         ...modeFlags,
         ...sessionArgs,
       ],

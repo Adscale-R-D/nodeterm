@@ -33,7 +33,7 @@ export function osRevealLabel(os: RevealOs = viewerRevealOs()): string {
  * Windows gets one native separator throughout; every other platform keeps the historical
  * `${cwd}/${rel}` byte for byte.
  */
-export function localRevealPath(cwd: string, rel: string, os: RevealOs = viewerRevealOs()): string {
-  if (os !== 'win32') return `${cwd}/${rel}`
+export function localRevealPath(cwd: string | undefined, rel: string, os: RevealOs = viewerRevealOs()): string {
+  if (os !== 'win32' || cwd === undefined) return `${cwd}/${rel}`
   return `${cwd.replace(/[\\/]+$/, '')}\\${rel.replace(/\//g, '\\')}`
 }

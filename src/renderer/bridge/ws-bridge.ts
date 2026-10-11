@@ -80,6 +80,7 @@ import {
 } from '../../shared/types'
 import type { PeerIdentity } from '../../shared/presence'
 import type { PaneOwner } from '../../shared/agents/pane-owner-predicate'
+import type { LaunchIntentExecutionResult } from '../../shared/types'
 import { buildStubApi, unsupported } from './stubs'
 import { sanitizeStationNotices } from '@shared/station-notice'
 import { sanitizeOutcomeRecords } from '@shared/station-outcome'
@@ -316,6 +317,18 @@ export function buildRealApi(
       client.request(IPC.ptyPaneOwner, persistKey).catch(() => null) as Promise<PaneOwner | null>,
     terminateForeground: (persistKey, expectedAgentId) =>
       client.request(IPC.ptyTerminateForeground, persistKey, expectedAgentId).catch(() => false) as Promise<boolean | 'unsupported'>,
+    // REAL: core registers it, so a server running on Windows answers with its own session host.
+    // On the Linux server every call answers `unsupported-shell` and the caller types its legacy
+    // line. A transport failure is `delivery-failed`, NOT a fallback: the reply may be what was
+    // lost, and typing the legacy line after a launch that did land would start the agent twice.
+    executeLaunch: (persistKey, request) =>
+      (client.request(IPC.ptyExecuteLaunch, persistKey, request) as Promise<LaunchIntentExecutionResult>).catch(
+        (): LaunchIntentExecutionResult => ({
+          ok: false,
+          reason: 'delivery-failed',
+          message: 'The agent launch could not be delivered to the terminal.'
+        })
+      ),
     // No server handler — the session-name poll degrades to no adopted name. A PRE-EXISTING gap,
     // and not any one agent's: `IPC.ptyReadSessionName` has never been registered server-side, so
     // claude's, grok's and gemini's read legs are equally stubbed here (the write leg works on both

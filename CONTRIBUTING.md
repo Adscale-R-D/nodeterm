@@ -71,6 +71,11 @@ its terminals and refuses the extension; never restart it automatically or fall 
 Message dispatch publishes pending canvas edits before main resolves scope, without overwriting
 an unresolved file conflict. See `docs/windows-session-host.md`.
 
+**Windows agent launches:** a new agent launch site that types a prompt-bearing line must go
+through the launch writer (`createLaunchWriter`) so a Windows-native pane can execute the node's
+`data.launchIntent` instead (`pty:execute-launch`). If you add a launch input the core planner does
+not model, exclude it in `heldLaunchIntentFor`, or the Windows pane launches without it.
+
 Claude usage identity is scoped to the same config directory as its credentials. Read organization
 metadata even when credentials already include an email, and degrade to the email-only row when
 metadata cannot be read. Managed usage must never fall back to an unscoped system Keychain token:

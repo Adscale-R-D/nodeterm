@@ -38,6 +38,10 @@ export const IPC = {
   ptyPaneCwd: 'pty:pane-cwd',
   /** Desktop-only (#925): start a node's session with no viewer and deliver its held launch. */
   ptyLaunchHeadless: 'pty:launch-headless',
+  /** Renderer → core: execute a semantic agent launch (`LaunchIntentRequest`) in a node's live
+   *  local Windows session-host pane, encoded for that pane's own shell (core/launch-intent-execute.ts).
+   *  Host-only (shared/host-control.ts): a relay peer must never make the host read a prompt file. */
+  ptyExecuteLaunch: 'pty:execute-launch',
   /** Kernel truth about a node's tmux pane: its root pid, tty, tmux pane id, and the full argv of
    *  its FOREGROUND process group (`PaneOwner`). The name-only `ptyPaneCommand` above cannot tell
    *  an agent from anything else — an npm-installed CLI reports as `node`, and an agent reached

@@ -520,6 +520,15 @@ anything else. Board-level fields survive every transform — `pullLinks` is one
   arguments and lines above cmd's limit fail explicitly. Keep stdin direct: PowerShell's text
   pipeline changes Unicode and line endings under Windows PowerShell 5.1.
 
+- **Need a POSIX `sh` on Windows? Resolve Git Bash, never spawn bare `sh`.** A stock Git install
+  puts only `Git\cmd` on PATH. `resolveWindowsSh` (`src/core/windows-sh.ts`) walks Git's real
+  layouts, then PATH minus WSL shims; the codex hook wrapper's batch candidate list is derived from
+  the same data, so add a layout there, once. With no shell, say "Install Git for Windows" — the
+  project setup-script runner is the worked example (it also sets `CHERE_INVOKING=1`, or Git Bash's
+  login profile leaves the project folder). And do not type a chained command line (`a && b '<x>'`)
+  into a terminal for the user: PowerShell 5.1 and cmd parse it differently. Type one bare command
+  and do the rest in-process (Source Control's publish fallback, `lib/publishFallback.ts`).
+
 - **The phone reaches a Windows desktop through the relay only.** Everything the iOS app sends over
   SSH is POSIX sh plus tmux, and Windows OpenSSH hands out `cmd.exe`, so Windows pairing installs no
   SSH key and requires remote access instead of an SSH server (`src/shared/pairing-gate.ts`). Do not

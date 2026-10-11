@@ -15,6 +15,8 @@
 //   - the CLI launcher (`buildWindowsShLauncher`) is something an agent RUNS on purpose, so it
 //     fails loudly with a message saying what is missing and exits 1.
 
+import { WINDOWS_SH_LAYOUTS } from '../../windows-sh'
+
 /**
  * Where a wrapper looks for a POSIX shell, in order. cmd.exe expands these itself.
  *
@@ -22,15 +24,13 @@
  * and the per-user install under LOCALAPPDATA, which is what `winget install Git.Git` produces
  * without admin), then whatever `sh.exe` is on PATH. PATH is last on purpose: it is the least
  * predictable, and a WSL `sh` shim there cannot run a Windows-path script.
+ *
+ * Derived from `WINDOWS_SH_LAYOUTS` (core/windows-sh.ts) — the same list the setup-script runner
+ * resolves in process — so the wrappers and that resolver cannot disagree about where Git Bash lives.
  */
-export const WINDOWS_SH_CANDIDATES = [
-  '%ProgramFiles%\\Git\\bin\\sh.exe',
-  '%ProgramFiles%\\Git\\usr\\bin\\sh.exe',
-  '%ProgramFiles(x86)%\\Git\\bin\\sh.exe',
-  '%ProgramFiles(x86)%\\Git\\usr\\bin\\sh.exe',
-  '%LOCALAPPDATA%\\Programs\\Git\\bin\\sh.exe',
-  '%LOCALAPPDATA%\\Programs\\Git\\usr\\bin\\sh.exe'
-] as const
+export const WINDOWS_SH_CANDIDATES: readonly string[] = WINDOWS_SH_LAYOUTS.map(
+  (l) => `%${l.envVar}%\\${l.rel}`
+)
 
 /**
  * The batch lines that leave `NT_SH` naming a POSIX shell (or undefined): the candidates above in

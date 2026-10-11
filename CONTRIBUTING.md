@@ -90,6 +90,11 @@ Coalesce renderer updates before building the workspace map, without resetting t
 Intermediate publications retain resolved transcript paths only for unchanged identities; changing
 a session/account/location/hook path or removing the target invalidates that cache immediately.
 
+Windows updates (unsigned beta): `release-win` builds `dist:win:release` (`nodeTermUpdates=manual`)
+and uploads `latest.yml`, so the app shows a passive "new version — Download" card; it never
+downloads or installs, and main refuses restart-to-update for any non-self-installing build.
+Keep local `dist:win` on `disabled`, and never upload Windows `*.blockmap`s until signing lands.
+
 Windows installer safety (#829): `build/installer.nsh` overrides NSIS's process-killing check.
 A running app or session host blocks install/uninstall, and a failed process query blocks too.
 Never restore automatic host termination: quitting the app preserves those live sessions.

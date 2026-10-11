@@ -12,6 +12,7 @@ import { randomUUID } from 'crypto'
 // socket 'close' events dispatch first, even inside fake-timer tests.
 import { setImmediate as realSetImmediate } from 'timers'
 import { sessionHostPaths } from '../session-host/paths'
+import { WINDOWS_PROCESS_TREE_TERMINATION_TIMEOUT_MS } from '../session-host/windows-process-tree'
 import {
   EMPTY_LOCK_STALE_MS,
   LISTEN_RETRY_BUDGET_MS,
@@ -63,6 +64,14 @@ export const SESSION_HOST_REQUEST_TIMEOUT_MS = 10_000
 /** A `shutdown` ends every session (each kill confirmed by the host within its own 20 s bound),
  *  so it gets a longer deadline than an ordinary request. */
 export const SHUTDOWN_REQUEST_TIMEOUT_MS = 45_000
+/** `terminateOwnerV1` runs the host's owner probe (`readWindowsConsoleOwner`, a PowerShell
+ *  execFile bounded at 4 s) and then `taskkill /T /F` plus the root-absence poll (bounded at
+ *  `WINDOWS_PROCESS_TREE_TERMINATION_TIMEOUT_MS`, 8 s). The ordinary 10 s deadline is shorter than
+ *  that sum, and its expiry is not a plain `false`: the agent may already be dead (the caller then
+ *  skips the recycle and strands a bare shell) AND the deadline retires the whole socket, dropping
+ *  every other session's stream on this connection. So the kill gets the full budget plus slack. */
+export const TERMINATE_OWNER_REQUEST_TIMEOUT_MS =
+  4_000 + WINDOWS_PROCESS_TREE_TERMINATION_TIMEOUT_MS + 6_000
 
 export type HostUpdateInspection =
   | { running: false }
@@ -1651,7 +1660,12 @@ export class SessionHostClient {
    *  retried — a second kill aimed at a re-proven owner is the host's job, not a resend's. */
   async terminateOwner(name: string, expected: PaneOwner): Promise<boolean | 'unsupported'> {
     try {
-      const result = await this.request<{ terminated?: unknown } | undefined>({ cmd: 'terminateOwnerV1', name, expected })
+      const result = await this.request<{ terminated?: unknown } | undefined>(
+        { cmd: 'terminateOwnerV1', name, expected },
+        undefined,
+        undefined,
+        TERMINATE_OWNER_REQUEST_TIMEOUT_MS
+      )
       return result?.terminated === true
     } catch (error) {
       return error instanceof SessionHostRequestRejectedError && error.message === 'unknown command'

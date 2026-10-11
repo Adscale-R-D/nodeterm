@@ -13,10 +13,13 @@ import {
   type SessionHostSpawnOptions
 } from '../session-host/protocol'
 import {
+  SESSION_HOST_REQUEST_TIMEOUT_MS,
   SessionHostClient,
   SessionHostProtocolCompatibilityError,
+  TERMINATE_OWNER_REQUEST_TIMEOUT_MS,
   type SessionSubscriber
 } from './session-host-client'
+import { WINDOWS_PROCESS_TREE_TERMINATION_TIMEOUT_MS } from '../session-host/windows-process-tree'
 
 const openServers = new Set<net.Server>()
 const openSockets = new Set<net.Socket>()
@@ -260,6 +263,24 @@ describe('SessionHostClient handshake transition', () => {
     expect(await within(client.terminateOwner('nt-a', WIN_OWNER))).toBe(false)
     // Exactly one request per call: no retry, no fallback to a write or a kill.
     expect(commands).toEqual(['hello', 'terminateOwnerV1', 'terminateOwnerV1'])
+  })
+
+  it('gives terminateOwnerV1 a deadline covering the host probe plus the whole tree-kill budget', async () => {
+    // A deadline shorter than the host's own work reports `false` for a kill that may have landed
+    // (the caller then skips the recycle) and retires the socket for every other session.
+    expect(TERMINATE_OWNER_REQUEST_TIMEOUT_MS).toBeGreaterThan(4_000 + WINDOWS_PROCESS_TREE_TERMINATION_TIMEOUT_MS)
+    expect(TERMINATE_OWNER_REQUEST_TIMEOUT_MS).toBeGreaterThan(SESSION_HOST_REQUEST_TIMEOUT_MS)
+    const client = new SessionHostClient({ userDataDir: os.tmpdir(), repoRoot: os.tmpdir() })
+    const request = vi
+      .spyOn(client as unknown as { request: (...args: unknown[]) => Promise<unknown> }, 'request')
+      .mockResolvedValue({ terminated: true })
+    expect(await client.terminateOwner('nt-a', WIN_OWNER)).toBe(true)
+    expect(request).toHaveBeenCalledWith(
+      expect.objectContaining({ cmd: 'terminateOwnerV1' }),
+      undefined,
+      undefined,
+      TERMINATE_OWNER_REQUEST_TIMEOUT_MS
+    )
   })
 
   it('returns terminated only when the host says so, carrying the expected owner verbatim', async () => {

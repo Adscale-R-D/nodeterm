@@ -276,6 +276,7 @@ import { codexHome } from '../core/usage/codex-usage'
 import { isAsyncSubagentLaunch, grokRawFields, type NormalizedAgentEvent } from '../shared/agents/normalize'
 import { applyGrokHookSession } from '../core/grok-hook-session'
 import { agentAccountColor } from '../shared/agents/account-color'
+import { capabilityAgentId } from '../shared/agents/config'
 import {
   setRemoteTranscriptReader,
   TITLE_TAIL_BYTES,
@@ -2418,7 +2419,11 @@ app.whenReady().then(async () => {
       claudeAutoSupported: localClaudeCaps?.autoPermissionMode === true,
       codexApprovalValues: localCodexCaps?.approvalValues ?? null,
       codexNoDaemon: localCodexCaps?.noDaemon === true,
-      isKnownAccount: (id) => localClaude.has(id) || localCodex.has(id),
+      // Provider-matched: a claude agent never runs under a codex home, or the reverse.
+      isKnownAccount: (id, agentId) => {
+        const cap = capabilityAgentId(agentId)
+        return cap === 'claude' ? localClaude.has(id) : cap === 'codex' ? localCodex.has(id) : false
+      },
       env: process.env
     }
   })

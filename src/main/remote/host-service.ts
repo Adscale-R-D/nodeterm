@@ -508,7 +508,17 @@ export function createHostHandlers(
         // = no tmux in front of this pane (session host / plain shell), so `pty.scroll` will not
         // move history — scroll your own buffer. A tmux stream's reply is unchanged.
         ...(prep.scroll === 'local' ? { scroll: 'local' as const } : {}),
-        ...(launchAsked ? { launched: !!launch, hostPlatform } : {})
+        // `paneShell` says whether a typed POSIX line is safe in THIS pane — not the same question
+        // as `hostPlatform`: a Windows desktop's SSH-project node runs on a POSIX host's tmux (the
+        // host does not own that launch, so `launched:false` + `paneShell:'posix'` = "type it as
+        // before"), while a local pane on a win32 host is pwsh / cmd ("never type shell syntax").
+        ...(launchAsked
+          ? {
+              launched: !!launch,
+              hostPlatform,
+              paneShell: prep.remote || hostPlatform !== 'win32' ? ('posix' as const) : ('windows' as const)
+            }
+          : {})
       })
       const snapshot = await prep.snapshot().catch(() => '')
       // The stream may have been killed/closed while the capture was in flight.

@@ -55,18 +55,18 @@ function launchCtx(over: Partial<RelayLaunchContext> = {}): RelayLaunchContext {
   return {
     customAgents: [],
     claudeAutoSupported: true,
-    isKnownAccount: (id) => id === 'acct-1',
+    isKnownAccount: (id, agentId) => id === 'acct-1' && agentId === 'claude',
     env: {},
     ...over
   }
 }
 
-async function manager(withLaunch = true) {
+async function manager(withLaunch: boolean | Partial<RelayLaunchContext> = true, runtimePlatform?: NodeJS.Platform) {
   const { PtyManager } = await import('./pty-manager')
-  const m = new PtyManager()
+  const m = new PtyManager(runtimePlatform ? { runtimePlatform } : {})
   m.init(() => ({ ...DEFAULT_SETTINGS, tmuxEnabled: false }))
   m.setRelayNodeResolver(resolver())
-  if (withLaunch) m.setRelayLaunchContext(() => launchCtx())
+  if (withLaunch) m.setRelayLaunchContext(() => launchCtx(withLaunch === true ? {} : withLaunch))
   return m
 }
 
@@ -99,6 +99,37 @@ describe('relay launch (pty.attach { launch })', () => {
     if (prep.kind !== 'ready') throw new Error('not ready')
     await prep.attach(sinks)
     expect((spawn.mock.calls[0][0] as { accountId?: string }).accountId).toBeUndefined()
+  })
+
+  it("an account of the OTHER provider is dropped: a codex agent never runs under a claude account's home", async () => {
+    const m = await manager()
+    const spawn = vi.spyOn(m as unknown as { spawnSession: (...a: unknown[]) => string }, 'spawnSession')
+    const prep = await m.prepareRelayAttach('fresh-x', { cols: 80, rows: 24 }, { launch: { agentId: 'codex', accountId: 'acct-1' } })
+    if (prep.kind !== 'ready') throw new Error('not ready')
+    await prep.attach(sinks)
+    expect((spawn.mock.calls[0][0] as { accountId?: string }).accountId).toBeUndefined()
+  })
+
+  it('a launch no line can be built for is never PROMISED (the reply would say launched:true and nothing would come)', async () => {
+    // A Windows pane with no trusted planner wired: a custom agent whose args were quoted is not
+    // dialect-neutral, so buildRelayLaunch would answer null after the reply. Refused up front.
+    const quoted = {
+      customAgents: [{ id: 'mine', label: 'Mine', launchCmd: 'mine', args: "--flag 'a b'" } as never]
+    }
+    const win = await manager(quoted, 'win32')
+    const w = await win.prepareRelayAttach('fresh-w', { cols: 80, rows: 24 }, { launch: { agentId: 'mine' } })
+    expect(w.kind === 'ready' && w.launch).toBeFalsy()
+    // The same agent on a POSIX host types the quoted line exactly as the phone used to.
+    const posix = await manager(quoted, 'linux')
+    const p = await posix.prepareRelayAttach('fresh-p', { cols: 80, rows: 24 }, { launch: { agentId: 'mine' } })
+    expect(p.kind === 'ready' && p.launch).toBeTypeOf('function')
+    // A plain builtin on the Windows pane is neutral and still offered.
+    const plain = await win.prepareRelayAttach('fresh-b', { cols: 80, rows: 24 }, { launch: { agentId: 'claude', sessionId: SID } })
+    expect(plain.kind === 'ready' && plain.launch).toBeTypeOf('function')
+    // An ${env:…} that expands to nothing would type a mangled line on ANY host.
+    const envd = await manager({ customAgents: [{ id: 'e', label: 'E', launchCmd: '${env:NOPE_UNSET}' } as never] }, 'linux')
+    const e = await envd.prepareRelayAttach('fresh-e', { cols: 80, rows: 24 }, { launch: { agentId: 'e' } })
+    expect(e.kind === 'ready' && e.launch).toBeFalsy()
   })
 
   it('a RECORDED node keeps its records; a launch naming another agent is no launch', async () => {
@@ -196,6 +227,36 @@ describe('sendKeys into a session-host pane', () => {
     expect(await m.sendKeys('n1', [{ digit: '2' }, { name: 'Right' }, { name: 'Enter' }])).toBe(true)
     expect(writes).toEqual(['2', '\x1b[C', '\r'])
   })
+  // A fake `tmux` that records its argv: proves which socket a key went to (POSIX sh script).
+  it.skipIf(process.platform === 'win32')(
+    "an SSH-project node with no client held never falls through to the LOCAL socket",
+    async () => {
+      const fs = await import('node:fs')
+      const os = await import('node:os')
+      const path = await import('node:path')
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nt-sendkeys-'))
+      const log = path.join(dir, 'argv.log')
+      const tmux = path.join(dir, 'tmux')
+      fs.writeFileSync(tmux, `#!/bin/sh\necho "$@" >> '${log}'\n`, { mode: 0o755 })
+      try {
+        const m = await manager()
+        ;(m as unknown as { tmuxPath: string | null }).tmuxPath = tmux
+        // Owner known, ControlMaster down: nothing is sent anywhere — a same-named local orphan
+        // `nt-<id>` must not take the keystroke.
+        m.setRemoteNodeOwner((id) => (id === 'remote-n' ? { projectId: 'p', hostKey: 'u@h' } : null))
+        expect(await m.sendKeys('remote-n', [{ digit: '1' }])).toBe(false)
+        expect(fs.existsSync(log)).toBe(false)
+        // A LOCAL node with no client held still goes to the local socket, as before.
+        expect(await m.sendKeys('local-n', [{ digit: '1' }, { name: 'Enter' }])).toBe(true)
+        expect(fs.readFileSync(log, 'utf8').trim().split('\n')).toEqual([
+          '-L node-terminal send-keys -t nt-local-n -l 1',
+          '-L node-terminal send-keys -t nt-local-n Enter'
+        ])
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true })
+      }
+    }
+  )
   it('no client this process holds ⇒ nothing delivered', async () => {
     const m = await manager()
     ;(m as unknown as { tmuxPath: string | null }).tmuxPath = null

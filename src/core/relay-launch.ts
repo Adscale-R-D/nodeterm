@@ -65,8 +65,11 @@ export interface RelayLaunchContext {
   claudeAutoSupported: boolean
   codexApprovalValues?: readonly string[] | null
   codexNoDaemon?: boolean | null
-  /** Is `accountId` a usable LOCAL managed account (claude or codex) on this machine? */
-  isKnownAccount(accountId: string): boolean
+  /** Is `accountId` a usable LOCAL managed account on this machine FOR THIS AGENT'S PROVIDER? A
+   *  claude agent takes only a claude account and a codex agent only a codex one: the two lists
+   *  share an id alphabet, and a cross-provider pair would scope the session to the wrong CLI's
+   *  home (or be refused at spawn). */
+  isKnownAccount(accountId: string, agentId: AgentId): boolean
   /** `${env:…}` expansion for a custom agent's launchCmd/args (the host process env). */
   env: Record<string, string | undefined>
   /** The trusted Windows planner's executable resolver, once the host wires one. Absent ⇒ the
@@ -135,6 +138,23 @@ export function relayLaunchDialect(paneCommand: string | null | undefined): Agen
  */
 export function isDialectNeutralCommand(command: string): boolean {
   return /^[A-Za-z0-9._:/=@+-]+( [A-Za-z0-9._:/=@+-]+)*$/.test(command) && !/^-/.test(command)
+}
+
+/**
+ * Can a launch line be built for this request BEFORE the pane exists? Run before the attach replies
+ * `launched: true` (= "phone, type nothing"), so every DETERMINISTIC no-launch — an `${env:…}` that
+ * expands to nothing, a custom agent whose line is not dialect-neutral on a Windows pane with no
+ * trusted planner — answers `launched: false` and the phone keeps its own path, instead of a reply
+ * that promises a launch nobody will ever deliver. `windowsPane` = the pane will be pwsh / Windows
+ * PowerShell / cmd (all three take the same neutral-line rule, so one probe answers for them).
+ */
+export async function relayLaunchPreflight(
+  req: RelayLaunchRequest,
+  ctx: RelayLaunchContext,
+  windowsPane: boolean
+): Promise<boolean> {
+  if (windowsPane && ctx.resolveExecutableKind) return relayLaunchAgentKnown(req.agentId, ctx)
+  return (await buildRelayLaunch(req, windowsPane ? 'pwsh' : 'posix', ctx).catch(() => null)) !== null
 }
 
 /** The mode the launch carries: claude's own version gate, and nothing for an agent with no modes. */

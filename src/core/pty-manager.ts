@@ -221,7 +221,7 @@ import {
 import type { SessionHostPty } from './session-host-pty'
 import { NativeWindowsPane } from './native-windows-pane'
 import type { ProjectSpawnOverrides, ProjectSpawnOverridesReader } from './project-spawn-overrides'
-import { buildRelayLaunch, relayLaunchAgentKnown, relayLaunchDialect, type RelayLaunchContext, type RelayLaunchRequest } from './relay-launch'
+import { buildRelayLaunch, relayLaunchAgentKnown, relayLaunchDialect, relayLaunchPreflight, type RelayLaunchContext, type RelayLaunchRequest } from './relay-launch'
 import { RELAY_KEY_GAP_MS, rawKeyBytes, tmuxKeyArgs, type RelayKey } from './relay-keys'
 
 // How often we snapshot a live tmux session's scrollback to disk, so a machine reboot (which
@@ -3457,7 +3457,8 @@ export class PtyManager {
       cols: size.cols,
       rows: size.rows
     }
-    const launch = plan.kind === 'local' ? this.relayLaunchFor(hint.launch, plan.projectId, options) : undefined
+    let launch = plan.kind === 'local' ? this.relayLaunchFor(hint.launch, plan.projectId, options) : undefined
+    if (launch && !(await this.relayLaunchViable(launch, nodeId))) launch = undefined
     const refused = this.spawnRefusal(options)
     if (refused) {
       return {
@@ -3596,8 +3597,24 @@ export class PtyManager {
     // trusted as a path component.
     options.agentId = req.agentId
     if (req.cwd) options.cwd = req.cwd
-    if (req.accountId && ctx.isKnownAccount(req.accountId)) options.accountId = req.accountId
+    if (req.accountId && ctx.isKnownAccount(req.accountId, req.agentId)) options.accountId = req.accountId
     return req
+  }
+
+  /** `relayLaunchPreflight` for this node's pane: a Windows pane unless a tmux (or a live non-Windows
+   *  backend) will hold it. A throwing context means no launch. */
+  private async relayLaunchViable(req: RelayLaunchRequest, persistKey: string): Promise<boolean> {
+    const ctxFn = this.relayLaunchContext
+    if (!ctxFn) return false
+    try {
+      const live = this.liveSessionForPersistKey(persistKey)
+      const windowsPane =
+        this.runtimePlatform === 'win32' &&
+        (live ? !!live.sessionHost || !!live.nativeWindowsPane || !live.tmuxBacked : !(this.tmuxPath && this.getSettings().tmuxEnabled))
+      return await relayLaunchPreflight(req, ctxFn(), windowsPane)
+    } catch {
+      return false
+    }
   }
 
   /** How long a relay launch waits for a shell to own the fresh pane before giving up. */
@@ -3699,17 +3716,21 @@ export class PtyManager {
       const target = sessionName(persistKey)
       const live = this.liveSessionForPersistKey(persistKey)
       if (live?.nativeWindowsPane || this.isZellij(persistKey, live)) return false
+      // An SSH-project node with no client of ours held right now lives on the HOST's tmux: its
+      // owner's ControlMaster is the only way there. Never fall through to the LOCAL socket — a
+      // same-named local `nt-<id>` (the pre-`requireRemote` orphan) would take the keystroke, and a
+      // stray `1` / Enter into an unrelated pane is exactly what the closed key set exists to stop.
+      const owner = live ? null : (this.remoteNodeOwner?.(persistKey) ?? null)
+      if (owner && !owner.remote) return false
+      const sshRemote = live?.sshRemote ?? owner?.remote
       for (let i = 0; i < keys.length; i++) {
         if (i > 0) await new Promise((r) => setTimeout(r, RELAY_KEY_GAP_MS))
         const key = keys[i]
         try {
-          if (live?.sshRemote) {
+          if (sshRemote) {
             const ssh = findSsh()
             if (!ssh) return false
-            await runAsync(
-              ssh,
-              remoteSendKeyArgs(live.sshRemote.conn, live.sshRemote.controlPath, target, tmuxKeyArgs(key))
-            )
+            await runAsync(ssh, remoteSendKeyArgs(sshRemote.conn, sshRemote.controlPath, target, tmuxKeyArgs(key)))
           } else if (live?.sessionHost || !this.tmuxPath) {
             // No name-addressed raw write exists on the session host (its `sendKeys` is a paste),
             // so a key needs a client this process holds — the desktop node, or a relay stream.

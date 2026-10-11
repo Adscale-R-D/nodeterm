@@ -8619,11 +8619,17 @@ unix-socket forward over it. POSIX keeps OpenSSH untouched.
   field re-validated, cwd jailed to the fs roots, cwd/account folded into the SPAWN options of an
   unrecorded node (a recorded node keeps its records), and the line built for the pane's real
   parser — `assembleResumeCommand` on POSIX, the trusted Windows planner when its resolver is
-  wired, else only a dialect-neutral line. Reply `launched: true` = "type nothing". Without
-  `launch` the reply is byte-identical. `pty.scroll` writes the wheel only on a tmux /
+  wired, else only a dialect-neutral line. Reply `launched: true` = "type nothing", and it is only
+  promised after a preflight build succeeded (`relayLaunchPreflight` — an unset `${env:…}` or a
+  non-neutral custom line on a Windows pane answers `launched:false`, never a launch that silently
+  never comes). The reply also says `paneShell: 'posix' | 'windows'` — whether a typed POSIX line is
+  safe in THAT pane, which is not `hostPlatform`: a Windows desktop's SSH-project node runs on a
+  POSIX host (not host-launched; the phone types as before). Without `launch` the reply is
+  byte-identical. `pty.scroll` writes the wheel only on a tmux /
   mouse-requesting pane (`PtyManager.scrollRoute`); a session-host / plain stream's reply says
   `scroll:'local'` and its snapshot is the full buffer. Keyed answers ride `agent.key` (closed key
-  set, host-side state + open-ask guard, hook reply first), read-acks `inbox.ack`
+  set, host-side state + open-ask guard, hook reply first; an SSH-project node with no client held
+  goes over its owner's ControlMaster or nowhere — never the local socket), read-acks `inbox.ack`
   (`applyPhoneReadAck`, the ack sweeper's body), plus `fs.browse` (home-jailed, dirs only) and
   `pty.capture`; `host.info` lists them. All additive — an old phone keeps its old path.
 

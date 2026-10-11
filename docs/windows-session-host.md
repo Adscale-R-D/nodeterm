@@ -690,7 +690,9 @@ you chose and why") rather than an oversight.
   bytes for tmux's copy-mode. Neither holds here: pwsh / cmd reject `2>/dev/null`, `env -u`,
   `VAR=x cmd`, and a wheel nobody asked for lands in the prompt as text. So the phone sends
   `pty.attach { launch }` and the HOST launches (`core/relay-launch.ts`: cwd/account ride the spawn
-  options, the line is built for the pane's real parser and typed once), the attach reply says
+  options, the line is built for the pane's real parser and typed once; `launched:true` is promised
+  only after a preflight build succeeded, and `paneShell` tells the phone whether a typed POSIX line
+  is safe in that pane — an SSH-project node of a Windows desktop is `posix`), the attach reply says
   `scroll:'local'` with a full-buffer snapshot, and `pty.scroll` writes a wheel only when
   `paneModesV1` reports the app asked for the mouse. Keyed Inbox answers (`agent.key`), read-acks
   (`inbox.ack`), the folder browser (`fs.browse`) and plain capture (`pty.capture`) are relay

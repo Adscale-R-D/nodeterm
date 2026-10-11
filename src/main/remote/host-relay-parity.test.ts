@@ -25,6 +25,7 @@ function setup(opts: {
   scroll?: 'host' | 'local'
   route?: 'tmux' | 'app-mouse' | 'local'
   withLaunch?: boolean
+  remote?: boolean
   extras?: HostRelayExtras
   chat?: Partial<HostChatOps>
   roots?: string[]
@@ -43,7 +44,7 @@ function setup(opts: {
   const pty = {
     prepareRelayAttach: vi.fn(async () => ({
       kind: 'ready' as const,
-      remote: false,
+      remote: opts.remote ?? false,
       ...(opts.scroll ? { scroll: opts.scroll } : {}),
       sessionExists: async () => opts.existed ?? true,
       snapshot: async () => '',
@@ -105,7 +106,13 @@ describe('pty.attach { launch } — the host owns the launch', () => {
     })
     await flush()
     await flush()
-    expect(responses[0].body).toEqual({ streamId: 1, fresh: true, launched: true, hostPlatform: 'win32' })
+    expect(responses[0].body).toEqual({
+      streamId: 1,
+      fresh: true,
+      launched: true,
+      hostPlatform: 'win32',
+      paneShell: 'windows'
+    })
     expect(pty.prepareRelayAttach.mock.calls[0][2]).toEqual({
       projectId: undefined,
       launch: { agentId: 'claude', sessionId: 'abc-1', cwd: 'c:\\Work\\app', permissionMode: 'plan' }
@@ -118,7 +125,29 @@ describe('pty.attach { launch } — the host owns the launch', () => {
     handlers.onRpc({ id: '1', method: 'pty.attach', params: { nodeId: 'n1', launch: { agentId: 'claude' } } })
     await flush()
     await flush()
-    expect(responses[0].body).toEqual({ streamId: 1, fresh: false, launched: false, hostPlatform: 'linux' })
+    expect(responses[0].body).toEqual({
+      streamId: 1,
+      fresh: false,
+      launched: false,
+      hostPlatform: 'linux',
+      paneShell: 'posix'
+    })
+    expect(launch).not.toHaveBeenCalled()
+  })
+  it("a win32 host's SSH-project node: not host-launched, and the pane is POSIX (the phone types as before)", async () => {
+    // A Windows desktop's SSH project runs on a POSIX host's tmux. `hostPlatform: 'win32'` alone
+    // would tell an updated phone "never type shell syntax" and the remote agent would never start.
+    const { handlers, responses, launch } = setup({ existed: false, remote: true, extras: { platform: 'win32' } })
+    handlers.onRpc({ id: '1', method: 'pty.attach', params: { nodeId: 'n1', launch: { agentId: 'claude' } } })
+    await flush()
+    await flush()
+    expect(responses[0].body).toEqual({
+      streamId: 1,
+      fresh: true,
+      launched: false,
+      hostPlatform: 'win32',
+      paneShell: 'posix'
+    })
     expect(launch).not.toHaveBeenCalled()
   })
   it('a cwd outside the shared roots is dropped; a forged launch reaches core as no launch', async () => {

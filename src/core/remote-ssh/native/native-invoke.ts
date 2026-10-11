@@ -53,13 +53,15 @@ export async function runSshArgv(
       return (await mux.exit(cp)) ? result(0, '', 'Exit request sent.\n') : result(255, '', `${noMasterMessage(cp)}\n`)
     case 'forward':
       try {
-        await mux.forward(cp, p.forward)
+        if (p.forward.kind === 'local') await mux.forwardLocal(cp, p.forward)
+        else await mux.forward(cp, p.forward)
         return result(0, '', '')
       } catch (e) {
         return result(255, '', `${(e as Error).message}\n`)
       }
     case 'cancel':
-      await mux.cancel(cp, p.forward)
+      if (p.forward.kind === 'local') await mux.cancelLocal(cp, p.forward)
+      else await mux.cancel(cp, p.forward)
       return result(0, '', '')
   }
 }

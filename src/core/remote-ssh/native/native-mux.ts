@@ -33,7 +33,7 @@ import net from 'net'
 import type { Duplex } from 'stream'
 import fs from 'fs'
 import { Client, createAgent, utils, type Channel, type ClientChannel, type ConnectConfig, type UNIXConnectionDetails, type ParsedKey, type SFTPWrapper } from 'ssh2'
-import type { ParsedSsh, ReverseForward, SshOptions, SshTarget } from './ssh-argv'
+import type { LocalForward, ParsedSsh, ReverseForward, SshOptions, SshTarget } from './ssh-argv'
 import { parseProxyJump, type HostQuery, type JumpSpec, type ResolvedHost } from './ssh-config'
 import { acceptNewHostKey } from './known-hosts'
 import { addKeyToAgent, type AgentAddResult } from './agent-add'
@@ -84,6 +84,9 @@ interface Conn {
   alive: boolean
   closed: Promise<string>
   forwards: Map<string, ReverseForward>
+  /** `-L` listeners this connection holds, by spec (see `localForwardKey`). They close with it,
+   *  as an OpenSSH master's listeners die with the master process. */
+  localForwards: Map<string, LocalListener>
   target: SshTarget
   options: SshOptions
   /** Channels open on this connection right now. */
@@ -94,6 +97,30 @@ interface Conn {
    *  connection BORROWS its primary's chain, so only the primary owns (and ends) these. */
   jumps: Client[]
   ownsJumps: boolean
+}
+
+interface LocalListener {
+  server: net.Server
+  /** Accepted connections, destroyed with the listener (a cancel ends what it was carrying). */
+  sockets: Set<net.Socket>
+}
+
+/** OpenSSH's mux reply for a local forward it could not set up (`mux_client_forward`). */
+export const LOCAL_FORWARD_FAILED = 'mux_client_forward: forwarding request failed: Port forwarding failed'
+
+function localForwardKey(f: LocalForward): string {
+  return `${f.bindHost}:${f.localPort}:${f.toHost}:${f.toPort}`
+}
+
+function closeLocalListener(l: LocalListener): void {
+  l.server.close()
+  for (const s of l.sockets) s.destroy()
+  l.sockets.clear()
+}
+
+function closeLocalForwards(c: Conn): void {
+  for (const l of c.localForwards.values()) closeLocalListener(l)
+  c.localForwards.clear()
 }
 
 /** How deep a first hop's own ProxyJump may recurse before we call it a loop. */
@@ -174,6 +201,7 @@ export class NativeMux {
     if (!c) return false
     this.conns.delete(controlPath)
     c.alive = false
+    closeLocalForwards(c)
     c.client.end()
     this.endOverflow(controlPath)
     await Promise.race([c.closed, new Promise((r) => setTimeout(r, 2000))])
@@ -185,6 +213,7 @@ export class NativeMux {
     for (const [cp, c] of this.conns) {
       this.conns.delete(cp)
       c.alive = false
+      closeLocalForwards(c)
       c.client.end()
       this.endOverflow(cp)
     }
@@ -415,6 +444,70 @@ export class NativeMux {
     )
   }
 
+  /**
+   * `-O forward -L 127.0.0.1:<port>:<addr>:<port>`: a loopback listener here whose every accepted
+   * connection rides a direct-tcpip channel of the shared connection to `addr:port` on the host.
+   * A spec this connection already holds is acknowledged again, as an OpenSSH master acknowledges a
+   * duplicate forward — the port registry's adoption of a forward that survived a renderer reload
+   * ('maybe-ours') depends on that. A port someone else holds is OpenSSH's "Port forwarding failed".
+   */
+  async forwardLocal(controlPath: string, fwd: LocalForward): Promise<void> {
+    const conn = this.conns.get(controlPath)
+    if (!conn?.alive) throw new Error(noMasterMessage(controlPath))
+    await conn.ready
+    const key = localForwardKey(fwd)
+    if (conn.localForwards.has(key)) return
+    const sockets = new Set<net.Socket>()
+    const server = net.createServer((sock) => {
+      sockets.add(sock)
+      sock.once('close', () => sockets.delete(sock))
+      sock.on('error', () => sock.destroy())
+      sock.pause()
+      if (!conn.alive) return void sock.destroy()
+      conn.client.forwardOut(sock.remoteAddress ?? '127.0.0.1', sock.remotePort ?? 0, fwd.toHost, fwd.toPort, (err, ch) => {
+        if (err) {
+          this.deps.log?.(`[native-ssh] -L ${fwd.localPort}: channel open failed to ${fwd.toHost}:${fwd.toPort}: ${err.message}`)
+          return void sock.destroy()
+        }
+        ch.on('error', () => sock.destroy())
+        ch.once('close', () => sock.destroy())
+        sock.once('close', () => ch.close())
+        sock.pipe(ch).pipe(sock)
+        sock.resume()
+      })
+    })
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', (e: NodeJS.ErrnoException) => {
+        this.deps.log?.(`[native-ssh] -L ${fwd.localPort}: ${e.code ?? e.message}`)
+        reject(new Error(LOCAL_FORWARD_FAILED))
+      })
+      // `exclusive`: never share the handle with a cluster worker; the port is ours alone.
+      server.listen({ host: fwd.bindHost, port: fwd.localPort, exclusive: true }, () => resolve())
+    })
+    // The connection may have gone (or another call won the same spec) while we were listening.
+    if (!conn.alive || conn.localForwards.has(key)) {
+      server.close()
+      if (!conn.alive) throw new Error(noMasterMessage(controlPath))
+      return
+    }
+    server.on('error', (e) => this.deps.log?.(`[native-ssh] -L ${fwd.localPort}: ${e.message}`))
+    conn.localForwards.set(key, { server, sockets })
+  }
+
+  /** `-O cancel -L …`: close the listener and what it carries. Not held = not an error (as ssh). */
+  async cancelLocal(controlPath: string, fwd: LocalForward): Promise<void> {
+    const conn = this.conns.get(controlPath)
+    const key = localForwardKey(fwd)
+    const l = conn?.localForwards.get(key)
+    if (!conn || !l) return
+    conn.localForwards.delete(key)
+    await new Promise<void>((resolve) => {
+      l.server.close(() => resolve())
+      for (const s of l.sockets) s.destroy()
+      l.sockets.clear()
+    })
+  }
+
   // ---------------------------------------------------------------------------------------------
 
   /** Drain an exec channel into an ExecResult (stdin written, timeout enforced). */
@@ -462,6 +555,7 @@ export class NativeMux {
       alive: true,
       closed,
       forwards: new Map(),
+      localForwards: new Map(),
       target,
       options,
       channels: 0,
@@ -476,6 +570,7 @@ export class NativeMux {
     })
     client.on('close', () => {
       conn.alive = false
+      closeLocalForwards(conn)
       // The jump connections belong to the target connection: they end with it.
       if (conn.ownsJumps) for (const j of conn.jumps) j.end()
       if (this.conns.get(controlPath) === conn) {

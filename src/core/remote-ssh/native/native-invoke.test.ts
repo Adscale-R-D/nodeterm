@@ -12,6 +12,8 @@ import {
   exitMasterArgs,
   hookForwardArgs,
   hookForwardCancelArgs,
+  localForwardArgs,
+  localForwardCancelArgs,
   masterArgs
 } from '../control-master'
 import type { SshConnection } from '../../../shared/ssh'
@@ -26,6 +28,8 @@ let port: number
 let clients: Connection[] = []
 /** Remote socket path → the server-side client that asked for it (to push a connection back). */
 const streamForwards = new Map<string, Connection>()
+/** Every direct-tcpip open the server saw, as `addr:port`. */
+const tcpipOpens: string[] = []
 
 beforeAll(async () => {
   dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nt-native-inv-'))
@@ -47,6 +51,17 @@ beforeAll(async () => {
           return accept?.()
         }
         reject?.()
+      })
+      // direct-tcpip (`-L`): dial the destination on this loopback "host" and splice.
+      client.on('tcpip', (accept, reject, info) => {
+        tcpipOpens.push(`${info.destIP}:${info.destPort}`)
+        const out = net.connect({ host: info.destIP, port: info.destPort })
+        out.once('error', () => reject?.())
+        out.once('connect', () => {
+          const ch = accept()
+          ch.on('error', () => out.destroy())
+          ch.pipe(out).pipe(ch)
+        })
       })
       client.on('session', (accept) => {
         accept().on('exec', (a, _r, info) => {
@@ -193,6 +208,100 @@ describe('native-invoke', () => {
     } finally {
       process.off('uncaughtException', onErr)
     }
+  })
+
+  describe('-O forward -L (dev-server port forwarding)', () => {
+    const echo = (): Promise<{ srv: net.Server; port: number }> =>
+      new Promise((r) => {
+        const srv = net.createServer((s) => s.pipe(s))
+        srv.listen(0, '127.0.0.1', () => r({ srv, port: (srv.address() as AddressInfo).port }))
+      })
+    const freePort = (): Promise<number> =>
+      new Promise((r) => {
+        const s = net.createServer()
+        s.listen(0, '127.0.0.1', () => {
+          const p = (s.address() as AddressInfo).port
+          s.close(() => r(p))
+        })
+      })
+    const roundTrip = (lport: number, text: string): Promise<string> =>
+      new Promise((resolve, reject) => {
+        const c = net.connect({ host: '127.0.0.1', port: lport })
+        let got = ''
+        c.on('data', (d) => {
+          got += d.toString()
+          if (got.length >= text.length) {
+            c.end()
+            resolve(got)
+          }
+        })
+        c.on('error', reject)
+        c.write(text)
+      })
+    const canListen = (p: number): Promise<boolean> =>
+      new Promise((r) => {
+        const s = net.createServer()
+        s.once('error', () => r(false))
+        s.listen(p, '127.0.0.1', () => s.close(() => r(true)))
+      })
+
+    it('carries a local loopback connection to the host port, built and parsed by the real builders', async () => {
+      const { srv, port: remotePort } = await echo()
+      try {
+        const m = mux()
+        await runSshArgv(m, childArgs(conn(), CP(), 'true'))
+        const lport = await freePort()
+        const fwd = await runSshArgv(m, localForwardArgs(conn(), CP(), lport, '127.0.0.1', remotePort))
+        expect(fwd.code).toBe(0)
+        expect(await roundTrip(lport, 'hello dev server')).toBe('hello dev server')
+        expect(tcpipOpens).toContain(`127.0.0.1:${remotePort}`)
+        // A duplicate is acknowledged again (the registry's 'maybe-ours' adoption depends on it).
+        expect((await runSshArgv(m, localForwardArgs(conn(), CP(), lport, '127.0.0.1', remotePort))).code).toBe(0)
+        expect(await canListen(lport)).toBe(false)
+        // Cancel frees the port; a cancel of what is not held is not an error.
+        expect((await runSshArgv(m, localForwardCancelArgs(conn(), CP(), lport, '127.0.0.1', remotePort))).code).toBe(0)
+        expect(await canListen(lport)).toBe(true)
+        expect((await runSshArgv(m, localForwardCancelArgs(conn(), CP(), lport, '127.0.0.1', remotePort))).code).toBe(0)
+      } finally {
+        srv.close()
+      }
+    })
+
+    it('a port someone else holds is OpenSSH\'s "Port forwarding failed", exit 255', async () => {
+      const m = mux()
+      await runSshArgv(m, childArgs(conn(), CP(), 'true'))
+      const foreign = net.createServer()
+      await new Promise<void>((r) => foreign.listen(0, '127.0.0.1', () => r()))
+      const busy = (foreign.address() as AddressInfo).port
+      try {
+        const r = await runSshArgv(m, localForwardArgs(conn(), CP(), busy, '127.0.0.1', 1))
+        expect(r.code).toBe(255)
+        expect(r.stderr.toString()).toMatch(/Port forwarding failed/)
+      } finally {
+        foreign.close()
+      }
+    })
+
+    it('without a master it fails like ssh; a dropped or exited master releases its listeners', async () => {
+      const m = mux()
+      const lport = await freePort()
+      const none = await runSshArgv(m, localForwardArgs(conn(), CP(), lport, '127.0.0.1', 1))
+      expect(none.code).toBe(255)
+      expect(none.stderr.toString()).toMatch(/Control socket connect/)
+
+      await runSshArgv(m, childArgs(conn(), CP(), 'true'))
+      expect((await runSshArgv(m, localForwardArgs(conn(), CP(), lport, '127.0.0.1', 1))).code).toBe(0)
+      expect(await canListen(lport)).toBe(false)
+      for (const c of clients) c.end() // the host drops the connection
+      for (let i = 0; i < 50 && !(await canListen(lport)); i++) await new Promise((r) => setTimeout(r, 20))
+      expect(await canListen(lport)).toBe(true)
+
+      const lport2 = await freePort()
+      await runSshArgv(m, childArgs(conn(), CP(), 'true'))
+      expect((await runSshArgv(m, localForwardArgs(conn(), CP(), lport2, '127.0.0.1', 1))).code).toBe(0)
+      expect((await runSshArgv(m, exitMasterArgs(conn(), CP()))).code).toBe(0)
+      expect(await canListen(lport2)).toBe(true)
+    })
   })
 
   it('an argv the parser refuses is a named exit 255, not a guess', async () => {

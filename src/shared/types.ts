@@ -2928,8 +2928,10 @@ export type ContextLinkMap = Record<string, ContextLinkInfo[]>
 export interface ContextLinkApi {
   /** Push the current link map to main; main rewrites the per-node link files. */
   setLinks(map: ContextLinkMap): Promise<void>
-  /** Static facts the renderer needs to compose link messages: the CLI shim's absolute path. */
-  info(): Promise<{ shimPath: string }>
+  /** Static facts the renderer needs to compose link messages: the CLI shim's absolute path, and
+   *  the `process.platform` of the core that wrote it (absent from an older core ⇒ treat as POSIX).
+   *  On `win32` a non-claude agent is told to run the `.cmd` launcher beside the shim. */
+  info(): Promise<{ shimPath: string; platform?: string }>
 }
 
 /** One usage window (5h session or 7d weekly) as shown in the indicator. */
@@ -3735,6 +3737,10 @@ export interface CodexIdentityCaps {
    *  flag in its help and no such runtime, so it can never serve a shared identity. Unknown ⇒
    *  false ⇒ plain codex. */
   appServer: boolean
+  /** Why shared identity is off by DESIGN rather than by probe, when it is. `unsupported-platform`
+   *  = a Windows core (phase 1: not wired there yet; every node runs its own codex). Absent on
+   *  every other answer — an older core never sends it. */
+  unavailableReason?: 'unsupported-platform'
 }
 
 /** The answer before the probe has run, and the one the Server Edition gives on purpose. */

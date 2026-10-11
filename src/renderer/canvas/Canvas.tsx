@@ -4757,10 +4757,13 @@ export function Canvas() {
     async (selfId: string, otherId: string) => {
       if (useAgentStatus.getState().byId[selfId]?.state === 'working') return
       const title = (nodesRef.current.find((n) => n.id === otherId)?.data.title as string) || 'a linked node'
-      const { shimPath } = await window.nodeTerminal.contextLink.info()
+      const { shimPath, platform: shimHost } = await window.nodeTerminal.contextLink.info()
+      // The shim named here is the LOCAL core's; an SSH node's agent runs on its host, whose skill
+      // is POSIX, so only a local node gets the host-platform wording (`.cmd` on Windows).
+      const selfData = nodesRef.current.find((n) => n.id === selfId)?.data
       void api.pty.sendText(
         selfId,
-        buildContextLinkNote(agentIdOf(selfId), title, shimPath)
+        buildContextLinkNote(agentIdOf(selfId), title, shimPath, isRemoteSessionNode(selfData) ? undefined : shimHost)
       ).then(reportTextDelivery)
     },
     [agentIdOf]
@@ -14587,7 +14590,10 @@ export function Canvas() {
             }
             const lenses = parseLenses(args.lenses)
             const wantJudge = (args.synthesis ?? 'on').trim().toLowerCase() !== 'off'
-            const { shimPath: vShim } = await window.nodeTerminal.contextLink.info()
+            const { shimPath: vShim, platform: vShimHost } = await window.nodeTerminal.contextLink.info()
+            // Reviewers open where the target's cwd says; an SSH-project panel runs on the host,
+            // whose shim is POSIX, so only a local panel gets the host-platform wording.
+            const vHost = sshFor(target.data.cwd as string | undefined) ? undefined : vShimHost
             const targetTitle = (target.data.title as string) || targetId
             const targetCwd = target.data.cwd as string | undefined
             const live = nodesRef.current as CanvasNode[]
@@ -14616,6 +14622,7 @@ export function Canvas() {
                     targetId,
                     agentId: reviewAgent,
                     shimPath: vShim,
+                    hostPlatform: vHost,
                     focus: args.focus
                   })
                 )
@@ -14648,7 +14655,8 @@ export function Canvas() {
                 lenses,
                 targetTitle,
                 agentId: reviewAgent,
-                shimPath: vShim
+                shimPath: vShim,
+                hostPlatform: vHost
               })
             )
             const judge = wantJudge

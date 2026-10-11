@@ -2947,6 +2947,15 @@ else, and its context links must keep classifying across restarts).
   remote installers at once; a second repair mechanism would be exactly the duplicated rule this
   file warns about. It strips only OUR handler out of a definition, so a hook a user hand-merged
   beside ours survives.
+  **Every agent except claude gets a Windows wrapper** (2026-10): gemini (PowerShell, its
+  `getShellConfiguration`), grok (PowerShell per its docs — unmeasured) and copilot (its
+  `powershell` key) cannot parse the POSIX line either, so `windows-hook-wrapper.ts` is the ONE
+  template (`buildWindowsHookWrapper`, codex's bytes pinned) and `buildManagedHookCommand(sp, {},
+  'win32')` names `<agent>-hook.cmd` through the codex invocation. Its `platform` defaults to POSIX,
+  NOT `process.platform` — the SSH installers call it bare. `installHooksInto({windowsWrapper})`
+  writes the wrapper BEFORE the config; the managed-entry matcher pairs `<agent>.sh` with
+  `<agent>-hook.cmd` (`managedMarkersFor`) so an upgrade replaces the POSIX entry. Claude stays
+  POSIX (Git Bash).
 - **A reused ControlMaster is not evidence of a live hook tunnel** (issue #735 — remote sessions
   stuck on **Unknown**, no completion notifications, no unread dots). `connect()`'s reuse branch
   returned the cached `hookEndpointPath` whenever `ssh -O check` answered, on the written-down
@@ -4004,6 +4013,14 @@ command-bearing opens; this does not add a human-confirm dialog or change mobile
   `open-agent` are verified-only at the Server handler boundary. A plain terminal keeps generic
   node hook wiring but receives neither `NODETERM_AGENT_ID` nor `NODETERM_CANVAS_CONTROL`; missing
   identity never defaults to Claude.
+  **Windows hosts**: a PowerShell/cmd-run agent cannot type `sh "<shim>"`, so a win32 core also
+  writes `nodeterm.cmd` / `context.cmd` beside the shims (`syncWindowsShLauncher` — finds Git for
+  Windows' `sh.exe`, passes `%*` through, fails LOUDLY without it) and the skills, the connect-time
+  note and the verify prompts say `& "<shim>.cmd"` for every agent outside
+  `POSIX_TOOL_SHELL_ON_WINDOWS` (claude only — its Bash tool is Git Bash). The dialect is
+  `shimDialectFor(agent, <the shim-owning core's platform>)` (`shared/agents/shim-invocation.ts`;
+  `context-link:info` now reports that platform); every builder defaults to POSIX, so SSH-host
+  skills and macOS/Linux bodies are byte-identical.
   **SSH projects** (docs/ssh-agent-skills.md): the SAME shim + skill + blocks are put on the
   remote host and KEPT current by the agent-tools check (`RemoteHooks.refreshAgentTools`: on every
   connect and tunnel repair, rewriting only what differs from this build, managed-account skill

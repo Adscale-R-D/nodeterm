@@ -3361,6 +3361,8 @@ app.whenReady().then(async () => {
   // exit-code-gated runner shape as session memory above; forwarding rides the project's master.
   const devPorts = startDevPortsService({
     tmuxBin: () => ptyManager.getTmuxBin(),
+    // Windows: the session host's panes, probed with one PowerShell call (core/dev-ports.ts).
+    sessionHost: () => ptyManager.sessionHostListing(),
     remote: {
       isRemoteProject: sshScopePredicate({
         sshProjectIds: () => workspaceStore.sshProjectIds(),

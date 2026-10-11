@@ -12,7 +12,8 @@ import {
   SessionHostClient,
   SessionHostProtocolCompatibilityError,
   type HostShutdownOutcome,
-  type HostUpdateInspection
+  type HostUpdateInspection,
+  type SessionHostListing
 } from './session-host-client'
 import { SessionHostPty } from './session-host-pty'
 import { ensureStagedHostRuntime } from './session-host-runtime'
@@ -162,12 +163,14 @@ export async function sessionHostKillSession(
     reserveReplacement?: boolean
     requireV2?: boolean
     expectedAbsent?: boolean
+    expectedGeneration?: string
   } = {}
 ): Promise<void> {
   return getClient().killSession(name, options)
 }
 
 export { SessionHostProtocolCompatibilityError }
+export type { SessionHostListing }
 
 /** `tmux has-session`'s equivalent — currently unused by the create path (which gets `fresh`
  *  straight from the real attach-or-create round trip instead, via `SessionHostPty.ready`) but
@@ -181,6 +184,13 @@ export async function sessionHostHasSession(name: string): Promise<boolean> {
  *  (`listNodetermSessions` — the relay host's session browser). */
 export async function sessionHostListSessions(): Promise<string[]> {
   return getClient().listSessions()
+}
+
+/** The observability read — pid, subscribers, output clock and generation per session — for the
+ *  session reaper, the session-memory panel and dev-server ports. Never launches a host; `null` is
+ *  a FAILED read, never "no sessions" (see `SessionHostListing`). */
+export async function sessionHostListSessionsDetailed(): Promise<SessionHostListing | null> {
+  return getClient().listSessionsDetailed()
 }
 
 /** Prepare-for-update (issue #829): what the running host holds, without ever launching one. */

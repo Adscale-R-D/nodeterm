@@ -170,6 +170,10 @@ export class HostSession {
    * co-attach, one level further down the stack. */
   readonly subscribers = new Set<Socket>()
   readonly createdAt = Date.now()
+  /** When the pty last produced output (epoch ms) — the session reaper's idleness clock, reported
+   * by `listSessions` to `sessionDetails` connections. Starts at creation, like tmux's
+   * `window_activity`; host.ts stamps it on every pty `data` callback and nothing else moves it. */
+  lastOutputAt = this.createdAt
   /** Set once, by whichever path (natural pty exit or an explicit `killSession`) ends this
    * session first — guards against double-dispose/double-broadcast when both could race. */
   exited = false

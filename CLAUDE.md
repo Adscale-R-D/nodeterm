@@ -5951,6 +5951,17 @@ about which machine they describe. Reading + parsing is `core/session-memory.ts`
   any value inside it. **Mobile**: **N/A for v1** — *nodeterm
   mobile* attaches to tmux sessions over the transport protocol and has no per-session host-memory
   concept; adding one means extending that protocol (follow-up in the iOS repo).
+- **Windows (no tmux) — the session host is a third leg, not a special case.** Its sessions reach
+  the reaper (`SessionReaperOpts.sessionHost`, consulted only when `tmuxBin()` is null), this panel
+  (`collectSessionHostMemory`, CIM process table) and dev-server ports (`collectWin32DevPorts`, one
+  PowerShell call) through ONE additive hello feature, `sessionDetails` (pid, subscribers, output
+  clock, generation per session — docs/windows-session-host.md "Observability"). The rules above
+  carry over unchanged: a failed host read is `ok:false` / no candidates / `unreachable`, never "no
+  sessions"; no host running IS "no sessions"; a session an older host names but cannot describe is
+  `unmeasured` (`unmeasuredBackend: 'session-host'`, its own sentence), never dropped; a reap kills
+  exactly the observed generation. Both legs merge (`mergeLocalLegs`): a leg that answered is never
+  overridden by one that failed. The tmux path is untouched wherever the session host is not the
+  backend (`PtyManager.sessionHostListing()` answers `undefined`).
 
 **Offscreen release makes the macOS reaper bug far more visible, and the two shipped days apart.**
 A node released while offscreen detaches its PTY client — so it becomes a DETACHED tmux session and
@@ -6089,6 +6100,13 @@ project's existing ControlMaster, so the URL the tool itself printed just works 
   end to end on Linux: a real tmux session (private socket, sandboxed TMUX_TMPDIR) running a real
   listener two processes below its pane, read back through real `ps` + `ss`
   (`dev-ports.realsh.test.ts`).
+- **Windows: the session host's panes + one PowerShell call** (`collectWin32DevPorts`). No `/bin/sh`
+  and no tmux there, so the panes are the host's `sessionDetails` pids and the process table +
+  listeners come from `Win32_Process` + `Get-NetTCPConnection` (the owning pid is a kernel field —
+  no name to forge), else `netstat -ano` (a listener is a TCP row whose FOREIGN port is 0: the state
+  column is localized). Same `assembleDevPorts`. A failed host read, an older host without pids, or a
+  non-zero PowerShell exit is `unreachable`; `unsupported` only when the session host is not the
+  backend; no nt- session means no PowerShell spawn at all.
 - **Ports in the ephemeral range (≥ 32768) are listed but not counted.** A headless browser's
   debugging endpoint or an MCP helper asks for "any port" and lands there; a dev server a person
   means to open almost never does. The chip counts only the rest and is absent when there are none;

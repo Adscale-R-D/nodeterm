@@ -5319,7 +5319,12 @@ bridges enter live state only via `appendBridgeEdges`) and the server
     removal cancels any pending wait + `markDirty`. **Codex accounts have the same two halves** —
     `createCodexAccountLoginNode` (`codex login`, title "Codex login") behind the
     `nodeterm:add-codex-account-login` listener, with `codexAccounts.waitLogin` polling the managed
-    home's `auth.json`. Both flows mint an **agent-less terminal** carrying only `accountId`, and
+    home's `auth.json`. **On Windows the Codex identity comes from that `auth.json`'s id_token JWT
+    email (`readCodexAuthEmail` — a display label, unverified; the gate stays the real-file check),
+    never the app-server**: `ws+unix` cannot dial there (`codexAppServerReachable`), so no daemon is
+    started per poll and the codex title read degrades to the relayed copy. Shared assets go in via
+    `linkSharedEntry` (junction / hardlink / warned copy — never a blocking EPERM; POSIX unchanged).
+    Both flows mint an **agent-less terminal** carrying only `accountId`, and
     that shape is why `needsCodexAccountScope` takes an `isCodexAccount` resolver rather than
     reading `!!accountId`: the two account lists share an id alphabet, so the id alone cannot say
     which provider it belongs to. Guessing "codex" refused every managed **Claude** node (#345);

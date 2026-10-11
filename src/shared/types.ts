@@ -3035,6 +3035,10 @@ export interface SessionMemoryReport {
    * panel must never say "no sessions are running" while this is non-zero or unknown.
    */
   unmeasured?: number | null
+  /** Which backend the `unmeasured` sessions belong to, for the panel's sentence. Absent = Zellij
+   *  (the original and, off Windows, only case); `'session-host'` = a running session host older
+   *  than this app, which names its sessions but cannot describe their processes. */
+  unmeasuredBackend?: 'session-host'
 }
 
 /**

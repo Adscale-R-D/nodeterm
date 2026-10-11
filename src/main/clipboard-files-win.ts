@@ -58,7 +58,7 @@ export type ExecFileLike = (
   options: { timeout: number; windowsHide: boolean },
   callback: (error: Error | null) => void
 ) => {
-  stdin?: { end(data: string): void; on?(event: 'error', listener: () => void): unknown } | null
+  stdin?: { end(data: string): void; on(event: 'error', listener: () => void): unknown } | null
 } | undefined
 
 export function windowsPowerShellPath(env: Record<string, string | undefined> = process.env): string {
@@ -84,7 +84,7 @@ export function writeWindowsFileDrop(
         return
       }
       // A spawn failure surfaces in the callback; swallow the paired EPIPE on stdin.
-      child.stdin.on?.('error', () => undefined)
+      child.stdin.on('error', () => undefined)
       child.stdin.end(asciiJson(paths))
     } catch {
       resolve(false)

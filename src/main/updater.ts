@@ -11,7 +11,12 @@ import path from 'path'
 // electron-vite v5's CJS interop.
 import { autoUpdater } from 'electron-updater'
 import { IPC } from '../shared/ipc'
-import { mayQuitAndInstall, toUpdateAvailablePayload, updateDelivery } from '../shared/update-platform'
+import {
+  MANUAL_UPDATE_MODE,
+  mayQuitAndInstall,
+  toUpdateAvailablePayload,
+  updateDelivery
+} from '../shared/update-platform'
 import { getMainWindow, sendToMain } from './main-window'
 import { retainUntilDismissed } from './notifications'
 
@@ -65,9 +70,10 @@ function packagedUpdateMode(): unknown {
 export function initUpdater(onBeforeRestart?: () => void): void {
   const send = (channel: string, payload?: unknown) => sendToMain(channel, payload)
 
+  const updateMode = packagedUpdateMode()
   const delivery = updateDelivery({
     isPackaged: app.isPackaged,
-    updateMode: packagedUpdateMode(),
+    updateMode,
     platform: process.platform,
     hasAppImage: !!process.env.APPIMAGE
   })
@@ -151,10 +157,18 @@ export function initUpdater(onBeforeRestart?: () => void): void {
 
   autoUpdater.on('update-not-available', () => send(IPC.appUpdateNotAvailable))
 
+  // A check-only build (`nodeTermUpdates=manual`, the unsigned Windows beta) downloads nothing, so
+  // every 'error' event it can emit is a CHECK failure — and electron-updater emits one for the
+  // silent launch/6h checks too. The beta previously showed nothing at all; an error card on every
+  // launch (offline, or a feed mirror that does not serve latest.yml yet) would be a regression
+  // for exactly the users this notice exists for. So there the event is logged only; a
+  // user-initiated check still surfaces its failure through the catch below. Every other build
+  // keeps its historical behaviour.
+  const checkOnly = delivery === 'manual-install' && updateMode === MANUAL_UPDATE_MODE
   autoUpdater.on('error', (err) => {
     const message = err?.message ?? String(err)
     console.error('[updater]', message)
-    send(IPC.appUpdateError, message)
+    if (!checkOnly) send(IPC.appUpdateError, message)
   })
 
   // Manual check from Settings; surfaces failures to the card.

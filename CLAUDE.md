@@ -9156,7 +9156,10 @@ only**: it builds `dist:win:release`, which stamps `nodeTermUpdates=manual` →
 beside the installer + zip. The app checks the feed and shows the same "vX is available —
 Download" card a Linux .deb gets; it never downloads, never installs on quit, and main refuses
 `appRestartToUpdate` for any build that is not `self-install`/`dev` (`mayQuitAndInstall`), so
-`quitAndInstall` cannot run on the unsigned beta whatever the renderer sends. Local `dist:win`
+`quitAndInstall` cannot run on the unsigned beta whatever the renderer sends. A failed
+AUTOMATIC check on that marker build is logged, not carded (offline, or a mirror that does not
+serve `latest.yml` yet, must not raise an error card on every launch); a user-initiated check
+still reports its failure. Local `dist:win`
 keeps `disabled` (never polls). Do not add `*.blockmap` (or a broad `*.yml`) to that job's
 upload globs — differential downloads are the self-install leg, and it waits on signing; guarded
 by `src/main/release-win-workflow.test.ts`. The nodeterm.dev/updates mirror serving `latest.yml`

@@ -248,6 +248,18 @@ describe('the unsigned Windows beta (manual marker)', () => {
     expect(channels()).not.toContain(IPC.appUpdateNoChannel)
   })
 
+  it('an automatic check failure stays silent; a user-initiated one still reports', async () => {
+    // electron-updater emits 'error' for the silent launch check too (offline, or a feed mirror
+    // that does not serve latest.yml yet) — that must not put an error card up on every launch.
+    updaterEvents['error']?.(new Error('HttpError: 404 latest.yml'))
+    expect(channels()).not.toContain(IPC.appUpdateError)
+    autoUpdater.checkForUpdates.mockImplementationOnce(() => Promise.reject(new Error('offline')))
+    check()
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(channels()).toContain(IPC.appUpdateError)
+  })
+
   it('refuses restart-to-update in main: quitAndInstall never runs', () => {
     restart()
     expect(autoUpdater.quitAndInstall).not.toHaveBeenCalled()
@@ -265,6 +277,14 @@ describe('restart-to-update elsewhere', () => {
     restart()
     expect(onBeforeRestart).toHaveBeenCalledTimes(1)
     expect(autoUpdater.quitAndInstall).toHaveBeenCalledTimes(1)
+  })
+
+  it('a Linux .deb still surfaces an update error event, as before', () => {
+    setPlatform('linux')
+    packageWith(undefined)
+    initUpdater()
+    updaterEvents['error']?.(new Error('boom'))
+    expect(channels()).toContain(IPC.appUpdateError)
   })
 
   it('a Linux .deb (manual-install) refuses it too', () => {

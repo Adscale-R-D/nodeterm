@@ -95,6 +95,8 @@ async function fakeHost(
               }
             }
           )
+        } else if (req.cmd === 'attach') {
+          reply({ ok: true, result: { fresh: false, generation: GEN_A } })
         } else {
           reply({ ok: true, result: {} })
         }
@@ -191,5 +193,23 @@ describe('SessionHostClient.listSessionsDetailed', () => {
     expect(kill.expectedGeneration).toBe(GEN_A)
     // No existence probe was needed: the caller already observed the generation.
     expect(requests.some((r) => r.cmd === 'hasSession')).toBe(false)
+  })
+
+  it('an observed-generation kill is refused while this client is attached to the name', async () => {
+    const { userDataDir, endpoint } = fixture(true)
+    const requests = await fakeHost(endpoint, { details: true })
+    const client = new SessionHostClient({ userDataDir })
+    await client.listSessionsDetailed()
+    // A terminal opened after the reaper's listing: this process now watches nt-a.
+    await client.attach(
+      'nt-a',
+      { cwd: os.tmpdir(), shell: 'sh', args: [], env: {}, cols: 80, rows: 24 },
+      1000,
+      { onData: () => {}, onExit: () => {} } as never
+    )
+    await expect(client.killSession('nt-a', { expectedGeneration: GEN_A })).rejects.toThrow(
+      /attached in this process/
+    )
+    expect(requests.some((r) => r.cmd === 'killSession')).toBe(false)
   })
 })

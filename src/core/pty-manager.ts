@@ -3065,6 +3065,17 @@ export class PtyManager {
     return sessionHostListSessionsDetailed()
   }
 
+  /** Does this process hold a live (non-watcher) session whose node maps to session `name`?
+   *  Compared through `sessionName()` — never by slicing the prefix back off — because the name
+   *  is a SANITIZED node id, so the inverse is not unique. */
+  private watchesSessionName(name: string): boolean {
+    for (const session of this.sessions.values()) {
+      if (session.watcherClient || !session.persistKey) continue
+      if (sessionName(session.persistKey) === name) return true
+    }
+    return false
+  }
+
   /** Generation each name had in the reaper backend's most recent listing (see below). */
   private readonly reaperGenerations = new Map<string, string>()
 
@@ -3092,7 +3103,7 @@ export class PtyManager {
         this.reaperGenerations.clear()
         return listing.sessions.map((row) => {
           this.reaperGenerations.set(row.name, row.generation)
-          const watched = this.sessionByPersistKey(row.name.slice('nt-'.length)) ? 1 : 0
+          const watched = this.watchesSessionName(row.name) ? 1 : 0
           const outputSec = Math.floor(row.lastOutputMs / 1000)
           return {
             name: row.name,
@@ -3107,6 +3118,9 @@ export class PtyManager {
         const expectedGeneration = this.reaperGenerations.get(name)
         // Never kill by name alone: without the observed generation a same-name successor could die.
         if (!expectedGeneration) return false
+        // Re-asked at kill time, not taken from the listing: a node opened since the plan is now
+        // watched, and the kill must spare it exactly as the listing's `watched` mapping would.
+        if (this.watchesSessionName(name)) return false
         await sessionHostKillSession(name, { expectedGeneration })
         return true
       }

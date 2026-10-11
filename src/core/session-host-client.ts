@@ -201,6 +201,10 @@ type KillOperationIdentity = {
   requireV2: boolean
   expectedAbsent: boolean
   prepared?: boolean
+  /** The generation came from the CALLER's observation (a `listSessionsDetailed` row), not from
+   *  this client's own attachment. Such a kill never tears down local attachment state that is
+   *  not provably the generation it ended (see `killSession`). */
+  observed?: boolean
 }
 
 type ClientSessionState = {
@@ -378,6 +382,8 @@ export class SessionHostClient {
   private readonly killOperations = new Map<string, KillOperationIdentity>()
   private readonly replacementTokens = new Map<string, string>()
   private connecting: Promise<void> | null = null
+  /** The in-flight `connecting` attempt was started with `launch: false` (see `ensureConnected`). */
+  private connectingWithoutLaunch = false
   private everConnected = false
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private reconnectAttempt = 0
@@ -517,16 +523,30 @@ export class SessionHostClient {
     return true
   }
 
-  private async ensureConnected(): Promise<void> {
+  /**
+   * `launch: false` connects only to a host that is ALREADY answering — a read-only observer (the
+   * session reaper, the memory panel, the ports chip) must never start the process it is asking
+   * about. A published-but-stale state file (the host was killed, or the machine rebooted) would
+   * otherwise make every such poll spawn a fresh host. A launching caller that arrives while such
+   * a no-launch attempt is in flight waits for it and, if it found nothing, connects normally.
+   */
+  private async ensureConnected(options: { launch?: boolean } = {}): Promise<void> {
+    const launch = options.launch !== false
     if (this.shutDownForUpdate) {
       throw new Error('session-host was shut down to prepare for an update; restart nodeterm')
     }
     // A newly authenticated socket is visible while its reconnect restoration is still running.
     // The barrier wins over the raw socket check so no later request can overtake replay.
-    if (this.connecting) return this.connecting
+    if (this.connecting) {
+      if (launch && this.connectingWithoutLaunch) {
+        return this.connecting.catch(() => this.ensureConnected())
+      }
+      return this.connecting
+    }
     if (this.socket && !this.socket.destroyed) return
-    const attempt = this.doConnect()
+    const attempt = this.doConnect(launch)
     this.connecting = attempt
+    this.connectingWithoutLaunch = !launch
     void attempt.then(
       () => {
         if (this.connecting === attempt) this.connecting = null
@@ -540,13 +560,14 @@ export class SessionHostClient {
     return attempt
   }
 
-  private async doConnect(): Promise<void> {
+  private async doConnect(launch = true): Promise<void> {
     const wasConnectedBefore = this.everConnected
     if (await this.tryConnectBeforeLaunch()) {
       const socket = this.socket
       if (wasConnectedBefore && socket) await this.restoreSocket(socket)
       return
     }
+    if (!launch) throw new Error('session-host: no running host answered (not launching one)')
 
     const script = resolveSessionHostScript({
       resourcesPath: this.deps.resourcesPath,
@@ -1786,6 +1807,15 @@ export class SessionHostClient {
           `expectedAbsent=${String(knownIdentity.expectedAbsent)}`
       )
     }
+    // A kill planned from a LISTING (the session reaper) is for a session nobody in this process is
+    // watching. If this client holds attachments for the name now, the plan is stale: refuse rather
+    // than end — or, for a same-name successor, silently strand — a terminal someone just opened.
+    if (options.expectedGeneration !== undefined && !knownIdentity) {
+      const local = this.sessions.get(name)
+      if (local && (local.entries.size > 0 || local.preAckEntries.size > 0)) {
+        throw new Error(`session-host: '${name}' is attached in this process; observed-generation kill refused`)
+      }
+    }
     const active = this.killsInFlight.get(name)
     if (active) return active
 
@@ -1799,7 +1829,8 @@ export class SessionHostClient {
         options.expectedGeneration ?? state?.generation ?? this.sessionGenerations.get(name),
       reserveReplacement,
       requireV2,
-      expectedAbsent
+      expectedAbsent,
+      observed: options.expectedGeneration !== undefined
     }
     this.killOperations.set(name, identity)
     let operation!: Promise<void>
@@ -1856,7 +1887,8 @@ export class SessionHostClient {
       identity.operationId,
       identity.expectedGeneration,
       identity.reserveReplacement,
-      identity.requireV2
+      identity.requireV2,
+      identity.observed === true
     )
   }
 
@@ -1865,7 +1897,8 @@ export class SessionHostClient {
     operationId: string,
     expectedGeneration: string | undefined,
     reserveReplacement: boolean,
-    requireV2: boolean
+    requireV2: boolean,
+    observed = false
   ): Promise<void> {
     let lastError = new Error('session-host kill did not run')
     for (let attempt = 0; attempt < KILL_CONFIRMATION_ATTEMPTS; attempt++) {
@@ -1904,8 +1937,17 @@ export class SessionHostClient {
           }
           this.replacementTokens.delete(name)
         }
-        this.clearLocalSessionState(name)
-        this.sessionGenerations.delete(name)
+        // An observed-generation kill whose name gained a local attachment meanwhile must not
+        // clear it: the host answers success for a generation that is already gone, so the live
+        // attachment may be a same-name SUCCESSOR. If it really was the generation just ended,
+        // the host's exit frame retires it through the ordinary exit path instead.
+        const local = this.sessions.get(name)
+        const raced =
+          observed && !!local && (local.entries.size > 0 || local.preAckEntries.size > 0)
+        if (!raced) {
+          this.clearLocalSessionState(name)
+          this.sessionGenerations.delete(name)
+        }
         this.killReplayBarriers.delete(name)
         if (!reserveReplacement && this.killOperations.get(name)?.operationId === operationId) {
           this.killOperations.delete(name)
@@ -2063,6 +2105,9 @@ export class SessionHostClient {
           expectedTokenPath: paths.tokenPath
         })
         if (identity.kind === 'absent') return { running: false, names: [], sessions: [] }
+        // Published state is not proof of a live host (a killed host, a reboot): connect only to
+        // one that answers. Nothing answering is a FAILED read (null) — never a launch.
+        await this.ensureConnected({ launch: false })
       }
       const result = await this.request<ListSessionsResult>({ cmd: 'listSessions' })
       if (!result || !Array.isArray(result.names) || !result.names.every((n) => typeof n === 'string')) {

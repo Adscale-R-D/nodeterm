@@ -150,4 +150,32 @@ describe('PtyManager session-host observability', () => {
     backend.kill.mockRejectedValueOnce(new Error('unconfirmed'))
     await expect(reaper?.kill('nt-a')).rejects.toThrow('unconfirmed')
   })
+
+  it('a node opened AFTER the listing is spared at kill time, not killed off the stale plan', async () => {
+    backend.listDetailed.mockResolvedValue({
+      running: true,
+      names: ['nt-late'],
+      sessions: [row('nt-late', 0, 'gen-llllllll')]
+    })
+    const m = await makeManager()
+    m.registerIpc()
+    const reaper = m.sessionHostReaperBackend()
+    expect((await reaper?.list())?.[0].clients).toBe(0)
+    await host.handlers[IPC.ptyCreate](7, { cols: 80, rows: 24, persistKey: 'late' })
+    expect(await reaper?.kill('nt-late')).toBe(false)
+    expect(backend.kill).not.toHaveBeenCalled()
+  })
+
+  it('watched-ness maps node ids through sessionName(), so a sanitized id is still recognised', async () => {
+    // `sessionName('a.b')` is `nt-a_b`: slicing the prefix back off would ask about node `a_b`.
+    backend.listDetailed.mockResolvedValue({
+      running: true,
+      names: ['nt-a_b'],
+      sessions: [row('nt-a_b', 0, 'gen-dddddddd')]
+    })
+    const m = await makeManager()
+    m.registerIpc()
+    await host.handlers[IPC.ptyCreate](7, { cols: 80, rows: 24, persistKey: 'a.b' })
+    expect((await m.sessionHostReaperBackend()?.list())?.[0].clients).toBe(1)
+  })
 })

@@ -670,17 +670,24 @@ older host never answers, and the client reports `sessions: null` — named but 
   background `sendKeys` needs no subscription), so every subscriber is a viewer. The reaper backend
   (`PtyManager.sessionHostReaperBackend`) instead ADDS one for a node this process holds a live
   session for — a host reconnect briefly reports zero subscribers for a terminal on screen.
-- **The read never launches a host** (`listSessionsDetailed`, the `inspectForUpdate` rule), and a
-  failed read is `null` — never an empty listing. The reaper then plans nothing, the memory panel
+- **The read never launches a host** (`listSessionsDetailed`), and a failed read is `null` — never
+  an empty listing. Absent state is "no host"; PUBLISHED state is not proof of a live one (a host
+  killed from Task Manager, a reboot), so a cold client connects with `ensureConnected({launch:
+  false})` and nothing answering is a failed read — the ordinary `request()` path would otherwise
+  start a fresh host from every poll. The reaper then plans nothing, the memory panel
   says "could not measure", dev ports say `unreachable`.
 - **A reap kills exactly the generation the listing observed** (`killSession`'s
   `expectedGeneration`), never by name alone, and nothing else: no scrollback deletion, no
-  tombstone. A reaped node cold-restores (`fresh: true`), the same contract as a tmux reap. The
+  tombstone. The client refuses such a kill for a name it is attached to, PtyManager re-asks
+  "do we watch this node?" at kill time, and a successful observed-generation kill never clears a
+  live local attachment (the host answers success for an already-gone generation, which may mean a
+  same-name successor is the one attached). A reaped node cold-restores (`fresh: true`), the same contract as a tmux reap. The
   reaper's budget, triggers and kill-time re-verify are `session-budget.ts`'s, unchanged; the
   memory reading on Windows is `os.freemem()`, which there is the OS's available physical memory.
 - **Memory panel**: each row's pid is rolled up over the Windows process table
   (`Get-CimInstance Win32_Process`, `WorkingSetSize`, one `powershell.exe -NoProfile` per panel
-  open — never polled). Sessions an older host cannot describe are `unmeasured`, with their own
+  open — never polled; always the absolute `%SystemRoot%\System32\WindowsPowerShell\v1.0` path,
+  `powershellExe()`, because Windows resolves a bare name against the cwd first). Sessions an older host cannot describe are `unmeasured`, with their own
   sentence. No host running is "no sessions", not a failure.
 - **Dev-server ports**: one PowerShell call per scan — `Win32_Process` plus
   `Get-NetTCPConnection` (owning pid is a kernel field, nothing a process can rename itself into),

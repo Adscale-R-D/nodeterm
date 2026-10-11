@@ -489,6 +489,9 @@ anything else. Board-level fields survive every transform — `pullLinks` is one
   opt into retires a live session. Add the capability to `SESSION_HOST_FEATURES`, send it only to
   sockets that listed it (the `geometry` push of issue #914 is the worked example), and pin that
   against the real bundled host as `session-host/geometry-host.test.ts` does.
+  The same goes for a richer REPLY: `listSessions`' per-session rows ride the `sessionDetails`
+  feature, and a host that never negotiated it answers `{names}` — which a consumer must read as
+  "named, not described", never as "detached" or "no processes".
 
 - **Finding a Windows executable is not the same as being able to spawn it.** A PATH lookup may
   correctly resolve an npm CLI to `<name>.cmd`, but Node's `execFile`/`spawn` cannot execute that

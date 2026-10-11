@@ -205,8 +205,8 @@ export interface AttachResult {
   geometry?: { cols: number; rows: number }
 }
 /** Additive, independently negotiated capabilities (see the `hello` request). */
-export type SessionHostFeature = 'geometry' | 'shutdown'
-export const SESSION_HOST_FEATURES: readonly SessionHostFeature[] = ['geometry', 'shutdown']
+export type SessionHostFeature = 'geometry' | 'shutdown' | 'sessionDetails'
+export const SESSION_HOST_FEATURES: readonly SessionHostFeature[] = ['geometry', 'shutdown', 'sessionDetails']
 
 /** `result` of a successful `shutdown`: the session names whose process trees were ended. The
  *  host exits right after this reply is flushed. A shutdown that could not confirm every kill
@@ -243,6 +243,28 @@ export interface CaptureResult {
 }
 export interface ListSessionsResult {
   names: string[]
+  /** One row per LIVE generation — present only for a connection that negotiated the
+   *  `sessionDetails` feature, so an older client keeps reading `{names}` byte-for-byte. A name in
+   *  `names` with no row here (a generation already retiring) is simply not described; a consumer
+   *  must never read that absence as "detached" or "no processes". */
+  sessions?: SessionHostSessionDetail[]
+}
+
+/** What the observability surfaces (session reaper, session-memory panel, dev-server ports) need
+ *  to know about one host session — the session host's answer to tmux's `list-windows`/`list-panes`
+ *  formats. All stamps are epoch MILLISECONDS on the host's clock. */
+export interface SessionHostSessionDetail {
+  name: string
+  /** The pty's own child (the pane's shell) — the root of the session's process tree. */
+  pid: number
+  /** Connections subscribed to this generation's output right now (tmux's `session_attached`). */
+  subscribers: number
+  /** When the pty last produced OUTPUT — the reaper's idleness clock (tmux's `window_activity`).
+   *  Starts at `createdMs`; nothing that only LOOKS at the session (attach, capture) moves it. */
+  lastOutputMs: number
+  createdMs: number
+  /** Exact process generation, so a kill planned from this row cannot hit a same-name successor. */
+  generation: string
 }
 
 /**

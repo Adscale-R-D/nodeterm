@@ -35,6 +35,7 @@ import {
   type KillSessionResult,
   type ExecuteLaunchResult,
   type ListSessionsResult,
+  type SessionHostSessionDetail,
   type ShutdownResult
 } from '../session-host/protocol'
 import { resolveSessionHostScript, spawnSessionHost } from './session-host-launcher'
@@ -67,6 +68,57 @@ export const SHUTDOWN_REQUEST_TIMEOUT_MS = 45_000
 export type HostUpdateInspection =
   | { running: false }
   | { running: true; sessions: string[]; shutdown: boolean }
+
+/**
+ * What the running host holds, for the observability surfaces (session reaper, session-memory
+ * panel, dev-server ports). `null` from `listSessionsDetailed` is the FAILED read — never this
+ * shape with no sessions, because a failed read is never evidence of absence.
+ *  - `running: false` — no host is published, so there are no sessions. An ANSWER.
+ *  - `sessions: null` — a host that predates `sessionDetails` can name its sessions but not
+ *    describe them; consumers must treat every name as unmeasured / not reapable.
+ *  - otherwise `sessions` holds a validated row per live generation; a name without a row is not
+ *    described (retiring, or a malformed row dropped here) and is treated the same way.
+ */
+export interface SessionHostListing {
+  running: boolean
+  names: string[]
+  sessions: SessionHostSessionDetail[] | null
+}
+
+const GENERATION_RE = /^[A-Za-z0-9_-]{8,128}$/
+
+/** Keep only rows whose every field is the type the consumers rely on. A malformed row is dropped
+ *  — its session then reads as undescribed, never as detached or empty. */
+function validSessionDetails(raw: unknown): SessionHostSessionDetail[] {
+  if (!Array.isArray(raw)) return []
+  const out: SessionHostSessionDetail[] = []
+  for (const r of raw) {
+    if (!r || typeof r !== 'object') continue
+    const o = r as Record<string, unknown>
+    if (
+      typeof o.name !== 'string' ||
+      !Number.isSafeInteger(o.pid) ||
+      (o.pid as number) <= 0 ||
+      !Number.isSafeInteger(o.subscribers) ||
+      (o.subscribers as number) < 0 ||
+      !Number.isFinite(o.lastOutputMs) ||
+      !Number.isFinite(o.createdMs) ||
+      typeof o.generation !== 'string' ||
+      !GENERATION_RE.test(o.generation)
+    ) {
+      continue
+    }
+    out.push({
+      name: o.name,
+      pid: o.pid as number,
+      subscribers: o.subscribers as number,
+      lastOutputMs: o.lastOutputMs as number,
+      createdMs: o.createdMs as number,
+      generation: o.generation
+    })
+  }
+  return out
+}
 
 export type HostShutdownOutcome =
   | { kind: 'no-host' }
@@ -300,6 +352,9 @@ export class SessionHostClient {
    *  ask the host to end every session and exit. An older host lacks it, and the app then falls
    *  back to the manual steps — never to killing the host itself. */
   private hostShutdownFeature = false
+  /** The current connection negotiated `sessionDetails`: `listSessions` then carries per-session
+   *  rows (pid, subscribers, output clock, generation) for the observability surfaces. */
+  private hostSessionDetailsFeature = false
   /** The pid the host published in its state file for the current connection. Read only to
    *  confirm a shutdown actually ended the process. */
   private hostPid: number | null = null
@@ -609,6 +664,7 @@ export class SessionHostClient {
       let protocolVersion: 1 | 2 | null = null
       let geometryEvents = false
       let shutdownFeature = false
+      let sessionDetailsFeature = false
       const finish = (ok: boolean, trailing: SessionHostFrame[] = []): void => {
         if (settled) return
         settled = true
@@ -623,6 +679,7 @@ export class SessionHostClient {
             return
           }
           this.hostShutdownFeature = shutdownFeature
+          this.hostSessionDetailsFeature = sessionDetailsFeature
           this.hostPid = Number.isInteger(identity.state.pid) ? identity.state.pid : null
           this.attachSocket(socket, protocolVersion, geometryEvents)
           for (const frame of trailing) this.handleFrame(socket, frame)
@@ -721,6 +778,7 @@ export class SessionHostClient {
             const features = (frame.result as HelloResult | undefined)?.features
             geometryEvents = Array.isArray(features) && features.includes('geometry')
             shutdownFeature = Array.isArray(features) && features.includes('shutdown')
+            sessionDetailsFeature = Array.isArray(features) && features.includes('sessionDetails')
             finish(true, frames.slice(index + 1))
           } else {
             failHandshake(new Error(`session-host hello rejected: ${frame.error}`))
@@ -1702,6 +1760,10 @@ export class SessionHostClient {
       reserveReplacement?: boolean
       requireV2?: boolean
       expectedAbsent?: boolean
+      /** The generation the caller OBSERVED (a `listSessionsDetailed` row). Wins over anything
+       *  this client remembers, so a kill planned from a listing can never end a same-name
+       *  successor created after it — the host answers "already gone" instead. */
+      expectedGeneration?: string
     } = {}
   ): Promise<void> {
     const reserveReplacement = options.reserveReplacement === true
@@ -1733,7 +1795,8 @@ export class SessionHostClient {
     const state = this.sessions.get(name)
     const identity: KillOperationIdentity = knownIdentity ?? {
       operationId: randomUUID(),
-      expectedGeneration: state?.generation ?? this.sessionGenerations.get(name),
+      expectedGeneration:
+        options.expectedGeneration ?? state?.generation ?? this.sessionGenerations.get(name),
       reserveReplacement,
       requireV2,
       expectedAbsent
@@ -1982,5 +2045,36 @@ export class SessionHostClient {
   async listSessions(): Promise<string[]> {
     const result = await this.request<ListSessionsResult>({ cmd: 'listSessions' })
     return result.names
+  }
+
+  /**
+   * The observability read (see `SessionHostListing`). Like `inspectForUpdate` it never launches a
+   * host when nothing is published — a session reaper, a memory panel or a ports chip asking a
+   * question must not start the process whose sessions it is asking about. Every failure (a
+   * request that threw, a reply without `names`) is `null`, never an empty listing.
+   */
+  async listSessionsDetailed(): Promise<SessionHostListing | null> {
+    try {
+      const connected = !!this.socket && !this.socket.destroyed
+      if (!connected) {
+        const paths = sessionHostPaths(this.deps.userDataDir)
+        const identity = readExistingSessionHostIdentity(paths.statePath, {
+          expectedEndpoint: paths.endpoint,
+          expectedTokenPath: paths.tokenPath
+        })
+        if (identity.kind === 'absent') return { running: false, names: [], sessions: [] }
+      }
+      const result = await this.request<ListSessionsResult>({ cmd: 'listSessions' })
+      if (!result || !Array.isArray(result.names) || !result.names.every((n) => typeof n === 'string')) {
+        return null
+      }
+      // Read AFTER the request: `request()` is what establishes the connection on a cold client.
+      const sessions = this.hostSessionDetailsFeature && Array.isArray(result.sessions)
+        ? validSessionDetails(result.sessions).filter((row) => result.names.includes(row.name))
+        : null
+      return { running: true, names: result.names, sessions }
+    } catch {
+      return null
+    }
   }
 }

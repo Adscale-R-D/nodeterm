@@ -729,7 +729,8 @@ Lifecycle, by intent:
   window into a notification-area tray (`main/tray.ts`, pure model `tray-model.ts`: Open / unread /
   phone-access status / Quit) so the phone relay host, hook server, notifications and updater keep
   running — the Dock analogue. A hide is not a quit, so no confirm dialog; tray **Quit** is plain
-  `app.quit()` (before-quit + confirm run as for Ctrl+Q — never set `quitting` before it, a cancelled
+  `app.quit()` (before-quit + confirm run as for the menu Quit — File → Exit on Windows, where
+  Electron's quit role has NO Ctrl+Q accelerator; never set `quitting` before it, a cancelled
   confirm must leave the × hiding). Hide only while the tray actually EXISTS
   (`backgroundOnCloseActive`), so a failed tray never turns × into a hide with no way back. The
   updater/update-prep quits keep flipping `quitting` first, or a hidden window would block them.

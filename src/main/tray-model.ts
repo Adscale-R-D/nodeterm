@@ -34,7 +34,7 @@ export function trayMenuModel(state: TrayState): TrayMenuItem[] {
   items.push({ type: 'normal', label: `Phone access: ${state.phoneAccess ? 'on' : 'off'}`, enabled: false })
   items.push({ type: 'separator' })
   // Quit goes through the ordinary app.quit() → before-quit path (confirm dialog included), so a
-  // tray quit tears down exactly what ⌘Q / Ctrl+Q does.
+  // tray quit tears down exactly what the menu Quit (Ctrl+Q on Linux, File → Exit on Windows) does.
   items.push({ type: 'normal', label: 'Quit nodeterm', enabled: true, action: 'quit' })
   return items
 }

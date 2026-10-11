@@ -16,6 +16,11 @@ describe('backgroundCloseDescription', () => {
     expect(d).toContain('notification area')
     expect(d).toContain('Automatic keeps it running on Windows')
   })
+  it('never promises Ctrl+Q on Windows (the quit role has no accelerator there)', () => {
+    expect(backgroundCloseDescription(true)).not.toContain('Ctrl+Q')
+    expect(backgroundCloseDescription(true)).toContain('File → Exit')
+    expect(backgroundCloseDescription(false)).toContain('Ctrl+Q')
+  })
   it('says Automatic quits on Linux (matches resolveBackgroundOnClose)', () => {
     const d = backgroundCloseDescription(false)
     expect(d).toContain('system tray')

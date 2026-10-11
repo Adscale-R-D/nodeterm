@@ -48,6 +48,10 @@ export function noSessionHost(): Record<string, unknown> {
     sessionHostKillSession: async () => {},
     sessionHostListSessions: async () => [],
     sessionHostPaneCommand: async () => null,
-    sessionHostSendKeys: async () => false
+    sessionHostSendKeys: async () => false,
+    sessionHostMouseTracking: async () => null,
+    sessionHostExecuteLaunch: async () => {
+      throw new Error('session-host launch in a suite that mocked the backend out')
+    }
   }
 }

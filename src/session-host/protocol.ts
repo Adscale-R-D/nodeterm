@@ -99,6 +99,9 @@ export type SessionHostRequest =
   | { id: number; cmd: 'messagePasteReadyV1'; name: string }
   | { id: number; cmd: 'messageEnvelopeV1'; name: string; envelope: string; expected: PaneOwner }
   | { id: number; cmd: 'capture'; name: string; full: boolean }
+  /** Additive (the `messageOwnerV1` idiom): an older live host answers `unknown command`, which the
+   *  client reads as "unknown", never as a reason to replace the host. Result: `PaneModesResult`. */
+  | { id: number; cmd: 'paneModesV1'; name: string }
   | {
       id: number
       cmd: 'executeLaunch'
@@ -237,6 +240,10 @@ export interface ExecuteLaunchResult {
 }
 export interface PaneCommandResult {
   command: string | null
+}
+/** `result` of `paneModesV1`; `null` result = no such live session. */
+export interface PaneModesResult {
+  mouseTracking: 'none' | 'x10' | 'vt200' | 'drag' | 'any'
 }
 export interface CaptureResult {
   text: string

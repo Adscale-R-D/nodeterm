@@ -131,6 +131,13 @@ export async function sessionHostCapture(name: string, full: boolean): Promise<s
   return getClient().capture(name, full)
 }
 
+/** The pane app's mouse-tracking protocol (`paneModesV1`), null = unknown / older host. */
+export async function sessionHostMouseTracking(
+  name: string
+): Promise<'none' | 'x10' | 'vt200' | 'drag' | 'any' | null> {
+  return getClient().mouseTrackingMode(name)
+}
+
 /** Execute already-rendered trusted input through the persistent generation's exactly-once
  * launch ledger. The plan never crosses preload/renderer/relay boundaries. */
 export async function sessionHostExecuteLaunch(

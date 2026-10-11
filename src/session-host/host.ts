@@ -29,6 +29,7 @@ import {
   type HasSessionResult,
   type PaneCommandResult,
   type CaptureResult,
+  type PaneModesResult,
   type KillSessionResult,
   type ListSessionsResult,
   type ShutdownResult
@@ -993,6 +994,13 @@ async function main(): Promise<void> {
           ok: true,
           result: await hostMessagePane(() => sessions.get(req.name)).send(req.envelope, req.expected)
         }
+      case 'paneModesV1': {
+        const s = sessions.get(req.name)
+        if (!s || s.exited) return { ok: true, result: null }
+        const mouseTracking = await s.mouseTrackingMode()
+        if (s.exited || sessions.get(req.name) !== s) return { ok: true, result: null }
+        return { ok: true, result: { mouseTracking } satisfies PaneModesResult }
+      }
       case 'capture': {
         const s = sessions.get(req.name)
         if (!s || s.exited) return { ok: true, result: { text: '' } satisfies CaptureResult }

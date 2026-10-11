@@ -5,7 +5,7 @@ import net, { type AddressInfo } from 'net'
 import path from 'path'
 import { Server, type Connection } from 'ssh2'
 import { NativeMux } from './native-mux'
-import { runSshArgv, spawnSshArgvStream, startNativeMaster, useNativeSsh } from './native-invoke'
+import { download, runSshArgv, spawnSshArgvStream, startNativeMaster, useNativeSsh } from './native-invoke'
 import {
   checkMasterArgs,
   childArgs,
@@ -308,5 +308,79 @@ describe('native-invoke', () => {
     const r = await runSshArgv(mux(), ['-L', '1:h:2', 'dev@127.0.0.1'])
     expect(r.code).toBe(255)
     expect(r.stderr.toString()).toMatch(/unsupported ssh argument -L/)
+  })
+})
+
+describe('download() — a remote tree onto a Windows filesystem', () => {
+  // A fake SFTP over an in-memory POSIX tree: names Windows cannot hold, and two that collide.
+  const tree: Record<string, string[] | string> = {
+    '/r': ['.', '..', 'a:b', 'a_b', 'CON', 'notes. ', 'sub'],
+    '/r/a:b': 'colon',
+    '/r/a_b': 'underscore',
+    '/r/CON': 'device',
+    '/r/notes. ': 'dots',
+    '/r/sub': ['Foo', 'foo', 'ok.txt'],
+    '/r/sub/Foo': 'upper',
+    '/r/sub/foo': 'lower',
+    '/r/sub/ok.txt': 'fine'
+  }
+  type Cb<T> = (err: Error | undefined, v: T) => void
+  const sftp = {
+    stat: (p: string, cb: Cb<{ isDirectory(): boolean }>) =>
+      p in tree ? cb(undefined, { isDirectory: () => Array.isArray(tree[p]) }) : cb(new Error(`no ${p}`), undefined as never),
+    readdir: (p: string, cb: Cb<{ filename: string }[]>) => cb(undefined, (tree[p] as string[]).map((filename) => ({ filename }))),
+    fastGet: (r: string, l: string, cb: (err?: Error) => void) => {
+      fs.writeFileSync(l, tree[r] as string)
+      cb()
+    }
+  } as unknown as Parameters<typeof download>[0]
+
+  const files = (root: string): Record<string, string> => {
+    const out: Record<string, string> = {}
+    const walk = (d: string, rel: string): void => {
+      for (const n of fs.readdirSync(d)) {
+        const full = path.join(d, n)
+        if (fs.statSync(full).isDirectory()) walk(full, `${rel}${n}/`)
+        else out[`${rel}${n}`] = fs.readFileSync(full, 'utf8')
+      }
+    }
+    walk(root, '')
+    return out
+  }
+
+  it('win32: every child gets a legal, unique name, and the renames are counted', async () => {
+    const local = fs.mkdtempSync(path.join(os.tmpdir(), 'nt-dl-'))
+    try {
+      const renamed = { count: 0 }
+      await download(sftp, '/r', path.join(local, 'r'), true, 'win32', renamed)
+      expect(files(path.join(local, 'r'))).toEqual({
+        a_b: 'colon',
+        'a_b (2)': 'underscore',
+        _CON: 'device',
+        notes: 'dots',
+        'sub/Foo': 'upper',
+        'sub/foo (2)': 'lower',
+        'sub/ok.txt': 'fine'
+      })
+      // a:b, a_b (displaced), CON, `notes. `, foo.
+      expect(renamed.count).toBe(5)
+    } finally {
+      fs.rmSync(local, { recursive: true, force: true })
+    }
+  })
+
+  it.skipIf(process.platform === 'win32')('POSIX: the tree lands byte-for-byte as named', async () => {
+    // Not runnable on Windows: the point is names that Windows cannot create.
+    const local = fs.mkdtempSync(path.join(os.tmpdir(), 'nt-dl-'))
+    try {
+      const renamed = { count: 0 }
+      await download(sftp, '/r', path.join(local, 'r'), true, 'linux', renamed)
+      expect(Object.keys(files(path.join(local, 'r'))).sort()).toEqual(
+        ['CON', 'a:b', 'a_b', 'notes. ', 'sub/Foo', 'sub/foo', 'sub/ok.txt'].sort()
+      )
+      expect(renamed.count).toBe(0)
+    } finally {
+      fs.rmSync(local, { recursive: true, force: true })
+    }
   })
 })

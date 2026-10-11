@@ -23,6 +23,7 @@ installLogSink(logBuffer)
 import { nativeMux, setNativeWindowsAgentOptIn, useNativeSsh } from '../core/remote-ssh/native/native-runtime'
 import { writeFilesToClipboard } from './clipboard-files'
 import { writeWindowsFileDrop } from './clipboard-files-win'
+import { micConsentDecision, micSettingsUrl } from './mic-consent'
 import { pickProjectIcon } from './project-icon-upload'
 import { allowGuestNavigation } from './webview-nav'
 import { appEntryUrlFor, decideMainFrameNavigation, isSafeExternalUrl } from './navigation-guard'
@@ -1512,9 +1513,14 @@ app.whenReady().then(async () => {
   // Electron-only mic consent: not core-bound (systemPreferences is main-process-only), so it's
   // a raw ipcMain handler like the other Electron-only surfaces (dialogs, shell, media) rather
   // than going through registerSpeechIpc/corePlatform.
-  ipcMain.handle(IPC.speechMicConsent, async () =>
-    process.platform === 'darwin' ? systemPreferences.askForMediaAccess('microphone') : true
-  )
+  ipcMain.handle(IPC.speechMicConsent, async () => micConsentDecision(process.platform, systemPreferences))
+  // Fixed allowlisted URL per OS (never renderer-supplied); false where there is no such page.
+  ipcMain.handle(IPC.speechOpenMicSettings, async () => {
+    const url = micSettingsUrl(process.platform)
+    if (!url) return false
+    await shell.openExternal(url)
+    return true
+  })
   registerClaudeCliIpc()
   // Invariant 11 for probes: registered in BOTH shells, or session-id minting silently works on
   // the desktop and not in the browser, with nothing to say which.

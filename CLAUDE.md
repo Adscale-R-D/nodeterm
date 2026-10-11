@@ -42,7 +42,7 @@ means — and what you may assume when writing a feature — is three tiers, not
 - **Run configurations (launch.json run node) are gated off for process launches on a Windows core**
   — the launcher is a POSIX `sh` script stopped and hot-reloaded by POSIX signals. The core's
   `gateEntriesForPlatform` marks those entries unsupported with `RUN_WINDOWS_REASON` (browser
-  configs and browser-only compounds still run), and the add menu / Dock / palette disable the row
+  configs and browser-only compounds still run), and the add menu / Dock disable the row (the palette hides it)
   from the core's own platform (`useCoreIsWindows`). A pwsh launcher is the follow-up.
 - **New code is platform-neutral by default.** Do not hardcode POSIX assumptions. Publish files
   through `renameAtomic`/`writeFileAtomic` (`src/core/fs-atomic.ts`), not a bare `fs.rename` — the

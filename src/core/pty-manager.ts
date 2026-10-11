@@ -2663,9 +2663,12 @@ export class PtyManager {
       this.hostBackendEligible()
     ) {
       const live = await sessionHostHasSession(sessionName(options.persistKey)).catch(() => false)
-      if (!live || !(await sessionHostSupportsWatch().catch(() => false)))
-        return { sessionId: '', fresh: false, unavailable: 'join-only' }
-      options = { ...options, [SESSION_HOST_WATCH]: true } as SessionHostWatchOptions
+      // Not proven ⇒ NO early return: fall through to the existing join-only decision, where the
+      // session-host placeholder `fresh = true` still refuses. On Windows that is the same refusal;
+      // on a POSIX machine without tmux it keeps the Zellij branch below reachable, so a viewer of a
+      // node that lives in a LIVE Zellij session is not refused just because the host lacks it.
+      if (live && (await sessionHostSupportsWatch().catch(() => false)))
+        options = { ...options, [SESSION_HOST_WATCH]: true } as SessionHostWatchOptions
     }
     const sessionHostWatch = isSessionHostWatch(options)
     let fresh = options.sshRemote
@@ -5289,7 +5292,8 @@ export class PtyManager {
     if (s.sshRemote) return s.tmuxBacked ? 'ssh' : 'none'
     // A read-only session-host attachment (`watch-attach`, the node not held here) has no typing
     // path: the host refuses writes from it, and its keys must not be retyped as a framed paste.
-    // Control typing reaches a session-host node while the node is open in this app.
+    // Control typing reaches a session-host node only for a viewer that joined while the node was
+    // open in this app (the route is read once, at join: this viewer is not upgraded later).
     if (s.sessionHost && s.watcherClient) return 'none'
     if (s.sessionHost || s.nativeWindowsPane) return 'write'
     if (s.tmuxBacked) return this.tmuxPath ? 'tmux' : 'none'

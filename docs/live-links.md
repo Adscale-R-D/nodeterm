@@ -923,7 +923,9 @@ carry it to teammates and the canvas authority would write it into the git-share
   session, so an owner opening the node gets its own typing attachment. A host from an older build
   lacks the feature: refused (`join-only`), never an ordinary attach that would cast the viewer's size.
   The create dialog's note follows `tmuxStatus().persistence.watchJoin` (the CONNECTED host's answer).
-  Control typing needs the node open (a watch attachment has no typing path).
+  Control typing needs the node open WHEN THE VIEWER JOINS: a viewer that joined through `watch-attach`
+  keeps that read-only attachment (its input route is decided at join, `none`) even after the owner
+  opens the node, until it rejoins (the session ends, or the link reconnects).
 - **Desktop where local terminals are neither tmux nor such a session host** (tmux switched off or
   missing; the Zellij backend; an older host): there is no watcher client of its own, so a viewer can
   co-attach only to a terminal this app has OPEN (mounted, or parked) — after a restart, for a background project or an
@@ -1018,7 +1020,8 @@ Found while building it:
   `#{client_session}` and treating a switch as a lifecycle event is a possible follow-up.
 - **Any machine whose local terminals are neither tmux nor a `watch-attach` session host:** a link to a
   terminal that is not open in the app cannot be watched until it is (Surfaces, above). Said, never
-  silent. On the session host, Control typing still needs the node open.
+  silent. On the session host, Control typing still needs the node open at the moment the viewer joins (a
+  viewer already riding a `watch-attach` attachment is not upgraded when the owner opens the node).
 - **A tmux < 3.2 host cannot be watched** (fail closed, "waiting").
 - **After a run whose index was missing, unreadable or corrupt, node-gone waits for the next launch**
   (R44/R54): a link to a node deleted in that run lives until its expiry (≤ 24 h) — an Unlimited link

@@ -333,7 +333,9 @@ export function worktreeFromCreate(v: WorktreeCreateValue): GroupWorktree {
     repoPath: v.repoPath.trim(),
     branch: v.branch.trim(),
     baseRef: v.baseRef.trim() || DEFAULT_BASE_REF,
-    path: v.path.trim(),
+    // '/'-separated (case kept), the shape `git worktree list` prints on every platform, so the
+    // binding and git agree without a key fold. A POSIX path has no backslash: unchanged.
+    path: v.path.trim().replace(/\\/g, '/'),
     createdByApp: true
   }
 }
@@ -396,10 +398,30 @@ export function parseWorktreePorcelain(out: string): WorktreeEntry[] {
   return entries
 }
 
-/** Is `child` the directory `parent` itself, or somewhere inside it? (Trailing slashes ignored.) */
+/**
+ * The identity key of a worktree/repo path, for COMPARING paths — never for using one. Git prints
+ * `C:/r/wt` on Windows while a typed or pasted binding says `C:\r\wt` (or `c:/…`), and NTFS is
+ * case-insensitive by default, so a Windows-shaped path (any backslash, a drive letter, or UNC
+ * `//`) is folded to forward slashes and lower case. A POSIX path keeps its exact case and is only
+ * stripped of trailing slashes — byte-identical to the comparison this replaced. Keyed on the
+ * path's SHAPE, not on `process.platform`: this module runs in the renderer, whose platform is not
+ * the core's.
+ */
+export function worktreePathKey(p: string): string {
+  return pathKey(p.trim())
+}
+
+/** `worktreePathKey` without the trim — `isAncestorPath` and the removal guard never trimmed. */
+function pathKey(t: string): string {
+  if (!/\\|^[A-Za-z]:|^\/\//.test(t)) return t.replace(/\/+$/, '')
+  return t.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+}
+
+/** Is `child` the directory `parent` itself, or somewhere inside it? (Trailing slashes ignored;
+ *  Windows-shaped paths compared by `worktreePathKey`.) */
 export const isAncestorPath = (parent: string, child: string): boolean => {
-  const p = parent.replace(/\/+$/, '')
-  const c = child.replace(/\/+$/, '')
+  const p = pathKey(parent)
+  const c = pathKey(child)
   return c === p || c.startsWith(p + '/')
 }
 
@@ -512,9 +534,11 @@ export function displacedByWorktree(
 
 /** Refuse removals that would nuke the repo, home, or filesystem root. */
 export function isDangerousWorktreeRemovalPath(worktreePath: string, repoPath: string, homeDir: string): boolean {
-  const wt = (worktreePath || '').replace(/\/+$/, '')
+  const wt = pathKey(worktreePath || '')
   if (!wt) return true
-  if (wt === '/' || wt === repoPath.replace(/\/+$/, '') || wt === homeDir.replace(/\/+$/, '')) return true
+  // A bare drive root (`C:`, `C:\`, `c:/`) is Windows' `/`.
+  if (wt === '/' || /^[a-z]:$/.test(wt)) return true
+  if (wt === pathKey(repoPath) || wt === pathKey(homeDir)) return true
   // worktree is an ancestor of the repo or of home → dangerous.
   if (isAncestorPath(wt, repoPath) || isAncestorPath(wt, homeDir)) return true
   return false

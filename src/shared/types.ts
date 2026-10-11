@@ -323,7 +323,9 @@ export interface PtyCreateResult {
    * is set. Since our tmux is always `mouse on` (local and remote), enabling these unconditionally
    * on a tmux-backed join matches tmux's own invariant client state; the enable is idempotent.
    * Set on BOTH join branches (screen-painted and resized) — the resize does not deliver them.
-   * Absent for a plain-shell join (no tmux ⇒ no tmux mouse) and for the solo spawn path.
+   * Absent for a plain-shell join (no tmux ⇒ no tmux mouse), for a session-host (Windows) join —
+   * same gate as `coAttachAltScreen`: no tmux runs `mouse on` there, and enabled tracking would
+   * hand the wheel and drags to the shell — and for the solo spawn path.
    */
   coAttachMouse?: boolean
   /**

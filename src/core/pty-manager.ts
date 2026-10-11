@@ -2620,23 +2620,27 @@ export class PtyManager {
     // server returns that one itself when the socket drains. Scoped to THIS view: the other view's
     // (e.g. the still-open modal's) renderer pause is untouched.
     this.releaseFlow(existing, sub, 'renderer')
+    // ONE gate for the three "a real tmux client is behind this join" answers, so they cannot drift:
+    // `tmuxBacked` alone is not it — a session-host session (Windows) is ALSO recorded tmuxBacked
+    // and carries a persistKey, but there is no tmux behind it, and the pty IS the shell.
+    const realTmuxClient = existing.tmuxBacked && !existing.sessionHost
     // A tmux-backed join needs the mouse-tracking mode-enable sequences tmux only emits at its own
     // attach — a mid-stream subscriber missed them, and neither the `screen` capture nor a SIGWINCH
     // redraw re-sends them, so without this the joiner can't wheel-scroll tmux history until a
-    // keystroke. `persistKey` is set iff tmux-backed (local or remote), which is exactly the gate:
-    // our tmux always runs `mouse on`, so enabling these unconditionally matches its client state.
+    // keystroke. Our tmux always runs `mouse on`, so enabling these unconditionally matches its
+    // client state. A session-host joiner must NOT get it: nothing there runs `mouse on`, and the
+    // enabled tracking would send the wheel and drags to the shell as SGR reports instead of
+    // scrolling and selecting (it was gated on `persistKey`, which session-host sessions carry).
     // Rides `base` so it reaches the renderer on BOTH the resized and screen-painted branches.
-    const coAttachMouse = existing.persistKey ? true : undefined
-    // Alt-screen: tmux-backed ONLY, and `tmuxBacked` alone is not that gate — a session-host session
-    // is also recorded tmuxBacked (and carries a persistKey), and switching it (or a plain shell) to
-    // the alternate buffer would hide its only scrollback. See PtyCreateResult.coAttachAltScreen.
-    const coAttachAltScreen = existing.tmuxBacked && !existing.sessionHost ? true : undefined
-    // Same source, different question (and different consumer): a joiner needs to know whether the
-    // session it landed on survives losing a client, because its own unmount may park it.
+    const coAttachMouse = realTmuxClient ? true : undefined
+    // Alt-screen: same gate — switching a session-host session (or a plain shell) to the alternate
+    // buffer would hide its only scrollback. See PtyCreateResult.coAttachAltScreen.
+    const coAttachAltScreen = realTmuxClient ? true : undefined
+    // Different question (and different consumer): a joiner needs to know whether the session it
+    // landed on survives losing a client, because its own unmount may park it.
     const persistent = !!existing.persistKey
-    // The resync repaint's question, asked of every session (PtyCreateResult.tmuxClient) — for a
-    // join it is the alt-screen gate verbatim.
-    const tmuxClient = coAttachAltScreen
+    // The resync repaint's question, asked of every session (PtyCreateResult.tmuxClient).
+    const tmuxClient = realTmuxClient ? true : undefined
     const base: PtyCreateResult = existing.accountFallback
       ? {
           sessionId: existingId,

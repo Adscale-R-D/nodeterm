@@ -987,7 +987,7 @@ Lifecycle, by intent:
   window, non-recurring, without live subagents (`planHibernation` +
   `lib/hibernationCandidates.ts`, both pure/tested). tmux + shell survive; node shows a clickable
   SLEEPING chip; wake (view / chip / modal open) verifies a SHELL owns the pane
-  (`isShellCommand` OR the persisted `hibernatedPane` the exit settled on — nu/pwsh users) before
+  (`isShellCommand` OR the persisted `hibernatedPane` the exit settled on — xonsh/elvish users) before
   the KILL_LINE'd, echo-verified `withPermissionMode(resumeCommand(...))`. Sweep/wake/menu-restart
   share ONE `guardConcurrentRestart` set. Load-bearing rules a refactor must not undo:
   (1) **recurring fact is durable** — both loop-card dismiss surfaces route through
@@ -1437,7 +1437,10 @@ seed** — the cases are:
   neither the `screen` capture (`capture-pane` carries no private modes) nor a SIGWINCH redraw
   re-sends them — so the joiner's wheel can't scroll tmux history until a keystroke makes the app
   re-request mouse. `join()` therefore sets `PtyCreateResult.coAttachMouse` for tmux-backed joins
-  (gated on `persistKey`, on BOTH the screen and resize branches) and the renderer writes
+  (gated on a REAL tmux client — `tmuxBacked && !sessionHost`, the same local that gates
+  `coAttachAltScreen`/`tmuxClient`; NOT `persistKey`, which a Windows session-host session also
+  carries and whose joiner then sent wheel/drag to the shell as SGR reports — on BOTH the screen
+  and resize branches) and the renderer writes
   `CO_ATTACH_MOUSE_SEQ` into the fresh xterm (both `ModalTerminal` and `TerminalNode`). tmux is
   always `mouse on`, so this matches its invariant client state; the enable is idempotent. Was the
   "can't scroll the kanban card-modal terminal until you press a key" bug. **A co-attach joiner
@@ -1697,7 +1700,18 @@ session.
   never guesses from the browser. Standalone `ssh` terminal nodes remain URL-only because they
   have no remote fs API with which to verify a token; relay tabs do have a core-bound, jailed fs
   API and therefore support file links. Windows existence matching is case-insensitive and accepts
-  both separators; UNC tokens are refused whole before they can be reinterpreted as cwd-relative. A path an
+  both separators; UNC tokens are refused whole before they can be reinterpreted as cwd-relative.
+  **Dropped / pasted file paths** follow the same core-platform rule (`dropDialect` /
+  `quoteDroppedPath`, `terminal/file-drop.ts`): POSIX backslash-escaping everywhere — every SSH
+  pane and Git Bash included, byte-identical to before — except a Windows core, where `\` is the
+  separator and is never doubled: bare when nothing needs quoting, else double-quoted (pwsh/agent
+  panes single-quote a path holding `$` or a backtick; an UNSET shell is spelled for PowerShell,
+  the core's own Windows default, so a `$` path is not expanded). The image receipt strips one pair
+  of quotes before reading the extension. `isShellCommand` likewise normalises the session host's
+  image names (`pwsh.exe`, `C:\…\cmd.exe`) — leading `-`, either separator, case, `.exe` — which is
+  why the session host's `paneCommand` walk (`process-tree.ts`) answers a shell name only when EVERY
+  process in the tree is a shell: claude's Bash/PowerShell tool or a `cmd /c npx` MCP launcher is a
+  shell LEAF under a live agent, and must not read as "the CLI let go of the pane". A path an
   agent TUI wrapped under a **hanging indent** (Codex: 2 spaces, broken after a `/` or at a space)
   is neither a soft nor a hard wrap, so it is offered as extra READINGS (`hangingReadings` — the
   seam as nothing, and as one space), tried BEFORE the plain row's tokens by both the provider and

@@ -705,6 +705,31 @@ describe('PtyManager session-host contracts', () => {
     expect(joined.tmuxClient).toBeUndefined()
   })
 
+  it('never tells a session-host joiner to enable tmux mouse tracking (no tmux runs `mouse on` there)', async () => {
+    // Was gated on `persistKey`, which a session-host session carries: the joiner (card modal,
+    // reloaded node, teammate) entered ?1000/?1002/?1006 tracking with no tmux behind it, so the
+    // wheel and drags went to the shell as SGR reports instead of scrolling and selecting.
+    backend.create.mockReturnValue(fakeSessionHostPty())
+    const m = await makeManager()
+    m.registerIpc()
+    const create = host.handlers[IPC.ptyCreate]
+    const options = { cols: 80, rows: 24, persistKey: 'node-mouse' }
+
+    await create(7, options)
+    const joined = (await create(8, options)) as {
+      fresh: boolean
+      persistent?: boolean
+      coAttachMouse?: boolean
+      coAttachAltScreen?: boolean
+      tmuxClient?: boolean
+    }
+    expect(joined.fresh).toBe(false)
+    expect(joined.persistent).toBe(true) // still a session that outlives its clients…
+    expect(joined.coAttachMouse).toBeUndefined() // …but with no tmux mouse to turn on
+    expect(joined.coAttachAltScreen).toBeUndefined()
+    expect(joined.tmuxClient).toBeUndefined()
+  })
+
   it('leaves the live generation joinable when the confirmed backend kill rejects', async () => {
     const active = fakeSessionHostPty()
     backend.create.mockReturnValue(active)

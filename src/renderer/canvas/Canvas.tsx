@@ -8148,18 +8148,30 @@ export function Canvas() {
               // a bare shell with no agent (issue #899), so the notice carries the resume line.
               text: exitTimeoutNotice(action, exitTimeoutResumeLine(nodeId))
             }
-          : {
+          : outcome === 'host-unsupported'
+            ? {
+                kind: 'error',
+                // Windows only: the session host serving this pane predates the verb that stops
+                // the agent by process. A live host is never replaced by an app update or restart
+                // (docs/windows-session-host.md) — it retires once its sessions end, which is what
+                // "Prepare for update…" coordinates.
+                text:
+                  `${action} skipped: this session runs on a session host started by an older ` +
+                  'nodeterm, which cannot stop the agent safely. It is replaced once its sessions ' +
+                  'end (Prepare for update… does this). Nothing was written to the pane.'
+              }
+            : {
               kind: 'error',
               // 'not-eligible' is every "not a target right now": the gate re-checked and refused,
-              // the tmux session is closed / ended / gone (which the menu row cannot see — only the
-              // node knows its session state), the pane cannot be observed at all (persistent tmux
-              // sessions off, or no tmux on this machine — the restart needs to watch the pane to
-              // know when the CLI has quit), or a restart of this node was already in flight (the
-              // per-node action and the bulk one can reach the same node).
+              // the session is closed / ended / gone (which the menu row cannot see — only the
+              // node knows its session state), the pane cannot be observed at all (persistent
+              // sessions off, or no persistence backend on this machine — the restart needs to
+              // watch the pane to know when the CLI has quit), or a restart of this node was
+              // already in flight (the per-node action and the bulk one can reach the same node).
               text:
                 `${action} skipped: this session is busy, already restarting, not attached ` +
                 '(closed, ended, or nothing to resume), or its pane cannot be watched without ' +
-                'persistent tmux sessions. Nothing was written to the pane.'
+                'persistent sessions. Nothing was written to the pane.'
             }
     )
   }, [setNodes, markDirty])
@@ -8486,7 +8498,11 @@ export function Canvas() {
         })
       )
       if (copy?.ok) markDirty()
-      if (outcome !== 'restarted') return { kind: 'not-restarted', outcome }
+      // `host-unsupported` only comes from the terminate leg (model switch / clearEnv), which this
+      // restartShell path never takes; folded into the refusal it would be if it ever did.
+      if (outcome !== 'restarted') {
+        return { kind: 'not-restarted', outcome: outcome === 'host-unsupported' ? 'not-eligible' : outcome }
+      }
       const moved = copy as ClaudeSessionCopyResult | undefined
       return moved?.ok ? { kind: 'switched' } : { kind: 'copy-failed', reason: moved?.ok === false ? moved.reason : 'failed' }
     },

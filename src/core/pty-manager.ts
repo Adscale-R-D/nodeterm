@@ -213,10 +213,13 @@ import {
   sessionHostMessageEnvelope,
   sessionHostSendKeys,
   sessionHostSupported,
+  sessionHostTerminateOwner,
+  sessionHostWriteDetached,
   SessionHostProtocolCompatibilityError
 } from './session-host-backend'
 import type { SessionHostPty } from './session-host-pty'
 import { NativeWindowsPane } from './native-windows-pane'
+import { terminatePaneOwner } from '../session-host/terminate-owner'
 import type { ProjectSpawnOverrides, ProjectSpawnOverridesReader } from './project-spawn-overrides'
 
 // How often we snapshot a live tmux session's scrollback to disk, so a machine reboot (which
@@ -1243,6 +1246,9 @@ export class PtyManager {
   private readonly confirmedProcessRun: ConfirmedProcessRun
   /** Injectable only so Windows-only routing stays behavior-testable on every CI host. */
   private readonly runtimePlatform: NodeJS.Platform
+  /** The direct-ConPTY kill (`terminateForeground`). A field, not a deps entry, so a test can swap
+   *  it on an instance the same way the pane-owner tests reach `tmuxPath`; production never does. */
+  private terminateProcessTree: (pid: number) => Promise<void> = (pid) => terminateWindowsProcessTree(pid)
 
   constructor(
     deps: {
@@ -1601,6 +1607,8 @@ export class PtyManager {
    *     re-used by whoever attached it, and a write does not need a session-scoped client.
    *  3. **the shared control client** (`sharedClientFor`) — one `tmux -C` child for the whole
    *     server, because `send-keys -t <session>` is a server-wide command.
+   *  A released **session-host** node (Windows) takes none of tiers 2–3: the host writes by session
+   *  name (`writeDetachedV1`), so there is no client to pick.
    *
    * Returns whether the keys were delivered. **A false is never retried on another client**: a
    * timed-out `send-keys` may well have run — control mode loses the REPLY, not necessarily the
@@ -1637,6 +1645,18 @@ export class PtyManager {
     if (this.zellijKeys.has(persistKey)) {
       const run = settings.tmuxEnabled ? this.zellijRun() : null
       return run ? zellijWriteChars(run, sessionName(persistKey), data) : false
+    }
+    // A released SESSION-HOST node: the host writes by name, no attachment needed
+    // (`writeDetachedV1`). Same refusals as below — no released record, or a remote one, is no
+    // claim — but NOT gated on `ptyShadowClients`: that switch governs `tmux -C` children, and
+    // this leg spawns none. An older host refuses the verb; that is a plain `false`, never a
+    // fallback to `sendKeys` (a different delivery shape) and never a retry.
+    const releasedHost = this.released.get(persistKey)
+    if (releasedHost?.sessionHost) {
+      if (releasedHost.remote || !settings.tmuxEnabled || !sessionHostSupported()) return false
+      const hostTarget = sessionName(persistKey)
+      if (!isSessionName(hostTarget)) return false
+      return sessionHostWriteDetached(hostTarget, data)
     }
     if (!this.tmuxPath || !settings.tmuxEnabled) return false
     // The kill switch, and the reason it sits BELOW tier 1: the painter is the session's own pty,
@@ -6072,20 +6092,45 @@ export class PtyManager {
    * `unknown` both refuse (fail-closed — we are about to send a signal). Omitting the id preserves
    * the legacy shell-only guard for any caller that has no agent to assert.
    */
-  async terminateForeground(persistKey: string, expectedAgentId?: string): Promise<boolean> {
+  async terminateForeground(persistKey: string, expectedAgentId?: string): Promise<boolean | 'unsupported'> {
     if (typeof persistKey !== 'string' || !persistKey || persistKey.length > REF_MAX_LEN) return false
+    const live = this.liveSessionForPersistKey(persistKey)
     // Refused on Zellij (ZELLIJ_BACKEND_GAPS): a signal aimed at a process group read off `ps`
     // without the pane-owner proof the tmux leg has would be a guess at which process to kill.
-    if (this.isZellij(persistKey, this.liveSessionForPersistKey(persistKey))) return false
+    if (this.isZellij(persistKey, live)) return false
     // Identity gate: prove the expected harness owns the foreground group before signalling it.
     // `paneOwner` reads the full argv (local or over the project's ControlMaster) and is null on
     // any uncertainty, which `isAgentPane` maps to `unknown` → refuse.
+    let owner: PaneOwner | null = null
     if (expectedAgentId) {
-      const owner = await this.paneOwner(persistKey)
+      owner = await this.paneOwner(persistKey)
       // Pass the custom-agent list so a `custom:<uuid>` harness is verifiable by its launchCmd
       // binary instead of collapsing to `unknown` (which would fail-closed on every model switch).
       const binaries = binariesFor(expectedAgentId, this.getSettings().customAgents)
       if (isAgentPane(owner, expectedAgentId, binaries) !== 'agent') return false
+    }
+    // Windows panes (a direct ConPTY, or a session-host session) have no process group and no
+    // `ps`: the kill is the PROVEN agent's process tree (`taskkill /T /F` on the one pid the owner
+    // read named), re-proven by OS birth time right before it, and never the console root — the
+    // shell survives for the recycle that follows. Both legs REQUIRE the identity gate: the legacy
+    // "not a shell" guard below has no Windows equivalent that could stand in for it.
+    if (live?.nativeWindowsPane) {
+      if (!owner) return false
+      const pane = live.nativeWindowsPane
+      const handle = { generation: '', exited: false, proc: { pid: live.proc.pid } }
+      return terminatePaneOwner(
+        () => (this.liveSessionForPersistKey(persistKey) === live ? handle : undefined),
+        owner,
+        { probe: () => pane.owner(), terminate: (pid) => this.terminateProcessTree(pid) }
+      )
+    }
+    if (!live?.sshRemote && this.sessionHostOwns(persistKey, live)) {
+      if (!owner) return false
+      try {
+        return await sessionHostTerminateOwner(sessionName(persistKey), owner)
+      } catch {
+        return false
+      }
     }
     const target = sessionName(persistKey)
     const sshRemote = this.sessionByPersistKey(persistKey)?.sshRemote

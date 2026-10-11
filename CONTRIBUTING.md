@@ -1202,7 +1202,9 @@ bite most often:
 **SSH projects on Windows** run over an in-process transport (`src/core/remote-ssh/native/`),
 not the ssh binary. If you add an ssh call site, route it through `useNativeSsh()` like the
 others, and if you add an ssh option to `control-master.ts`, teach `ssh-argv.ts` about it (the
-parser refuses unknown options on purpose). Test from macOS/Linux with `NODETERM_NATIVE_SSH=1`.
+parser refuses unknown options on purpose). Test from macOS/Linux with `NODETERM_NATIVE_SSH=1`. Resolve the ssh
+program with `resolveSshProgram()` (never a private `findExecutableSync('ssh', …)`): on Windows it
+may be the bare `ssh` sentinel, which only the native runners can serve.
 
 **A dependency with a native addon that the Server Edition reaches is `--external:` in
 `server:build`.** Hosts build the bundle after `npm ci --ignore-scripts`, so no addon is compiled

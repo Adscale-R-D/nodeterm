@@ -63,7 +63,7 @@ import {
   type RelayRemoteRef
 } from './relay-attach-plan'
 import { RemoteSessionIndex, type SessionVerdict } from './remote-ssh/remote-session-index'
-import { isSshProgram, nativeExecFileAsync, nativeMux, useNativeSsh } from './remote-ssh/native/native-runtime'
+import { isSshProgram, nativeExecFileAsync, nativeMux, resolveSshProgram, useNativeSsh } from './remote-ssh/native/native-runtime'
 import { NativeSshPty } from './remote-ssh/native/native-pty'
 import { remotePtySpawnGate, type SpawnSlot } from './remote-ssh/pty-spawn-gate'
 import type { SshConnection } from '../shared/ssh'
@@ -538,8 +538,6 @@ function findTmux(resourcesPath?: string): string | null {
   })
 }
 
-/** Resolve an absolute ssh path (GUI apps don't inherit the shell PATH). */
-let cachedSsh: string | null | undefined
 /**
  * macOS-only diagnostic for the recurring release-clobber incident: `electron-builder --x64`
  * rebuilds node-pty IN PLACE in node_modules, leaving an x86_64 spawn-helper that an arm64 app
@@ -573,14 +571,14 @@ function spawnHelperArchMismatch(): string | null {
   return null
 }
 
+/**
+ * The ssh program for remote side-calls and remote terminals (native-runtime.ts
+ * `resolveSshProgram`): the binary, else — under the native transport only — the `ssh` sentinel
+ * every runner here routes to NativeMux (runAsync / runWithStdin / NativeSshPty), so a Windows
+ * machine without the OpenSSH Client feature is not refused as "no ssh". POSIX: unchanged.
+ */
 function findSsh(): string | null {
-  if (cachedSsh !== undefined) return cachedSsh
-  // Subprocess-free (was a sync login-shell `command -v ssh` + an `ssh -V` spawn per fallback,
-  // all blocking the main thread). A MISS is only memoized once the async login-shell PATH
-  // probe has settled — before that a custom-location ssh would be cached away forever.
-  const found = findExecutableSync('ssh', ['/usr/bin/ssh', '/usr/local/bin/ssh', '/opt/homebrew/bin/ssh'])
-  if (found || shellPathNow() !== undefined) cachedSsh = found
-  return found
+  return resolveSshProgram()
 }
 
 // resolveShellPath (the one async login-shell PATH probe) lives in exec-path.ts now, shared by

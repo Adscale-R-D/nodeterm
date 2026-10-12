@@ -79,6 +79,7 @@ export function SessionMemoryPanel({
   const ok = useSessionMemory((s) => s.ok)
   const rows = useSessionMemory((s) => s.rows)
   const unmeasured = useSessionMemory((s) => s.unmeasured)
+  const unmeasuredBackend = useSessionMemory((s) => s.unmeasuredBackend)
   const loading = useSessionMemory((s) => s.loading)
   const loadedScope = useSessionMemory((s) => s.loadedScope)
   const refreshFull = useSessionMemory((s) => s.refreshFull)
@@ -144,9 +145,10 @@ export function SessionMemoryPanel({
   } else if (!measured) {
     body = <div className="sessmem-panel__note">Measuring…</div>
   } else if (views.length === 0 && unmeasured !== 0) {
-    // The sweep reads tmux; Zellij-backed sessions are alive and simply not in it. "No sessions"
+    // The sweep reads tmux (and, on Windows, the session host); Zellij-backed sessions, and those
+    // of a session host too old to describe them, are alive and simply not in it. "No sessions"
     // here would be the ok:true-with-no-rows lie this panel exists to avoid.
-    body = <div className="sessmem-panel__note">{unmeasuredNote(unmeasured)}</div>
+    body = <div className="sessmem-panel__note">{unmeasuredNote(unmeasured, unmeasuredBackend)}</div>
   } else if (views.length === 0) {
     // We looked, and there really is nothing — a different sentence from the two above.
     body = <div className="sessmem-panel__note">No sessions are running here.</div>
@@ -237,7 +239,7 @@ export function SessionMemoryPanel({
       body = (
         <>
           {body}
-          <div className="sessmem-panel__note">{unmeasuredNote(unmeasured)}</div>
+          <div className="sessmem-panel__note">{unmeasuredNote(unmeasured, unmeasuredBackend)}</div>
         </>
       )
   }

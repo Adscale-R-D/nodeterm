@@ -15,6 +15,8 @@ import { promisify } from 'util'
 import type { MemInfo, SessionMemoryRow, SessionMemoryReport } from '../shared/types'
 import { TMUX_SOCKET } from './tmux-naming'
 import { RMT_TMUX_SOCKET } from './remote-ssh/control-master'
+import type { SessionHostListing } from './session-host-client'
+import { cimRows, powershellArgs, powershellExe } from './win32-powershell'
 
 export type { MemInfo, SessionMemoryRow, SessionMemoryReport }
 
@@ -439,6 +441,138 @@ export function isNoServerError(message: string): boolean {
 }
 
 /**
+ * Non-Linux (or an unreadable /proc): `ps` for the whole table, through the injectable exec seam —
+ * nothing in this file may reach a subprocess around it. Null when it could not run.
+ *
+ * On darwin a SECOND call is merged in: `top` carries phys_footprint, which is what Activity
+ * Monitor shows and what the pill's `vm_stat` reading already counts. `ps`'s own `rss` drops an
+ * idle process's compressed pages and understated a six-hour-idle session by about half — exactly
+ * the population this panel exists to describe. See parseTopFootprint.
+ */
+async function psProcessTable(
+  exec: (bin: string, args: string[]) => Promise<string>,
+  platformName: NodeJS.Platform
+): Promise<ProcEntry[] | null> {
+  try {
+    const rows = parseProcessTable(await exec('ps', ['-eo', 'pid,ppid,rss']))
+    if (platformName !== 'darwin') return rows
+    const fp = parseTopFootprint(await exec('top', ['-l', '1', '-stats', 'pid,mem']))
+    // A pid `top` did not list keeps its `rss`. The two snapshots are a moment apart, so a miss is
+    // a process that came or went between them — not a reason to report nothing.
+    return rows.map((e) => ({ ...e, rssKb: fp.get(e.pid) ?? e.rssKb }))
+  } catch {
+    return null
+  }
+}
+
+/** The PowerShell the Windows table comes from: one CIM query, compressed JSON on one line. */
+export const WIN32_PROCESS_TABLE_SCRIPT =
+  'Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,WorkingSetSize | ConvertTo-Json -Compress'
+
+/**
+ * Parse `WIN32_PROCESS_TABLE_SCRIPT`'s output. `ConvertTo-Json` prints a bare OBJECT for a
+ * one-element pipeline and an array otherwise; both are accepted. `WorkingSetSize` is BYTES — the
+ * Windows counterpart of RSS (resident pages, shared ones included), and what Task Manager's
+ * "Working set" column shows. Rows without a numeric pid/ppid are skipped; a missing working set
+ * reads as 0 rather than dropping the process, so the tree walk still reaches its children.
+ * Unparseable JSON, or a table with no process at all (a machine always has some), is null.
+ */
+export function parseWin32ProcessTable(json: string): ProcEntry[] | null {
+  const rows = cimRows(json)
+  if (rows === null) return null
+  const out: ProcEntry[] = []
+  for (const r of rows) {
+    const pid = Number(r.ProcessId)
+    const ppid = Number(r.ParentProcessId)
+    if (!Number.isSafeInteger(pid) || !Number.isSafeInteger(ppid)) continue
+    const bytes = Number(r.WorkingSetSize)
+    out.push({ pid, ppid, rssKb: Number.isFinite(bytes) && bytes > 0 ? bytes / 1024 : 0 })
+  }
+  return out.length > 0 ? out : null
+}
+
+/** The Windows process table through the exec seam, or null when PowerShell could not answer. */
+export async function win32ProcessTable(
+  exec: (bin: string, args: string[]) => Promise<string>
+): Promise<ProcEntry[] | null> {
+  try {
+    return parseWin32ProcessTable(await exec(powershellExe(), powershellArgs(WIN32_PROCESS_TABLE_SCRIPT)))
+  } catch {
+    return null
+  }
+}
+
+export interface SessionHostMemoryDeps {
+  /** The host's listing (`PtyManager.sessionHostListing()`); null = the read failed. */
+  list: () => Promise<SessionHostListing | null>
+  /** Process-table override for tests. Default: by platform (CIM on Windows, /proc, else ps). */
+  readTable?: () => Promise<ProcEntry[] | null>
+  readMem?: () => MemInfo | null
+  exec?: (bin: string, args: string[]) => Promise<string>
+  platformName?: NodeJS.Platform
+}
+
+/**
+ * The session-host leg of the sweep: the host names each session and its pty's pid (the pane's
+ * shell — `PaneRef.panePid`), and the same `buildReport`/`rollupTree` then do what they do for
+ * tmux. Failure rules, mirroring the tmux leg:
+ *  - a failed host read, or an unreadable process table → `ok: false`, no rows;
+ *  - no host running → `ok: true` with no rows — an ANSWER (there are no sessions), not a failure,
+ *    and no process table is read for it;
+ *  - a session the host names but does not describe (a host older than `sessionDetails`, a row
+ *    dropped as malformed) is counted in `unmeasured` — never silently dropped, so the panel cannot
+ *    say "no sessions" over live ones.
+ */
+export async function collectSessionHostMemory(deps: SessionHostMemoryDeps): Promise<SessionMemoryReport> {
+  const mem = (deps.readMem ?? readMemInfo)()
+  let listing: SessionHostListing | null
+  try {
+    listing = await deps.list()
+  } catch {
+    listing = null
+  }
+  if (!listing) return { ok: false, rows: [], mem }
+  const ours = listing.names.filter((n) => n.startsWith('nt-'))
+  const described = new Map((listing.sessions ?? []).map((row) => [row.name, row]))
+  const panes: PaneRef[] = []
+  let unmeasured = 0
+  for (const name of ours) {
+    const row = described.get(name)
+    if (row) panes.push({ session: name, panePid: row.pid, command: '' })
+    else unmeasured++
+  }
+  const withUnmeasured = (report: SessionMemoryReport): SessionMemoryReport =>
+    unmeasured === 0 ? report : { ...report, unmeasured, unmeasuredBackend: 'session-host' }
+  if (panes.length === 0) return withUnmeasured({ ok: true, rows: [], mem })
+
+  const platformName = deps.platformName ?? process.platform
+  const exec =
+    deps.exec ??
+    (async (b: string, args: string[]): Promise<string> => {
+      const { stdout } = await runAsync(b, args, {
+        timeout: 15_000,
+        maxBuffer: 16 * 1024 * 1024,
+        windowsHide: true
+      })
+      return stdout
+    })
+  const readTable =
+    deps.readTable ??
+    (async (): Promise<ProcEntry[] | null> => {
+      if (platformName === 'win32') return win32ProcessTable(exec)
+      return defaultProcessTableReader() ?? (await psProcessTable(exec, platformName))
+    })
+  let table: ProcEntry[] | null
+  try {
+    table = await readTable()
+  } catch {
+    table = null
+  }
+  if (table === null) return { ok: false, rows: [], mem }
+  return withUnmeasured(buildReport(panes, table, mem))
+}
+
+/**
  * One sweep. Failure rules (CLAUDE.md: a failed read is never evidence of absence):
  *  - no tmux binary, or an unreadable process table → `ok: false`, no rows;
  *  - a socket with no tmux server contributes NO panes but is NOT a failure — "no server running"
@@ -465,28 +599,7 @@ export async function collectSessionMemory(
   const readTable = deps.readTable ?? defaultProcessTableReader
 
   let table = readTable()
-  if (table === null && !deps.readTable) {
-    // Non-Linux (or an unreadable /proc): `ps` for the whole table, through the same injectable
-    // seam as tmux — nothing in this file may reach a subprocess around it.
-    //
-    // On darwin a SECOND call is merged in: `top` carries phys_footprint, which is what Activity
-    // Monitor shows and what the pill's `vm_stat` reading already counts. `ps`'s own `rss` drops
-    // an idle process's compressed pages and understated a six-hour-idle session by about half —
-    // exactly the population this panel exists to describe. See parseTopFootprint.
-    try {
-      const rows = parseProcessTable(await exec('ps', ['-eo', 'pid,ppid,rss']))
-      if (process.platform === 'darwin') {
-        const fp = parseTopFootprint(await exec('top', ['-l', '1', '-stats', 'pid,mem']))
-        // A pid `top` did not list keeps its `rss`. The two snapshots are a moment apart, so a miss
-        // is a process that came or went between them — not a reason to report nothing.
-        table = rows.map((e) => ({ ...e, rssKb: fp.get(e.pid) ?? e.rssKb }))
-      } else {
-        table = rows
-      }
-    } catch {
-      table = null
-    }
-  }
+  if (table === null && !deps.readTable) table = await psProcessTable(exec, process.platform)
   if (table === null) return { ok: false, rows: [], mem }
 
   const sockets = deps.sockets ?? [TMUX_SOCKET, RMT_TMUX_SOCKET]

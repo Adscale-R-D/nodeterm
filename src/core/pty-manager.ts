@@ -207,6 +207,8 @@ import {
   sessionHostHasSession,
   sessionHostKillSession,
   sessionHostListSessions,
+  sessionHostListSessionsDetailed,
+  type SessionHostListing,
   sessionHostPaneCommand,
   sessionHostMessageOwner,
   sessionHostMessagePasteReady,
@@ -218,6 +220,7 @@ import {
   SessionHostProtocolCompatibilityError
 } from './session-host-backend'
 import type { SessionHostPty } from './session-host-pty'
+import type { SessionHostReaperBackend, SessionInfo } from './session-budget'
 import { NativeWindowsPane } from './native-windows-pane'
 import { terminatePaneOwner } from '../session-host/terminate-owner'
 import type { ProjectSpawnOverrides, ProjectSpawnOverridesReader } from './project-spawn-overrides'
@@ -3069,6 +3072,79 @@ export class PtyManager {
       this.getSettings().tmuxEnabled &&
       sessionHostSupported()
     )
+  }
+
+  /**
+   * The session host's per-session listing for the observability surfaces (session-memory panel,
+   * dev-server ports), or `undefined` when the session host is not this machine's backend — the
+   * caller then behaves exactly as before it existed. Same eligibility guard as every other host
+   * read; the listing itself never launches a host either (`listSessionsDetailed`).
+   */
+  sessionHostListing(): Promise<SessionHostListing | null> | undefined {
+    if (!this.hostBackendEligible()) return undefined
+    return sessionHostListSessionsDetailed()
+  }
+
+  /** Does this process hold a live (non-watcher) session whose node maps to session `name`?
+   *  Compared through `sessionName()` — never by slicing the prefix back off — because the name
+   *  is a SANITIZED node id, so the inverse is not unique. */
+  private watchesSessionName(name: string): boolean {
+    for (const session of this.sessions.values()) {
+      if (session.watcherClient || !session.persistKey) continue
+      if (sessionName(session.persistKey) === name) return true
+    }
+    return false
+  }
+
+  /** Generation each name had in the reaper backend's most recent listing (see below). */
+  private readonly reaperGenerations = new Map<string, string>()
+
+  /**
+   * The session reaper's session-host leg (`SessionReaperOpts.sessionHost`), or `undefined` when
+   * the session host is not this machine's backend.
+   *
+   * Two rules beyond the plain mapping:
+   *  - A name THIS process has a live session for counts as watched (`clients >= 1`) whatever the
+   *    host says. A subscription is re-applied after a host reconnect, and in that window the host
+   *    reports zero subscribers for a terminal the user is looking at — a tmux painter is a process
+   *    and has no such window. Only ever ADDS a viewer, so it can only spare, never doom.
+   *  - The kill ends exactly the generation the latest listing observed (`expectedGeneration`), and
+   *    nothing else: no scrollback deletion, no tombstone — those belong to the user-deletes-the-
+   *    node path (`destroySession`). A reaped node cold-restores on next open (`fresh: true`), the
+   *    same contract as a tmux reap (session-budget.ts header).
+   */
+  sessionHostReaperBackend(): SessionHostReaperBackend | undefined {
+    if (!this.hostBackendEligible()) return undefined
+    return {
+      list: async (): Promise<SessionInfo[] | null> => {
+        const listing = await sessionHostListSessionsDetailed()
+        // A failed read, or a host that cannot describe its sessions: no candidates at all.
+        if (!listing || listing.sessions === null) return null
+        this.reaperGenerations.clear()
+        return listing.sessions.map((row) => {
+          this.reaperGenerations.set(row.name, row.generation)
+          const watched = this.watchesSessionName(row.name) ? 1 : 0
+          const outputSec = Math.floor(row.lastOutputMs / 1000)
+          return {
+            name: row.name,
+            clients: Math.max(row.subscribers, watched),
+            // The host has no attach clock; the output clock is the only honest one it keeps.
+            activitySec: outputSec,
+            outputSec
+          }
+        })
+      },
+      kill: async (name: string): Promise<boolean> => {
+        const expectedGeneration = this.reaperGenerations.get(name)
+        // Never kill by name alone: without the observed generation a same-name successor could die.
+        if (!expectedGeneration) return false
+        // Re-asked at kill time, not taken from the listing: a node opened since the plan is now
+        // watched, and the kill must spare it exactly as the listing's `watched` mapping would.
+        if (this.watchesSessionName(name)) return false
+        await sessionHostKillSession(name, { expectedGeneration })
+        return true
+      }
+    }
   }
 
   /**

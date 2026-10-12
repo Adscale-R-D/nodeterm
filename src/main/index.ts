@@ -3230,7 +3230,9 @@ app.whenReady().then(async () => {
   // session-memory panel gives the user the visibility to cull deliberately.
   const sessionReaper = createSessionReaper({
     tmuxBin: () => ptyManager.getTmuxBin(),
-    shadowed: (socket) => ptyManager.shadowedTmuxSessions(socket)
+    shadowed: (socket) => ptyManager.shadowedTmuxSessions(socket),
+    // No tmux (Windows): the session host's sessions are reaped under the same budget rules.
+    sessionHost: () => ptyManager.sessionHostReaperBackend()
   })
   sessionReaper.start()
   // Memory pressure (core/memory-pressure.ts): the reaper's own 10-minute timer is the steady
@@ -3279,6 +3281,8 @@ app.whenReady().then(async () => {
     tmuxBin: () => ptyManager.getTmuxBin(),
     // Zellij-backed sessions are not in the tmux sweep; the panel says how many it did not measure.
     unmeasuredSessions: () => ptyManager.zellijSessionCount(),
+    // Windows (no tmux): the session host's sessions; undefined where it is not the backend.
+    sessionHost: () => ptyManager.sessionHostListing(),
     remote: {
       // Identity, not liveness: a DISCONNECTED SSH project is still someone else's machine, and
       // `connectedHosts()` alone would answer "local" for it — exactly the window the service's
@@ -3357,6 +3361,8 @@ app.whenReady().then(async () => {
   // exit-code-gated runner shape as session memory above; forwarding rides the project's master.
   const devPorts = startDevPortsService({
     tmuxBin: () => ptyManager.getTmuxBin(),
+    // Windows: the session host's panes, probed with one PowerShell call (core/dev-ports.ts).
+    sessionHost: () => ptyManager.sessionHostListing(),
     remote: {
       isRemoteProject: sshScopePredicate({
         sshProjectIds: () => workspaceStore.sshProjectIds(),

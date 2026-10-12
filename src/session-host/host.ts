@@ -32,6 +32,7 @@ import {
   type TerminateOwnerResult,
   type KillSessionResult,
   type ListSessionsResult,
+  type SessionHostSessionDetail,
   type ShutdownResult
 } from './protocol'
 import { HostSession } from './session'
@@ -345,6 +346,9 @@ async function main(): Promise<void> {
    *  session and exit (issue #829): the command is destructive, so an app build that never asked
    *  for it can never trigger it by accident. */
   const shutdownSockets = new WeakSet<net.Socket>()
+  /** Connections that negotiated `sessionDetails`: only these get per-session rows (pid,
+   *  subscribers, output clock, generation) on `listSessions`. An older client reads `{names}`. */
+  const sessionDetailsSockets = new WeakSet<net.Socket>()
   /** Set while a `shutdown` is ending sessions. New sessions (attach / attachExisting / launches)
    *  are refused for its duration; cleared again only if the shutdown could not end everything. */
   let shuttingDown = false
@@ -382,6 +386,7 @@ async function main(): Promise<void> {
       : []
     if (features.includes('geometry')) geometrySockets.add(socket)
     if (features.includes('shutdown')) shutdownSockets.add(socket)
+    if (features.includes('sessionDetails')) sessionDetailsSockets.add(socket)
     return features.length > 0
       ? { protocolVersion: currentProtocolVersion(), features }
       : { protocolVersion: currentProtocolVersion() }
@@ -467,6 +472,8 @@ async function main(): Promise<void> {
       // node-pty may flush a queued data callback after its exit callback. Once endSession has
       // disposed the emulator and broadcast exit, no data may touch or appear after that boundary.
       if (session.exited) return
+      // Output is output whether or not it is shown: the reaper's idleness clock (sessionDetails).
+      session.lastOutputAt = Date.now()
       // Trusted launch input is typed through the same ConPTY and therefore echoed by the shell.
       // While HostSession verifies that echo, keep the entire chunk out of both renderer push
       // frames and the reconstructable screen so executable/argv/prompt material stays core-only.
@@ -1071,8 +1078,27 @@ async function main(): Promise<void> {
         await sessions.get(req.name)?.detach(socket)
         return { ok: true }
       }
-      case 'listSessions':
-        return { ok: true, result: { names: [...sessions.keys()] } satisfies ListSessionsResult }
+      case 'listSessions': {
+        const names = [...sessions.keys()]
+        if (!sessionDetailsSockets.has(socket)) {
+          return { ok: true, result: { names } satisfies ListSessionsResult }
+        }
+        // Only live generations are described: a retiring/exited one is already being ended, and
+        // describing it would invite a second kill or a memory row for a dying tree.
+        const details: SessionHostSessionDetail[] = []
+        for (const s of sessions.values()) {
+          if (s.exited || s.retiring) continue
+          details.push({
+            name: s.name,
+            pid: s.proc.pid,
+            subscribers: s.subscribers.size,
+            lastOutputMs: s.lastOutputAt,
+            createdMs: s.createdAt,
+            generation: s.generation
+          })
+        }
+        return { ok: true, result: { names, sessions: details } satisfies ListSessionsResult }
+      }
       case 'ping':
         return { ok: true }
       case 'shutdown':

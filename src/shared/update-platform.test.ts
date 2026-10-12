@@ -4,8 +4,10 @@ import path from 'path'
 import {
   MANUAL_UPDATE_MODE,
   isManualUpdatePlatform,
+  installReadiness,
   mayQuitAndInstall,
   noSelfInstallCopy,
+  releaseNotesText,
   shouldEnableUpdater,
   toUpdateAvailablePayload,
   updateDelivery
@@ -103,9 +105,37 @@ describe('toUpdateAvailablePayload', () => {
       notes: '',
       manual: false
     })
+    expect(toUpdateAvailablePayload({ version: '1.2.0', releaseNotes: 42 }, false).notes).toBe('')
+  })
+
+  it('flattens the fullChangelog array form instead of dropping it', () => {
     expect(
-      toUpdateAvailablePayload({ version: '1.2.0', releaseNotes: [{ note: 'x' }] }, false).notes
-    ).toBe('')
+      toUpdateAvailablePayload(
+        { version: '1.2.0', releaseNotes: [{ version: '1.2.0', note: '- a' }, { note: null }, { version: '1.1.0', note: '- b' }] },
+        false
+      ).notes
+    ).toBe('- a\n- b')
+  })
+
+  it('caps very long notes', () => {
+    expect(releaseNotesText('x'.repeat(100_000)).length).toBe(16 * 1024)
+  })
+})
+
+describe('installReadiness', () => {
+  it('nothing downloaded is never installable, on any platform', () => {
+    for (const p of ['darwin', 'linux', 'win32'])
+      expect(installReadiness(p, { downloaded: false, nativeReady: true })).toBe('none')
+  })
+
+  it('macOS waits for Squirrel.Mac to stage the download', () => {
+    expect(installReadiness('darwin', { downloaded: true, nativeReady: false })).toBe('preparing')
+    expect(installReadiness('darwin', { downloaded: true, nativeReady: true })).toBe('ready')
+  })
+
+  it('AppImage / NSIS install from the downloaded file: ready at once', () => {
+    expect(installReadiness('linux', { downloaded: true, nativeReady: false })).toBe('ready')
+    expect(installReadiness('win32', { downloaded: true, nativeReady: false })).toBe('ready')
   })
 })
 

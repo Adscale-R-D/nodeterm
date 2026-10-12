@@ -43,10 +43,13 @@ describe('main/index.ts background-mode wiring (source guard)', () => {
     expect(src).toMatch(/quitting = true \/\/ from here on[^\n]*\n\s*destroyNotchHud\(\)\n\s*backgroundTray\?\.destroy\(\)/)
   })
   it('keeps the updater restart flipping `quitting` so a hidden window really closes', () => {
-    expect(src).toMatch(/initUpdater\(\(\) => \{\s*quitting = true/)
+    expect(src).toMatch(/initUpdater\(\{\s*onBeforeRestart: \(\) => \{\s*quitting = true/)
   })
   it('tray Quit goes through app.quit() (before-quit + confirm), not app.exit()', () => {
-    expect(src).toMatch(/onAction: \(action\) => \(action === 'open' \? showMainWindowFromBackground\(\) : app\.quit\(\)\)/)
+    // ('restart-update' is the updater's own guarded restart; every other action is Quit.)
+    expect(src).toMatch(
+      /onAction: \(action\) =>\s*action === 'open'\s*\? showMainWindowFromBackground\(\)\s*: action === 'restart-update'\s*\? updater\?\.restartToUpdate\(\)\s*: app\.quit\(\)/
+    )
   })
 })
 

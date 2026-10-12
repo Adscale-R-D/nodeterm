@@ -18,6 +18,7 @@ import type {
   RemoteUsageQuery,
   SessionMemoryQuery,
   UpdateInfo,
+  UpdateInstalling,
   UpdateProgress,
   Workspace,
   WorkspaceSaveOptions,
@@ -183,7 +184,19 @@ const api: NodeTerminalApi = {
     // behalf. `HeadlessNodeFactory` is Server Edition only — the desktop's canvas-control verbs run
     // through the renderer's own React Flow state, and its watcher path stays on onExternalChange.
     // A real subscription would be dead wiring for a channel this main process never broadcasts.
-    onServerChange: (_cb: (project: Project) => void) => () => {}
+    onServerChange: (_cb: (project: Project) => void) => () => {},
+    // Quit / restart-to-update flush (src/main/renderer-flush.ts): answer with the request id once
+    // the callback settles, whether it saved, had nothing to save, or failed.
+    onFlushRequest: (cb: () => Promise<unknown> | void) => {
+      const h = (_e: unknown, id: string) => {
+        void Promise.resolve()
+          .then(cb)
+          .catch(() => {})
+          .finally(() => ipcRenderer.send(IPC.appFlushDone, id))
+      }
+      ipcRenderer.on(IPC.appFlushRequest, h)
+      return () => ipcRenderer.removeListener(IPC.appFlushRequest, h)
+    }
   },
   projectSettings: {
     read: (projectId: string) => ipcRenderer.invoke(IPC.projectSettingsRead, projectId),
@@ -499,9 +512,15 @@ const api: NodeTerminalApi = {
       ipcRenderer.on(IPC.appUpdateNoChannel, handler)
       return () => ipcRenderer.removeListener(IPC.appUpdateNoChannel, handler)
     },
+    onInstalling: (listener) => {
+      const handler = (_e: unknown, s: UpdateInstalling) => listener(s)
+      ipcRenderer.on(IPC.appUpdateInstalling, handler)
+      return () => ipcRenderer.removeListener(IPC.appUpdateInstalling, handler)
+    },
     check: () => ipcRenderer.send(IPC.appCheckForUpdates),
     getVersion: () => ipcRenderer.invoke(IPC.appGetVersion),
     getPolicy: () => ipcRenderer.invoke(IPC.appUpdatePolicy),
+    getStaged: () => ipcRenderer.invoke(IPC.appGetStagedUpdate),
     restart: () => ipcRenderer.send(IPC.appRestartToUpdate),
     prepareInspect: () => ipcRenderer.invoke(IPC.appUpdatePrepInspect),
     prepareShutdownHost: () => ipcRenderer.invoke(IPC.appUpdatePrepShutdown),

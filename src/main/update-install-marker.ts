@@ -54,9 +54,22 @@ export function consumeUpdateFailedMarker(deps: MarkerDeps): UpdateInstallFailur
   } catch {
     /* existence is the fact */
   }
+  // The installer writes `code` as a STRING (nsExec answers `error` / `timeout` instead of an
+  // exit code when PowerShell could not run); a number is accepted too.
+  const rawCode = parsed.code
+  const code =
+    Number.isInteger(rawCode)
+      ? (rawCode as number)
+      : typeof rawCode === 'string' && /^\d{1,9}$/.test(rawCode)
+        ? Number(rawCode)
+        : null
+  const reason = typeof parsed.reason === 'string' ? parsed.reason : 'unknown'
   return {
-    reason: typeof parsed.reason === 'string' ? parsed.reason : 'unknown',
-    code: Number.isInteger(parsed.code) ? (parsed.code as number) : null,
+    reason:
+      code === null && typeof rawCode === 'string' && /^[\w-]{1,32}$/.test(rawCode)
+        ? `${reason} (${rawCode})`
+        : reason,
+    code,
     version: typeof parsed.version === 'string' ? parsed.version : null
   }
 }

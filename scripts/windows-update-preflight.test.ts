@@ -111,6 +111,8 @@ describe('NSIS safety wiring', () => {
     expect(unattended).toMatch(/\$\{If\} \$\{isUpdated\}/)
     expect(unattended).toContain('ReadEnvStr $R2 LOCALAPPDATA')
     expect(unattended).toContain('"$R2\\nodeterm\\update-failed.json"')
+    // nsExec can answer "error"/"timeout" instead of a number: the code must be a JSON string.
+    expect(unattended).toContain('"code":"$R0"')
     const marker = unattended.indexOf('FileWrite')
     const exec = unattended.indexOf('Exec \'"$INSTDIR\\${APP_EXECUTABLE_FILENAME}"\'')
     expect(marker).toBeGreaterThan(0)

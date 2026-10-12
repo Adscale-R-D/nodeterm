@@ -60,6 +60,23 @@ describe('update-failed marker (U6)', () => {
     expect(f.removed).toEqual([FILE])
   })
 
+  it('reads the code the installer actually writes: a quoted exit code, or nsExec\'s error word', () => {
+    expect(
+      consumeUpdateFailedMarker({
+        platform: 'win32',
+        localAppData: LAD,
+        ...fakeFs('{"reason":"preflight","code":"10","version":"0.4.5"}')
+      })
+    ).toEqual({ reason: 'preflight', code: 10, version: '0.4.5' })
+    expect(
+      consumeUpdateFailedMarker({
+        platform: 'win32',
+        localAppData: LAD,
+        ...fakeFs('{"reason":"preflight","code":"timeout","version":"0.4.5"}')
+      })
+    ).toEqual({ reason: 'preflight (timeout)', code: null, version: '0.4.5' })
+  })
+
   it('says why in one line', () => {
     expect(describeUpdateInstallFailure({ reason: 'preflight', code: 10, version: '0.4.5' })).toMatch(
       /update to 0\.4\.5 did not install: nodeterm was still running/

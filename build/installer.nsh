@@ -48,7 +48,9 @@
           ClearErrors
           FileOpen $R3 "$R2\nodeterm\update-failed.json" w
           ${IfNot} ${Errors}
-            FileWrite $R3 '{"reason":"preflight","code":$R0,"version":"${VERSION}"}'
+            # $R0 is quoted: nsExec answers "error" / "timeout" instead of an exit code when
+            # PowerShell could not run, and a bare word there would make the whole note invalid JSON.
+            FileWrite $R3 '{"reason":"preflight","code":"$R0","version":"${VERSION}"}'
             FileClose $R3
           ${EndIf}
         ${EndIf}

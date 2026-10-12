@@ -12,11 +12,12 @@ import fs from 'fs'
 import path from 'path'
 import { IPC } from '../shared/ipc'
 
-const { ipcOn, sent, appMock, notifications, nativeUpdater } = vi.hoisted(() => {
+const { ipcOn, ipcHandle, sent, appMock, notifications, nativeUpdater } = vi.hoisted(() => {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { EventEmitter: EE } = require('events') as typeof import('events')
   return {
     ipcOn: {} as Record<string, (...a: unknown[]) => void>,
+    ipcHandle: {} as Record<string, (...a: unknown[]) => unknown>,
     sent: [] as Array<{ channel: string; payload?: unknown }>,
     appMock: { isPackaged: true, appPath: '' },
     notifications: [] as string[],
@@ -36,7 +37,9 @@ vi.mock('electron', () => ({
     on: (ch: string, fn: (...a: unknown[]) => void) => {
       ipcOn[ch] = fn
     },
-    handle: () => {},
+    handle: (ch: string, fn: (...a: unknown[]) => unknown) => {
+      ipcHandle[ch] = fn
+    },
     removeListener: () => {}
   },
   Notification: Object.assign(
@@ -102,6 +105,7 @@ const flushMicrotasks = async (): Promise<void> => {
 beforeEach(() => {
   vi.useFakeTimers()
   for (const k of Object.keys(ipcOn)) delete ipcOn[k]
+  for (const k of Object.keys(ipcHandle)) delete ipcHandle[k]
   sent.length = 0
   notifications.length = 0
   ;(autoUpdater as EventEmitter).removeAllListeners()
@@ -188,6 +192,39 @@ describe('macOS restart waits for Squirrel.Mac', () => {
     await flushMicrotasks()
     expect(of(IPC.appUpdateInstalling)).toEqual([])
     expect(of(IPC.appUpdateError).map((s) => s.payload)).toEqual(['staging failed'])
+  })
+
+  it('a failed staging run is re-staged on the next check (autoDownload is off once staged)', async () => {
+    expect(autoUpdater.autoDownload).toBe(false)
+    nativeUpdater.emit('error', new Error('staging failed'))
+    // The 6h re-check of the SAME version: nothing forwarded, but the cached zip is handed to
+    // Squirrel again — otherwise the update could never install in this process.
+    autoUpdater.emit('update-available', { version: '1.1.0' })
+    expect(autoUpdater.downloadUpdate).toHaveBeenCalledTimes(1)
+    autoUpdater.emit('update-downloaded', { version: '1.1.0' })
+    expect(of(IPC.appUpdateAvailable)).toEqual([])
+    expect(of(IPC.appUpdateDownloaded)).toHaveLength(1) // only the original announcement
+    // Only once per failure: a further repeat does not re-download.
+    autoUpdater.emit('update-available', { version: '1.1.0' })
+    expect(autoUpdater.downloadUpdate).toHaveBeenCalledTimes(1)
+    // The new staging run succeeds; a click now installs instead of replaying the old failure.
+    nativeUpdater.emit('update-downloaded')
+    restart()
+    await flushMicrotasks()
+    expect(of(IPC.appUpdateError)).toEqual([])
+    expect(autoUpdater.quitAndInstall).toHaveBeenCalledTimes(1)
+  })
+
+  it('a click that hits a staging failure starts one re-stage (no loop without a click)', async () => {
+    nativeUpdater.emit('error', new Error('staging failed'))
+    expect(autoUpdater.checkForUpdates).toHaveBeenCalledTimes(1) // launch check only
+    restart()
+    expect(autoUpdater.checkForUpdates).toHaveBeenCalledTimes(2)
+    // A re-stage that fails again, unasked, does not trigger another check by itself.
+    autoUpdater.emit('update-available', { version: '1.1.0' })
+    autoUpdater.emit('update-downloaded', { version: '1.1.0' })
+    nativeUpdater.emit('error', new Error('staging failed'))
+    expect(autoUpdater.checkForUpdates).toHaveBeenCalledTimes(2)
   })
 
   it('an error after quitAndInstall undoes the quitting flags', async () => {
@@ -354,5 +391,19 @@ describe('manual-install builds keep their cadence', () => {
     vi.advanceTimersByTime(5 * 60 * 60 * 1000)
     expect(autoUpdater.checkForUpdates).not.toHaveBeenCalled()
     expect(autoUpdater.autoInstallOnAppQuit).toBe(false)
+  })
+})
+
+describe('a renderer that loads after the announcement can ask for it', () => {
+  it('getStaged answers null before, and the staged version + notes after, staging', () => {
+    release('linux')
+    process.env.APPIMAGE = '/tmp/x.AppImage'
+    initUpdater(hooks())
+    expect(ipcHandle[IPC.appGetStagedUpdate]?.()).toBeNull()
+    autoUpdater.emit('update-downloaded', { version: '1.1.0', releaseNotes: '- one' })
+    // A repeat is suppressed for the push channel, but the pull still answers.
+    autoUpdater.emit('update-downloaded', { version: '1.1.0' })
+    expect(of(IPC.appUpdateDownloaded)).toHaveLength(1)
+    expect(ipcHandle[IPC.appGetStagedUpdate]?.()).toEqual({ version: '1.1.0', notes: '- one' })
   })
 })

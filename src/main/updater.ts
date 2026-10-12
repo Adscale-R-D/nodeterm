@@ -120,8 +120,15 @@ export function initUpdater(hooks: UpdaterHooks = {}): UpdaterHandle {
   const gate = createUpdateGate()
   // What is staged and whether the OS updater can install it yet (installReadiness).
   let stagedVersion: string | null = null
+  let stagedNotes = ''
   let nativeReady = false
   let nativeFailed: string | null = null
+  // A failed Squirrel.Mac staging run must be retried: with autoDownload off once staged (the
+  // gate), nothing else would ever re-stage the same version in this process — the card would
+  // say "ready" while every click failed, until a relaunch. Set by the native 'error' listener,
+  // consumed by the next check's 'update-available'; `requestRestage` starts that check now.
+  let restageNeeded = false
+  let requestRestage: (() => void) | null = null
   // One restart at a time: a double click (or card + tray) must not queue a second install.
   const restart = {
     requested: false,
@@ -196,6 +203,8 @@ export function initUpdater(hooks: UpdaterHooks = {}): UpdaterHandle {
     // wait for the native 'update-downloaded' (the listener below calls proceed()).
     if (nativeFailed) {
       abortRestart(nativeFailed)
+      // Try staging again in the background so a later click can succeed.
+      requestRestage?.()
       return
     }
     restart.waitingForNative = true
@@ -212,6 +221,12 @@ export function initUpdater(hooks: UpdaterHooks = {}): UpdaterHandle {
   // Always available, even in dev: current version, manual check, restart.
   ipcMain.handle(IPC.appGetVersion, () => app.getVersion())
   ipcMain.on(IPC.appRestartToUpdate, () => restartToUpdate())
+  // A renderer that (re)loads after the one-time announcement — ⌘R, a window recreated after a
+  // renderer crash — starts with an empty card, and the gate suppresses repeats (autoDownload is
+  // off once staged), so it would never hear about the staged update again. It asks on mount.
+  ipcMain.handle(IPC.appGetStagedUpdate, () =>
+    stagedVersion === null ? null : { version: stagedVersion, notes: stagedNotes }
+  )
   const handle: UpdaterHandle = { restartToUpdate }
 
   if (delivery === 'dev' || delivery === 'no-channel') {
@@ -248,7 +263,12 @@ export function initUpdater(hooks: UpdaterHooks = {}): UpdaterHandle {
 
   autoUpdater.on('update-available', (info) => {
     const d = gate.onAvailable(info.version, { userInitiated: userFlow })
-    if (d.download) {
+    if (!d.download && restageNeeded && info.version === stagedVersion) {
+      // Squirrel.Mac failed to stage this version: hand it the (cached) download again.
+      restageNeeded = false
+      downloading = true
+      void autoUpdater.downloadUpdate().catch(() => undefined) // failures arrive as 'error'
+    } else if (d.download) {
       // Newer than what is staged. autoDownload is off once something is staged (a re-check must
       // not re-download and re-stage the same zip), so this one is fetched on purpose.
       downloading = true
@@ -273,7 +293,15 @@ export function initUpdater(hooks: UpdaterHooks = {}): UpdaterHandle {
     userFlow = false
     downloadFailures = 0
     const d = gate.onDownloaded(info.version)
-    if (!d.forward) return
+    if (!d.forward) {
+      // Our own re-stage of the version already staged (autoDownload is off, so nothing else
+      // downloads it): a new Squirrel.Mac staging run starts now, the card already says ready.
+      if (info.version === stagedVersion) {
+        nativeReady = false
+        nativeFailed = null
+      }
+      return
+    }
     stagedVersion = info.version
     // A new staging run starts now (MacUpdater hands the zip to Squirrel.Mac right after this
     // event); the native 'update-downloaded' marks it installable.
@@ -282,7 +310,8 @@ export function initUpdater(hooks: UpdaterHooks = {}): UpdaterHandle {
     // Staged: from here on a re-check must not re-download the same version (see the gate).
     autoUpdater.autoDownload = false
     hooks.onUpdateReady?.(info.version)
-    send(IPC.appUpdateDownloaded, { version: info.version, notes: releaseNotesText(info.releaseNotes) })
+    stagedNotes = releaseNotesText(info.releaseNotes)
+    send(IPC.appUpdateDownloaded, { version: info.version, notes: stagedNotes })
     // OS notification only when the window is in the background; the card covers the foreground.
     // Once per version (the gate) — a staged update used to re-notify every six hours.
     // Resolve the window HERE, not at init: a download can finish long after a close→dock-reopen.
@@ -324,8 +353,19 @@ export function initUpdater(hooks: UpdaterHooks = {}): UpdaterHandle {
     nativeUpdater.on('error', (err: Error) => {
       const message = err?.message ?? String(err)
       console.error('[updater] native updater:', message)
-      if (restart.requested) abortRestart(message)
-      else if (stagedVersion !== null && !nativeReady) nativeFailed = message
+      // Staging (not the install) failed: remember it so a click reports it at once, and re-stage
+      // on the next check. Never re-stage from here directly — a persistent failure (a bad
+      // signature) would loop download → stage → error with no one asking.
+      const stagingFailed = stagedVersion !== null && !nativeReady
+      if (stagingFailed) {
+        nativeFailed = message
+        restageNeeded = true
+      }
+      if (restart.requested) {
+        abortRestart(message)
+        // The user is waiting on this one: try staging again now, once per click.
+        if (stagingFailed) requestRestage?.()
+      }
     })
   }
 
@@ -379,6 +419,7 @@ export function initUpdater(hooks: UpdaterHooks = {}): UpdaterHandle {
     retryTimer = undefined
     autoUpdater.checkForUpdates().catch(() => undefined) // logged by the 'error' listener
   }
+  requestRestage = check
   check()
   setInterval(check, SIX_HOURS)
   return handle

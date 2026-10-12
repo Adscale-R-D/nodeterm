@@ -114,6 +114,30 @@ exports, and inbound canvas traffic. A shared file or peer can therefore neither
 select a local executable. See
 [`features/terminals/windows-shell-profiles.md`](features/terminals/windows-shell-profiles.md).
 
+### Agent launches in a Windows-native shell (`pty:execute-launch`)
+
+The renderer's agent launch line is POSIX source (`'it'\''s'`, `"$(cat '<file>')"`). PowerShell
+breaks on the apostrophe, Windows PowerShell 5.1 drops embedded double quotes before the CLI sees
+them, and cmd.exe splits a single-quoted prompt into separate arguments. So a prompt-bearing
+builtin agent node also carries a semantic `data.launchIntent` (`shared/agents/launch-intent.ts`),
+bound to its exact typed line and never serialized. When the launch writer is about to type that
+line into a **local session-host pane on a win32 core**, it calls `pty:execute-launch` instead
+(`renderer/terminal/launch-intent.ts` → `core/launch-intent-execute.ts`): the core resolves the
+agent executable against the session's spawn PATH (native image, then `.ps1`; a `.cmd`-only
+install is refused), reads a `--prompt-file` itself (whitespace flattened to one argument, exactly
+what `"$(cat …)"` yields in PowerShell), encodes argv for the dialect the HOST recorded for that
+generation (`launchDialect` on the attach result; set at spawn only for `pwsh`/`powershell`/`cmd`),
+and delivers through the host's exactly-once launch ledger.
+
+Rules that keep this safe:
+- Every other pane (tmux, SSH, Zellij, plain shell, Git Bash/WSL, any POSIX core) answers
+  `unsupported-shell` before anything is read, and the typed line is used, byte-identical.
+- A refusal made before the host is asked falls back to the typed line; `delivery-failed` (or a
+  lost reply) does NOT — the launch stays held for an explicit Run now, never typed twice.
+- Excluded from the intent (legacy line only): resumes, custom agents, launch-command overrides,
+  per-node models, SSH nodes. A resume line holds only flag words and a validated id.
+- `pty:execute-launch` is host-only for relay peers (`shared/host-control.ts`).
+
 ### The IPty-shim (why the integration is this small)
 
 `PtyManager`'s entire co-attach / flow-control / subscriber / park / reap machinery operates on

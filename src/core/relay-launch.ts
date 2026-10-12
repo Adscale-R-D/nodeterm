@@ -45,6 +45,7 @@ import {
   type AgentLaunchExecutableKindResolver,
   type PreparedAgentLaunch
 } from './agent-launch'
+import { windowsLaunchDialectForShell } from './launch-intent-execute'
 
 /** What a phone may ask the host to launch in a session the attach just CREATED. */
 export interface RelayLaunchRequest {
@@ -123,11 +124,9 @@ export function relayLaunchAgentKnown(agentId: AgentId, ctx: Pick<RelayLaunchCon
 
 /** The parser the pane's foreground program speaks, from its command name (`paneCommand`). */
 export function relayLaunchDialect(paneCommand: string | null | undefined): AgentLaunchDialect {
-  const base = (paneCommand ?? '').split(/[\\/]/).pop()?.toLowerCase().replace(/\.exe$/, '')
-  if (base === 'pwsh') return 'pwsh'
-  if (base === 'powershell') return 'windows-powershell'
-  if (base === 'cmd') return 'cmd'
-  return 'posix'
+  // One shell-name → dialect rule (launch-intent-execute.ts); the pane command is already a
+  // Windows-side fact here, so the platform gate is satisfied by construction.
+  return windowsLaunchDialectForShell(paneCommand ?? undefined, 'win32') ?? 'posix'
 }
 
 /**

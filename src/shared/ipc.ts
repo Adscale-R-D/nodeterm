@@ -164,6 +164,12 @@ export const IPC = {
    *  so the renderer should run its reclaim levers now (hidden WebGL contexts, parked terminals).
    *  Payload: `'warning' | 'critical'`. Re-fired at most once a minute — see core/memory-pressure. */
   appMemoryPressure: 'app:memory-pressure',
+  /** Main → renderer: the main window was put away (`'hidden'` — close-to-tray, macOS
+   *  hide-on-close, minimize) or brought back (`'shown'`). The renderer then treats every terminal
+   *  as offscreen so the existing reclaim levers run on their timers (see
+   *  renderer/terminal/window-backgrounded.ts). Explicit, not `visibilitychange`: an occluded window
+   *  must not release. Mapping: main/window-visibility.ts. */
+  appWindowVisibility: 'app:window-visibility',
   /** Main → renderer: a macOS trackpad gesture (two-finger scroll or pinch) opened or closed on
    *  the main window — edge transitions from main/trackpad-gesture.ts, a handful per physical
    *  gesture. Payload: `boolean` (active). The canvas wheel router uses this as ground-truth

@@ -737,6 +737,12 @@ bug.
 name the project boundary and explain that cross-project linking is unsupported; do not scan other
 projects just to improve a missing-endpoint diagnostic.
 
+**A memory lever that drops a terminal's PTY client asks the live-work gate first**
+(`terminal/live-work.ts`): without tmux the pty IS the shell, and the "free" release kills the
+agent in it. A hidden/minimized window feeds the existing levers by making every node read
+offscreen (`terminal/window-backgrounded.ts`) — reuse that input rather than adding a parallel
+release path that would have to re-implement every gate.
+
 **A failed read is never evidence of absence.** "Could not measure" and "there is nothing" are
 different facts and must stay distinguishable at every layer. Collapsing them is how a panel ends up
 reporting "no sessions" on a host running thirty. When something ACTS on the negative, give it three

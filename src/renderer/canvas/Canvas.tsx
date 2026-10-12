@@ -105,6 +105,11 @@ import {
   releaseAllHiddenGrants,
   WEBGL_GESTURE_SETTLE_MS
 } from '../terminal/webgl-budget'
+import {
+  BACKGROUND_RELEASE_DWELL_MS,
+  isWindowBackgrounded,
+  setWindowBackgrounded
+} from '../terminal/window-backgrounded'
 import { StickyNode } from '../nodes/StickyNode'
 import { GroupNode, setWorktreeActionHandler } from '../nodes/GroupNode'
 import { LazyEditorNode, LazyDiffNode } from '../nodes/lazyMonacoNodes'
@@ -1318,6 +1323,18 @@ function StatusAwareMiniMap({ onNodeDoubleClick }: { onNodeDoubleClick: (node: N
  */
 function setupApi(): typeof window.nodeTerminal.projectSetup {
   return window.nodeTerminal.projectSetup
+}
+
+/**
+ * The renderer's bulk reclaim pair, shared by memory pressure and a window put away for the
+ * background dwell. Both halves are idempotent and cost only warmth: a reclaimed HIDDEN context
+ * re-grants on its next visibility transition (a visible holder is never touched — see
+ * `releaseAllHiddenGrants`), and a dropped park re-mounts as an ordinary warm reattach unless it
+ * holds live work (`disposeAllParkedTerminals` asks the live-work gate).
+ */
+function runReclaimLevers(): void {
+  releaseAllHiddenGrants()
+  disposeAllParkedTerminals()
 }
 
 export function Canvas() {
@@ -17711,11 +17728,40 @@ export function Canvas() {
   // session-reaper sweep) belongs to the shell, not here. Optional-called because the Server
   // Edition's bridge declares this a documented no-op.
   useEffect(() => {
-    const off = window.nodeTerminal.onMemoryPressure?.(() => {
-      releaseAllHiddenGrants()
-      disposeAllParkedTerminals()
-    })
+    const off = window.nodeTerminal.onMemoryPressure?.(() => runReclaimLevers())
     return () => off?.()
+  }, [])
+
+  // Window put away (close-to-tray — the Windows default —, macOS hide-on-close, minimize): flip
+  // the backgrounded flag, which makes every terminal report itself offscreen so the offscreen
+  // release runs on its (dwell-shortened) timer behind all of its gates, live-work included. Then,
+  // once the window has stayed hidden for the dwell, run the same reclaim pair memory pressure runs:
+  // by then every terminal reads hidden, so `releaseAllHiddenGrants` frees the contexts the
+  // on-screen terminals held too, and the parks go (`disposeAllParkedTerminals` keeps a park that
+  // holds live work). A quick close/reopen cancels the dwell and nothing is released. On show the
+  // observers' real verdicts flow again: released nodes warm-reattach, contexts re-grant through
+  // the budget. Server Edition: the bridge declares the signal a no-op (see stubs.ts).
+  useEffect(() => {
+    let dwell: ReturnType<typeof setTimeout> | null = null
+    const clearDwell = (): void => {
+      if (dwell) clearTimeout(dwell)
+      dwell = null
+    }
+    const off = window.nodeTerminal.onWindowVisibility?.((state) => {
+      const hidden = state === 'hidden'
+      setWindowBackgrounded(hidden)
+      if (!hidden) return clearDwell()
+      if (dwell) return
+      dwell = setTimeout(() => {
+        dwell = null
+        if (isWindowBackgrounded()) runReclaimLevers()
+      }, BACKGROUND_RELEASE_DWELL_MS)
+    })
+    return () => {
+      off?.()
+      clearDwell()
+      setWindowBackgrounded(false)
+    }
   }, [])
 
   // Permanently remove a project (from the "Recently closed" list): end every terminal's tmux

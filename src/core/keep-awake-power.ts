@@ -1,7 +1,7 @@
 // Power guards for keep-awake: when holding the machine out of idle sleep stops being worth it.
 //
 // The tracker (keep-awake.ts) holds while a local agent is `working`. That is the right call on
-// a charger and a cool machine, and the wrong one on a laptop at 8% battery or one the OS reports
+// a charger and a cool machine, and the wrong one on a laptop at 3% battery or one the OS reports
 // as critically hot — there, letting the machine sleep is the safer outcome for the user than a
 // finished agent turn. Two rules, both RELEASE the assertion (never anything stronger):
 //   - battery: on battery power below KEEP_AWAKE_BATTERY_FLOOR_PCT. Plugging back in re-holds.

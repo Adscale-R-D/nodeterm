@@ -33,6 +33,26 @@ export function shouldEnableUpdater(isPackaged: boolean, updateMode: unknown): b
   return isPackaged && updateMode !== 'disabled'
 }
 
+/** Cap on release-notes text forwarded to the renderer: the card shows a few highlights, and a
+ *  feed is not a channel for megabytes of IPC. */
+const NOTES_MAX = 16 * 1024
+
+/**
+ * electron-updater's `releaseNotes` is a string, or — with `fullChangelog` — an array of
+ * `{version, note}`. Both become one string; anything else is no notes.
+ */
+export function releaseNotesText(notes: unknown): string {
+  let text = ''
+  if (typeof notes === 'string') text = notes
+  else if (Array.isArray(notes)) {
+    text = notes
+      .map((n) => (n && typeof n === 'object' && typeof (n as { note?: unknown }).note === 'string' ? (n as { note: string }).note : ''))
+      .filter(Boolean)
+      .join('\n')
+  }
+  return text.length > NOTES_MAX ? text.slice(0, NOTES_MAX) : text
+}
+
 /** Reduce an electron-updater update-available info to the renderer's UpdateInfo payload. */
 export function toUpdateAvailablePayload(
   info: { version: string; releaseNotes?: unknown },
@@ -40,9 +60,30 @@ export function toUpdateAvailablePayload(
 ): UpdateInfo {
   return {
     version: info.version,
-    notes: typeof info.releaseNotes === 'string' ? info.releaseNotes : '',
+    notes: releaseNotesText(info.releaseNotes),
     manual
   }
+}
+
+/**
+ * Whether a staged update can be installed RIGHT NOW.
+ *
+ * On macOS electron-updater reports `update-downloaded` BEFORE Squirrel.Mac has the update: it
+ * dispatches the event and only then asks the native updater to fetch the zip through its localhost
+ * proxy, unpack it and verify the signature. Until Electron's own autoUpdater emits
+ * `update-downloaded`, `quitAndInstall()` merely queues a listener and returns — so a click there
+ * did nothing visible. That window is `preparing`. Every other platform (AppImage, NSIS) installs
+ * from the downloaded file itself, so a download is ready.
+ */
+export type InstallReadiness = 'none' | 'preparing' | 'ready'
+
+export function installReadiness(
+  platform: string,
+  s: { downloaded: boolean; nativeReady: boolean }
+): InstallReadiness {
+  if (!s.downloaded) return 'none'
+  if (platform === 'darwin' && !s.nativeReady) return 'preparing'
+  return 'ready'
 }
 
 /**

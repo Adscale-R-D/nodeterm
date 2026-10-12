@@ -5231,6 +5231,56 @@ body,
   background: var(--accent-hover);
 }
 
+/* Preparing / restarting: the click was taken, the button says so and cannot be pressed twice. */
+.update-card__btn:disabled {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  opacity: 0.7;
+  cursor: default;
+}
+
+.update-card__btn:disabled:hover {
+  background: var(--accent);
+}
+
+.update-card__spinner {
+  width: 11px;
+  height: 11px;
+  border: 2px solid rgba(255, 255, 255, 0.35);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: nt-spin 0.8s linear infinite;
+  animation-play-state: var(--nt-anim-state);
+}
+
+.update-card__actions {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.update-card__actions .update-card__link {
+  align-self: center;
+}
+
+.update-card__notes {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 12.5px;
+  color: rgba(var(--tint-rgb), 0.7);
+}
+
+.update-card__notes li + li {
+  margin-top: 2px;
+}
+
+.update-card__hint {
+  margin: 0;
+  font-size: 12.5px;
+  color: rgba(var(--tint-rgb), 0.6);
+}
+
 .update-card--pill {
   flex-direction: row;
   align-items: center;

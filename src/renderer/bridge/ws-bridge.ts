@@ -379,7 +379,10 @@ export function buildRealApi(
     // REAL: Server Edition canvas control broadcasts its own persisted bridge/rope changes here —
     // wider than the node-only canvas:mut vocabulary, but ours, so they must not travel the
     // outside-edit channel and end up behind the conflict bar (see server/canvas-control.ts).
-    onServerChange: (cb) => client.subscribe(IPC.workspaceServerChange, cb as Listener)
+    onServerChange: (cb) => client.subscribe(IPC.workspaceServerChange, cb as Listener),
+    // Documented degrade: the quit / restart-to-update flush is a desktop main-process request.
+    // The server never quits on a tab's behalf, and the debounced autosave covers a browser.
+    onFlushRequest: () => () => {}
   }
 
   // REAL: WorkspaceStore (core) registers the project-settings:* channels too — same

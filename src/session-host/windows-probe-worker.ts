@@ -184,6 +184,8 @@ export class WindowsProbeWorker {
     // A write into a pipe whose reader died raises EPIPE on the stream; unhandled, that would take
     // the whole host down with it.
     child.stdin?.on('error', () => this.childGone(child))
+    // Same rule for the read side: an ECONNRESET on the pipe is an 'error' on the stream itself.
+    child.stdout?.on('error', () => this.childGone(child))
     child.stdout?.setEncoding('utf8')
     child.stdout?.on('data', (chunk: string | Buffer) => this.onData(child, String(chunk)))
     child.on('error', () => this.childGone(child))

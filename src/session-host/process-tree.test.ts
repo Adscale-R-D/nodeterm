@@ -121,9 +121,9 @@ describe('readWin32', () => {
         calls.push({ file, args })
         cb(null, JSON.stringify(table[0]))
       },
-      { SystemRoot: 'D:\\Win' }
+      { SystemRoot: 'D:\\Windows' }
     )
-    expect(calls).toEqual([{ file: 'D:\\Win\\System32\\WindowsPowerShell\\v1.0\\powershell.exe', args: powershellArgs(WIN32_PANE_TABLE_SCRIPT) }])
+    expect(calls).toEqual([{ file: 'D:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe', args: powershellArgs(WIN32_PANE_TABLE_SCRIPT) }])
     expect(rows).toEqual([row(10, 1, 'pwsh.exe')])
   })
 

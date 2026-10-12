@@ -3101,6 +3101,26 @@ export interface SessionMemoryReport {
    *  (the original and, off Windows, only case); `'session-host'` = a running session host older
    *  than this app, which names its sessions but cannot describe their processes. */
   unmeasuredBackend?: 'session-host'
+  /**
+   * The Windows session host's OWN cost, which belongs to no session row (CLAUDE.md, Session
+   * memory): its process (every session's headless emulator, node-pty's per-session conout worker
+   * thread) and its non-shell children (one conhost/OpenConsole per ConPTY — they are the host's
+   * children, siblings of the shell, so no row's tree reaches them). Absent = no session host, or it
+   * could not be measured: never a fake zero. The tmux leg never sets it.
+   */
+  host?: SessionHostOverhead
+}
+
+/** See `SessionMemoryReport.host`. All MB figures are MEASURED working sets, not estimates. */
+export interface SessionHostOverhead {
+  pid: number
+  /** The session-host process itself. */
+  selfMb: number
+  /** Its non-shell children (conhost / OpenConsole, plus anything under them). */
+  consoleMb: number
+  /** Direct children recognised as a console host — "N consoles" in the panel. */
+  consoleCount: number
+  totalMb: number
 }
 
 /**

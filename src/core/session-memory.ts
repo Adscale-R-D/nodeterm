@@ -12,7 +12,7 @@ import fs from 'fs'
 import os from 'os'
 import { execFile, execFileSync } from 'child_process'
 import { promisify } from 'util'
-import type { MemInfo, SessionMemoryRow, SessionMemoryReport } from '../shared/types'
+import type { MemInfo, SessionHostOverhead, SessionMemoryRow, SessionMemoryReport } from '../shared/types'
 import { TMUX_SOCKET } from './tmux-naming'
 import { RMT_TMUX_SOCKET } from './remote-ssh/control-master'
 import type { SessionHostListing } from './session-host-client'
@@ -28,6 +28,8 @@ export interface ProcEntry {
   pid: number
   ppid: number
   rssKb: number
+  /** Image name, when the reader has one (the Windows CIM table). Only `hostOverhead` reads it. */
+  name?: string
 }
 
 /** Reads the whole process table at once; null when it could not run. */
@@ -467,7 +469,7 @@ async function psProcessTable(
 
 /** The PowerShell the Windows table comes from: one CIM query, compressed JSON on one line. */
 export const WIN32_PROCESS_TABLE_SCRIPT =
-  'Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,WorkingSetSize | ConvertTo-Json -Compress'
+  'Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,WorkingSetSize,Name | ConvertTo-Json -Compress'
 
 /**
  * Parse `WIN32_PROCESS_TABLE_SCRIPT`'s output. `ConvertTo-Json` prints a bare OBJECT for a
@@ -486,7 +488,9 @@ export function parseWin32ProcessTable(json: string): ProcEntry[] | null {
     const ppid = Number(r.ParentProcessId)
     if (!Number.isSafeInteger(pid) || !Number.isSafeInteger(ppid)) continue
     const bytes = Number(r.WorkingSetSize)
-    out.push({ pid, ppid, rssKb: Number.isFinite(bytes) && bytes > 0 ? bytes / 1024 : 0 })
+    const entry: ProcEntry = { pid, ppid, rssKb: Number.isFinite(bytes) && bytes > 0 ? bytes / 1024 : 0 }
+    if (typeof r.Name === 'string' && r.Name) entry.name = r.Name
+    out.push(entry)
   }
   return out.length > 0 ? out : null
 }
@@ -500,6 +504,57 @@ export async function win32ProcessTable(
   } catch {
     return null
   }
+}
+
+/** The ConPTY console hosts: inbox `conhost.exe`, or node-pty's bundled `OpenConsole.exe`. */
+const CONSOLE_HOST_IMAGE = /^(conhost|openconsole)(\.exe)?$/i
+
+/**
+ * The session host's own cost (`SessionMemoryReport.host`): the host process, plus every child of
+ * it that is NOT a session's shell, with their subtrees. ConPTY's conhost/OpenConsole is created by
+ * the host's `CreatePseudoConsole`, so it is the host's child and the shell's SIBLING — no row's
+ * rollup reaches it, and without this it is counted nowhere.
+ *
+ * The shells' subtrees are excluded by pid (they are the rows), so nothing is counted twice; a pane
+ * pid equal to the host pid (it never should be) is still only the host's own working set.
+ * `consoleCount` counts direct children named as a console host — the table carries image names on
+ * Windows; without names the count is 0 while the memory is still included. Undefined when the host
+ * pid is unknown or not in the table: a host we did not find is "could not measure", never 0 MB.
+ */
+export function hostOverhead(
+  entries: readonly ProcEntry[],
+  hostPid: number | undefined,
+  panePids: readonly number[]
+): SessionHostOverhead | undefined {
+  if (hostPid === undefined || !Number.isSafeInteger(hostPid) || hostPid <= 0) return undefined
+  const { table, kids } = indexProcesses(entries)
+  const self = table.get(hostPid)
+  if (!self) return undefined
+  const panes = new Set(panePids)
+  // Pre-seed the walk with the host and every pane so neither a shell subtree nor a cyclic ppid
+  // chain back to the host is ever entered.
+  const seen = new Set<number>([hostPid, ...panes])
+  let childKb = 0
+  let consoleCount = 0
+  const stack: number[] = []
+  for (const k of kids.get(hostPid) ?? []) {
+    if (panes.has(k)) continue
+    const e = table.get(k)
+    if (e?.name && CONSOLE_HOST_IMAGE.test(e.name)) consoleCount++
+    stack.push(k)
+  }
+  while (stack.length > 0) {
+    const pid = stack.pop() as number
+    if (seen.has(pid)) continue
+    seen.add(pid)
+    const e = table.get(pid)
+    if (!e) continue
+    childKb += e.rssKb
+    for (const k of kids.get(pid) ?? []) stack.push(k)
+  }
+  const selfMb = kbToMb(self.rssKb)
+  const consoleMb = kbToMb(childKb)
+  return { pid: hostPid, selfMb, consoleMb, consoleCount, totalMb: selfMb + consoleMb }
 }
 
 export interface SessionHostMemoryDeps {
@@ -532,6 +587,7 @@ export async function collectSessionHostMemory(deps: SessionHostMemoryDeps): Pro
     listing = null
   }
   if (!listing) return { ok: false, rows: [], mem }
+  if (!listing.running) return { ok: true, rows: [], mem }
   const ours = listing.names.filter((n) => n.startsWith('nt-'))
   const described = new Map((listing.sessions ?? []).map((row) => [row.name, row]))
   const panes: PaneRef[] = []
@@ -543,7 +599,11 @@ export async function collectSessionHostMemory(deps: SessionHostMemoryDeps): Pro
   }
   const withUnmeasured = (report: SessionMemoryReport): SessionMemoryReport =>
     unmeasured === 0 ? report : { ...report, unmeasured, unmeasuredBackend: 'session-host' }
-  if (panes.length === 0) return withUnmeasured({ ok: true, rows: [], mem })
+  // An idle host still costs memory, so a running host with no described session still reads the
+  // table — but only when there is a host pid to measure. Without one there is nothing to look up,
+  // and "no sessions" stays the no-table answer it always was.
+  const hostPid = listing.hostPid
+  if (panes.length === 0 && hostPid === undefined) return withUnmeasured({ ok: true, rows: [], mem })
 
   const platformName = deps.platformName ?? process.platform
   const exec =
@@ -568,8 +628,17 @@ export async function collectSessionHostMemory(deps: SessionHostMemoryDeps): Pro
   } catch {
     table = null
   }
-  if (table === null) return { ok: false, rows: [], mem }
-  return withUnmeasured(buildReport(panes, table, mem))
+  if (table === null) {
+    // No pane to describe: the table was read only for the host's own cost, and failing to read it
+    // says nothing about sessions — the answer stays "none", with the host simply unmeasured.
+    if (panes.length === 0) return withUnmeasured({ ok: true, rows: [], mem })
+    return { ok: false, rows: [], mem }
+  }
+  const report = withUnmeasured(buildReport(panes, table, mem))
+  // A session the host named but did not describe has a shell among the host's children that no
+  // row excludes, so its memory would be booked as host overhead. Report nothing rather than that.
+  const host = unmeasured === 0 ? hostOverhead(table, hostPid, panes.map((p) => p.panePid)) : undefined
+  return host ? { ...report, host } : report
 }
 
 /**

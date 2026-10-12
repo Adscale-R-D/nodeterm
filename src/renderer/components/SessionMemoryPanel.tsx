@@ -16,7 +16,7 @@ import { formatBytes } from '@shared/fsLimits'
 import { useAgentStatus } from '../state/agentStatus'
 import { useProjects } from '../state/projects'
 import { useSessionMemory } from '../state/sessionMemory'
-import { resolveSessionRows, totalMb } from '../lib/sessionMemoryRows'
+import { hostOverheadLabel, resolveSessionRows, totalMb } from '../lib/sessionMemoryRows'
 import { usageScopeKey } from '../lib/usageScope'
 import type { SessionPauseOffer } from '../lib/sessionPause'
 import { unmeasuredNote } from '../lib/sessionMemoryNote'
@@ -80,6 +80,7 @@ export function SessionMemoryPanel({
   const rows = useSessionMemory((s) => s.rows)
   const unmeasured = useSessionMemory((s) => s.unmeasured)
   const unmeasuredBackend = useSessionMemory((s) => s.unmeasuredBackend)
+  const hostCost = useSessionMemory((s) => s.host)
   const loading = useSessionMemory((s) => s.loading)
   const loadedScope = useSessionMemory((s) => s.loadedScope)
   const refreshFull = useSessionMemory((s) => s.refreshFull)
@@ -253,10 +254,24 @@ export function SessionMemoryPanel({
         <span className="sessmem-panel__scope">{scopeKey || 'This machine'}</span>
         {/* No total unless we measured one: a grand total of `0 MB` beside a failure is the exact
             conflation this panel exists to end. */}
-        {measured && <span className="sessmem-panel__total">{formatMb(totalMb(views))}</span>}
+        {measured && <span className="sessmem-panel__total">{formatMb(totalMb(views, hostCost))}</span>}
       </div>
 
       {body}
+
+      {/* The Windows session host's own cost — the one process whose size grows with session count
+          and that no row's tree reaches (its conhost/OpenConsole children are the shells'
+          siblings). Not a session: not travelable, not killable, not in the session count. Only
+          under the `measured` gate, like the total it is part of. */}
+      {measured && !relay && hostCost && (
+        <div
+          className="sessmem-host"
+          title="Measured working set of nodeterm's session host and the console hosts it runs for each terminal. It is shared, so it belongs to no session above."
+        >
+          <span className="sessmem-host__label">{hostOverheadLabel(hostCost)}</span>
+          <span className="sessmem-host__mb">{formatMb(hostCost.totalMb)}</span>
+        </div>
+      )}
 
       {/* Whose memory this is. The feature exists because a user reported "Claude terminals are
           killing my memory" — their NUMBER was right and their attribution was wrong: it is the

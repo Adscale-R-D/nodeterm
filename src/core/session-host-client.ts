@@ -96,6 +96,12 @@ export interface SessionHostListing {
   running: boolean
   names: string[]
   sessions: SessionHostSessionDetail[] | null
+  /**
+   * The host process's pid, from the state file the connection was verified against (every host
+   * version writes it, so this needs no protocol change). Absent when unknown or not a safe
+   * positive integer. Only the memory panel reads it, to report the host's own cost.
+   */
+  hostPid?: number
 }
 
 const GENERATION_RE = /^[A-Za-z0-9_-]{8,128}$/
@@ -2322,7 +2328,10 @@ export class SessionHostClient {
       const sessions = this.hostFeatures.has('sessionDetails') && Array.isArray(result.sessions)
         ? validSessionDetails(result.sessions).filter((row) => result.names.includes(row.name))
         : null
-      return { running: true, names: result.names, sessions }
+      const hostPid = this.hostPid
+      return Number.isSafeInteger(hostPid) && (hostPid as number) > 0
+        ? { running: true, names: result.names, sessions, hostPid: hostPid as number }
+        : { running: true, names: result.names, sessions }
     } catch {
       return null
     }

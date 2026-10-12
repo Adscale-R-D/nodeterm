@@ -444,7 +444,7 @@ export function BehaviorSection({ isActive }: { isActive: boolean }): React.JSX.
       <SearchableRow {...ROWS.keepAwake}>
         <FieldRow
           label="Keep awake while agents work"
-          description="Holds off idle sleep while a local agent is running. Lets the machine sleep on battery below 20% or when it runs critically hot. A closed lid still sleeps the machine, except on macOS when plugged in with an external display connected."
+          description="Holds off idle sleep while a local agent is running. Lets the machine sleep on battery below 5% or when it runs critically hot. A closed lid still sleeps the machine, except on macOS when plugged in with an external display connected."
           control={
             <Switch
               checked={settings.keepAwakeWhileAgentsWork}

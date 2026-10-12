@@ -23,7 +23,7 @@ import { promises as fsp } from 'fs'
 import path from 'path'
 
 /** On battery below this percent, keep-awake lets the machine sleep. */
-export const KEEP_AWAKE_BATTERY_FLOOR_PCT = 20
+export const KEEP_AWAKE_BATTERY_FLOOR_PCT = 5
 /** How often the battery level is re-read while holding on battery. */
 export const KEEP_AWAKE_BATTERY_POLL_MS = 60_000
 

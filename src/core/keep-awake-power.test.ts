@@ -41,11 +41,11 @@ describe('power guard', () => {
   })
 
   it('blocks on battery below the floor, allows at the floor', async () => {
-    const { guard, state } = harness({ onBattery: true, percent: 19 })
+    const { guard, state } = harness({ onBattery: true, percent: 4 })
     await guard.refreshBattery()
     expect(guard.allows()).toBe(false)
-    expect(guard.blockReason()).toMatch(/19%/)
-    state.percent = 20
+    expect(guard.blockReason()).toMatch(/4%/)
+    state.percent = 5
     await guard.refreshBattery()
     expect(guard.allows()).toBe(true)
   })
@@ -87,7 +87,7 @@ describe('power guard', () => {
   })
 
   it('notifies on refresh and logs only when the verdict changes', async () => {
-    const { guard, state, changes, logs } = harness({ onBattery: true, percent: 10 })
+    const { guard, state, changes, logs } = harness({ onBattery: true, percent: 3 })
     await guard.refreshBattery()
     await guard.refreshBattery()
     expect(changes.count).toBe(2)

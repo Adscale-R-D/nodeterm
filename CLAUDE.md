@@ -638,6 +638,17 @@ Lifecycle, by intent:
   See the Terminal node lifecycle section for the two invariants (mount-stable observer;
   `session.source` remote gate). Note the released node is a DETACHED tmux session — it joins
   the session reaper's candidate pool (6 h grace still protects it).
+- **A hidden window counts as offscreen (2026-10)** → close-to-tray (the Windows default), macOS
+  hide-on-close and minimize send `app:window-visibility` (`main/window-visibility.ts`); the
+  renderer flag (`terminal/window-backgrounded.ts`) makes every node report itself offscreen
+  through the SAME mount-stable observer path, so the release runs at `min(offscreen setting,
+  BACKGROUND_RELEASE_DWELL_MS = 2 min)` behind every existing gate (live-work, held launch, Eco,
+  remote, selected, `0 = never`); after that dwell Canvas runs the memory-pressure reclaim pair
+  (`runReclaimLevers`), which now frees the on-screen terminals' WebGL contexts too because they
+  all read hidden. Show cancels the dwell and revives warm. It feeds existing levers — it is not a
+  new one — and an occluded window or a Server Edition tab switch never triggers it (explicit IPC,
+  not `visibilitychange`; the bridge declares it a no-op). Eco and the liveness poll see a hidden
+  window as "nobody watching" too.
 - **Every memory lever must ask whether the kill ends live work** (`terminal/live-work.ts`). The
   renderer reclaims terminal memory in FOUR places — park window expiry, the park's LRU cap, the
   memory-pressure drop (all three in `park-budget.ts`) and the offscreen viewer release

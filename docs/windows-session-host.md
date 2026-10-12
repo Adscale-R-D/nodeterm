@@ -538,7 +538,10 @@ name begins with this installation's name) can therefore block an update. The ne
 cover those legacy targets before invoking the old executable; it never stops them on your behalf.
 
 **The in-app way (nodeterm with the `shutdown` host feature):** open the command palette
-(Ctrl+K) → **Prepare for update…**, or the button on the update card. It:
+(Ctrl+K) → **Prepare for update…**, or the button on the update card. When the running host is the
+staged copy, the dialog leads with **Quit nodeterm (sessions keep running)** — quit, including from
+the system tray, then run the installer; **Stop all sessions instead…** is the secondary path. A
+host whose location cannot be determined is treated as blocking. Otherwise it:
 
 1. lists every session the host holds — every project, closed ones too — and waits while any agent
    is working or waiting for your answer (each listed with a **Go** button; **Check again** when
@@ -589,9 +592,18 @@ alone does not guarantee resume, restore an in-flight task, or recover unsaved w
 
 New installers run this check before invoking the previous version's uninstaller. Already shipped
 installers/uninstallers cannot be patched retroactively; use the same preparation steps for them.
-This is a safe refusal and manual recovery path, not live host migration: sessions cannot yet
-survive replacing the binaries they have mapped. A process could still start after the preflight;
-it is not an installation-wide launch lock.
+This is a safe refusal and manual recovery path, not live host migration. A **staged** host
+(0.4.1 and later, running from `%LOCALAPPDATA%\nodeterm\session-host`) maps none of the installed
+files, so it does not block the installer and its sessions survive the update — quitting nodeterm
+(from the tray too) is enough; device-verified across 0.4.1 → 0.4.2 → 0.4.3 in #829, all sessions
+reattached warm. Only a legacy hard-link host inside the installation must be stopped first. A
+process could still start after the preflight; it is not an installation-wide launch lock.
+
+Unattended runs (silent, or the app's own `--updated` handoff) wait up to about 30 seconds for
+nodeterm to finish exiting before refusing; "could not verify" (exit 20) still refuses at once. If
+an `--updated` install still finds nodeterm running, it writes
+`%LOCALAPPDATA%\nodeterm\update-failed.json`, restarts the installed version, and quits; the app
+logs the failure on its next start.
 
 Server Edition has no NSIS updater and is unchanged. Mobile/relay clients must expect a disconnect
 when the user deliberately ends desktop sessions; they cannot authorize an update shutdown.

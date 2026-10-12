@@ -61,7 +61,7 @@ vi.mock('./main-window', () => ({
 }))
 vi.mock('./notifications', () => ({ retainUntilDismissed: () => {} }))
 
-import { initUpdater } from './updater'
+import { describeCheckFailure, initUpdater, lastUpdateCheck } from './updater'
 
 const realReadFileSync = fs.readFileSync
 
@@ -260,6 +260,16 @@ describe('the unsigned Windows beta (manual marker)', () => {
     expect(channels()).toContain(IPC.appUpdateError)
   })
 
+  it('a silent check failure is recorded and logged as an actionable warning, not dropped', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    updaterEvents['error']?.(new Error('HttpError: 404 "method: GET url: https://nodeterm.dev/updates/latest.yml"'))
+    expect(channels()).not.toContain(IPC.appUpdateError)
+    expect(lastUpdateCheck()).toMatchObject({ ok: false, message: expect.stringContaining('404') })
+    expect(warn).toHaveBeenCalledWith('[updater]', expect.stringMatching(/update feed is missing/))
+    updaterEvents['update-not-available']?.()
+    expect(lastUpdateCheck()).toMatchObject({ ok: true })
+  })
+
   it('refuses restart-to-update in main: quitAndInstall never runs', () => {
     restart()
     expect(autoUpdater.quitAndInstall).not.toHaveBeenCalled()
@@ -301,5 +311,18 @@ describe('restart-to-update elsewhere', () => {
     initUpdater()
     restart()
     expect(autoUpdater.quitAndInstall).not.toHaveBeenCalled()
+  })
+})
+
+describe('describeCheckFailure', () => {
+  it('names a 404 on a latest*.yml as a missing feed file', () => {
+    expect(describeCheckFailure('HttpError: 404 Not Found ... latest.yml')).toMatch(/feed is missing/)
+    expect(describeCheckFailure('Cannot find latest-linux.yml (404)')).toMatch(/feed is missing/)
+  })
+  it('anything else is a plain check failure', () => {
+    expect(describeCheckFailure('net::ERR_INTERNET_DISCONNECTED')).toBe(
+      'update check failed: net::ERR_INTERNET_DISCONNECTED'
+    )
+    expect(describeCheckFailure('HttpError: 500 latest.yml')).toMatch(/^update check failed/)
   })
 })

@@ -19,8 +19,34 @@ import {
 } from '../shared/update-platform'
 import { getMainWindow, sendToMain } from './main-window'
 import { retainUntilDismissed } from './notifications'
+import { consumeUpdateFailedMarker, describeUpdateInstallFailure } from './update-install-marker'
 
 const SIX_HOURS = 6 * 60 * 60 * 1000
+
+/** The outcome of the most recent feed check (any trigger). Recorded so a check-only build's
+ *  silent automatic failures are still observable — see the 'error' handler. */
+export interface UpdateCheckRecord {
+  at: number
+  ok: boolean
+  message?: string
+}
+let lastCheck: UpdateCheckRecord | null = null
+export function lastUpdateCheck(): UpdateCheckRecord | null {
+  return lastCheck
+}
+
+/**
+ * One actionable log line for a failed check in a check-only build. A 404 on a `latest*.yml` is
+ * the feed itself missing — the nodeterm.dev/updates mirror not serving that platform's file —
+ * which is an ops fix, not a network blip, and reads like one in a device report. Pure; exported
+ * for tests.
+ */
+export function describeCheckFailure(message: string): string {
+  const feedMissing = /\b404\b/.test(message) && /latest[\w.-]*\.yml/i.test(message)
+  return feedMissing
+    ? `update feed is missing this platform's latest*.yml (${message}); the passive update notice cannot fire until the update mirror serves it`
+    : `update check failed: ${message}`
+}
 
 /**
  * The `nodeTermUpdates` marker a LOCAL package carries in its packaged package.json, injected by
@@ -70,6 +96,14 @@ function packagedUpdateMode(): unknown {
 export function initUpdater(onBeforeRestart?: () => void): void {
   const send = (channel: string, payload?: unknown) => sendToMain(channel, payload)
 
+  // A self-update the installer refused on the way in (build/installer.nsh writes this note and
+  // restarts the previous version). Read once and deleted; Windows only, a no-op elsewhere.
+  const failedInstall = consumeUpdateFailedMarker({
+    platform: process.platform,
+    localAppData: process.env.LOCALAPPDATA
+  })
+  if (failedInstall) console.warn('[updater]', describeUpdateInstallFailure(failedInstall))
+
   const updateMode = packagedUpdateMode()
   const delivery = updateDelivery({
     isPackaged: app.isPackaged,
@@ -118,7 +152,12 @@ export function initUpdater(onBeforeRestart?: () => void): void {
   autoUpdater.autoDownload = !manualUpdates
   autoUpdater.autoInstallOnAppQuit = !manualUpdates
 
+  const recordCheck = (ok: boolean, message?: string): void => {
+    lastCheck = { at: Date.now(), ok, ...(message === undefined ? {} : { message }) }
+  }
+
   autoUpdater.on('update-available', (info) => {
+    recordCheck(true)
     send(IPC.appUpdateAvailable, toUpdateAvailablePayload(info, manualUpdates))
   })
 
@@ -155,20 +194,30 @@ export function initUpdater(onBeforeRestart?: () => void): void {
     }
   })
 
-  autoUpdater.on('update-not-available', () => send(IPC.appUpdateNotAvailable))
+  autoUpdater.on('update-not-available', () => {
+    recordCheck(true)
+    send(IPC.appUpdateNotAvailable)
+  })
 
   // A check-only build (`nodeTermUpdates=manual`, the unsigned Windows beta) downloads nothing, so
   // every 'error' event it can emit is a CHECK failure — and electron-updater emits one for the
   // silent launch/6h checks too. The beta previously showed nothing at all; an error card on every
   // launch (offline, or a feed mirror that does not serve latest.yml yet) would be a regression
-  // for exactly the users this notice exists for. So there the event is logged only; a
-  // user-initiated check still surfaces its failure through the catch below. Every other build
-  // keeps its historical behaviour.
+  // for exactly the users this notice exists for. So there the event is not shown — but it is NOT
+  // silent either: it is recorded (`lastUpdateCheck`) and logged as one actionable warning, so a
+  // feed that 404s (the mirror not serving latest.yml) is visible in the debug log instead of
+  // looking like "no update yet". A user-initiated check still surfaces its failure through the
+  // catch below. Every other build keeps its historical behaviour.
   const checkOnly = delivery === 'manual-install' && updateMode === MANUAL_UPDATE_MODE
   autoUpdater.on('error', (err) => {
     const message = err?.message ?? String(err)
+    recordCheck(false, message)
+    if (checkOnly) {
+      console.warn('[updater]', describeCheckFailure(message))
+      return
+    }
     console.error('[updater]', message)
-    if (!checkOnly) send(IPC.appUpdateError, message)
+    send(IPC.appUpdateError, message)
   })
 
   // Manual check from Settings; surfaces failures to the card.

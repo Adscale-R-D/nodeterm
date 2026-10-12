@@ -5,6 +5,7 @@
 // Pure + Electron-free so the policy is pressable on any CI box. The controller is ./tray.ts; the
 // close-event decision is `closeAction` in ./main-window.ts, which takes the resolved flag.
 
+import { writeFileSync } from 'fs'
 import type { BackgroundOnCloseSetting } from '../shared/types'
 
 /**
@@ -50,4 +51,21 @@ export function shouldShowBackgroundHint(opts: {
   alreadyShown: boolean
 }): boolean {
   return opts.platform !== 'darwin' && opts.backgroundOnClose && !opts.alreadyShown
+}
+
+/**
+ * Claim a once-per-install marker file in ONE step: an exclusive create (`wx` = O_CREAT|O_EXCL).
+ * `'claimed'` — we just created it, so this is the first time; `'already'` — it existed;
+ * `'failed'` — it could not be written for another reason (unwritable userData), which the caller
+ * treats like the old write failure: warn and still show. An exists-check followed by a separate
+ * write is a check-then-use race (CodeQL js/file-system-race) — two hides in quick succession could
+ * both see "absent" — and this answers both questions with one syscall.
+ */
+export function claimOnceMarker(file: string, content: string): 'claimed' | 'already' | 'failed' {
+  try {
+    writeFileSync(file, content, { flag: 'wx' })
+    return 'claimed'
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === 'EEXIST' ? 'already' : 'failed'
+  }
 }

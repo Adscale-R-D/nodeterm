@@ -335,7 +335,7 @@ export async function performExitPhase(d: {
     if (gone()) return 'not-eligible' // stop polling a pane that no longer exists
     // Two ways to know the CLI let go of the pane. The allowlist is the confident one and is
     // taken immediately. The other — "the foreground command is no longer what it was before the
-    // exit" — covers the shells the allowlist cannot know (`nu`, `xonsh`, `pwsh`, anything the
+    // exit" — covers the shells the allowlist cannot know (`xonsh`, `elvish`, anything the
     // user set as `defaultShell`), where waiting for a listed shell would time out with the agent
     // already quit and never resumed. It is required on two CONSECUTIVE polls: a single changed
     // reading can be a momentary foreground child of a still-running CLI, and typing the resume

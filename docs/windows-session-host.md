@@ -750,11 +750,13 @@ older host never answers, and the client reports `sessions: null` — named but 
   the resulting process. A genuinely Windows-reachable tmux found by the existing resolver still
   follows the tmux path; a `tmux` installed only inside WSL is not on the native Windows PATH.
 - **`paneCommand`'s answer can be imprecise** when a session has multiple concurrent child
-  processes (an agent CLI plus MCP servers) — see `process-tree.ts`'s doc comment. The one caller
-  that depends on it (in-place agent restart) only needs "is a shell back in charge of this pane
-  yet", which every non-shell answer satisfies equally, so this imprecision is harmless for that
-  caller specifically; a future caller with finer-grained needs should not assume more precision
-  than this.
+  processes (an agent CLI plus MCP servers) — see `process-tree.ts`'s doc comment. Its callers
+  (in-place agent restart, wake, trigger delivery, RunBar, session rename) only need "is a shell
+  back in charge of this pane yet", so the walk answers a SHELL name only when every live process in
+  the tree is a shell; otherwise it answers a non-shell. This matters since `isShellCommand`
+  recognises `pwsh.exe` / `cmd.exe` / `bash.exe`: a shell that is merely a leaf under a running agent
+  (claude's Bash/PowerShell tool, an MCP server launched via `cmd /c npx`) must not read as "the CLI
+  let go". A future caller with finer-grained needs should not assume more precision than this.
 - **The node-pty actuator is global, so ownership is ledgered rather than guessed.** Within one app
   process, `pty-manager.ts` keeps a per-viewer/owner `pausedBy` ledger. The standalone host then
   keeps a second set keyed by authenticated socket: the first socket to pause actuates node-pty,

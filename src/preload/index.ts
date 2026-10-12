@@ -288,7 +288,8 @@ const api: NodeTerminalApi = {
       ipcRenderer.on(IPC.speechProgress, handler)
       return () => ipcRenderer.removeListener(IPC.speechProgress, handler)
     },
-    micConsent: () => ipcRenderer.invoke(IPC.speechMicConsent)
+    micConsent: () => ipcRenderer.invoke(IPC.speechMicConsent),
+    openMicSettings: () => ipcRenderer.invoke(IPC.speechOpenMicSettings)
   },
   ssh: {
     list: () => ipcRenderer.invoke(IPC.sshList),

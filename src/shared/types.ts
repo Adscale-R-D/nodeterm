@@ -2523,6 +2523,11 @@ export interface SpeechApi {
   /** Ask for microphone permission. Electron: OS-level (macOS TCC prompt); browser: always
    *  resolves true — the browser's own getUserMedia prompt is not ours to gate. */
   micConsent(): Promise<boolean>
+  /** Open the OS microphone-privacy page (Windows `ms-settings:privacy-microphone`, macOS System
+   *  Settings). Desktop only — ABSENT in the browser bridge (a browser's mic permission lives in
+   *  its own site settings), and the overlay hides its button when absent. Resolves false where
+   *  the OS has no such page. */
+  openMicSettings?(): Promise<boolean>
 }
 
 export interface SshApi {

@@ -952,6 +952,8 @@ export function buildSpeechApi(client: RpcClient): Pick<NodeTerminalApi, 'speech
     deleteModel: (id) => client.request(IPC.speechModelDelete, { id }) as Promise<void>,
     onProgress: (cb) => client.subscribe(IPC.speechProgress, cb as Listener),
     micConsent: () => Promise.resolve(true)
+    // `openMicSettings` is deliberately ABSENT: a browser's mic permission is its own site
+    // setting, and the dictation overlay hides its "Open microphone settings" button without it.
   }
   return { speech }
 }

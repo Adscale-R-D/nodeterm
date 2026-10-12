@@ -3,10 +3,15 @@
 // agent as ONE argv element on every Windows-native dialect. All of it runs on any OS: the planner
 // only builds strings, and the argv is recovered here by the same parsers PowerShell and the
 // Microsoft CRT apply.
+import fs from 'fs'
+import os from 'os'
+import path from 'path'
+import { execFileSync } from 'child_process'
 import { describe, expect, it, vi } from 'vitest'
 import {
   executeLaunchIntent,
   promptFromFileText,
+  readPromptFileBounded,
   resolveWindowsAgentExecutable,
   windowsLaunchDialectForShell,
   windowsPowerShellPath,
@@ -299,5 +304,41 @@ describe('executeLaunchIntent round trip', () => {
 
   it('collapses prompt-file whitespace like the legacy PowerShell `cat` join did', () => {
     expect(promptFromFileText('\uFEFFa\r\n\tb  c\n')).toBe('a b c')
+  })
+})
+
+describe('readPromptFileBounded (one descriptor for the check and the read)', () => {
+  const tmp = (): string => fs.mkdtempSync(path.join(os.tmpdir(), 'nt-prompt-'))
+
+  it('reads a regular file within the cap', async () => {
+    const dir = tmp()
+    const f = path.join(dir, 'p.txt')
+    fs.writeFileSync(f, 'hello "world" $x')
+    await expect(readPromptFileBounded(f, 1024)).resolves.toBe('hello "world" $x')
+    fs.rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('refuses a file over the cap', async () => {
+    const dir = tmp()
+    const f = path.join(dir, 'p.txt')
+    fs.writeFileSync(f, 'x'.repeat(65))
+    await expect(readPromptFileBounded(f, 64)).rejects.toThrow()
+    await expect(readPromptFileBounded(f, 65)).resolves.toBe('x'.repeat(65))
+    fs.rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('refuses a directory and a missing file', async () => {
+    const dir = tmp()
+    await expect(readPromptFileBounded(dir, 64)).rejects.toThrow()
+    await expect(readPromptFileBounded(path.join(dir, 'nope'), 64)).rejects.toThrow()
+    fs.rmSync(dir, { recursive: true, force: true })
+  })
+
+  it.skipIf(process.platform === 'win32')('refuses a FIFO without hanging on the open (POSIX only: mkfifo)', async () => {
+    const dir = tmp()
+    const f = path.join(dir, 'fifo')
+    execFileSync('mkfifo', [f])
+    await expect(readPromptFileBounded(f, 64)).rejects.toThrow()
+    fs.rmSync(dir, { recursive: true, force: true })
   })
 })

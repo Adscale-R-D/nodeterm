@@ -735,7 +735,9 @@ older host never answers, and the client reports `sessions: null` — named but 
   from the state file (`SessionHostListing.hostPid`; every host version writes it, so no protocol
   change), and the panel shows one non-killable line, `nodeterm session host (N consoles)`, added to
   the total only under the `measured` gate. Both figures are MEASURED working sets, labelled as
-  such; nothing is estimated. Unknown host pid, a pid missing from the table, or an undescribed
+  such; nothing is estimated. Every non-shell child is included, so while the host's pane-probe
+  PowerShell worker (below) is warm — up to 60 s after a probe — its working set is part of the line
+  too; it is genuinely the host's cost, but expect the line to drop when it idles out. Unknown host pid, a pid missing from the table, or an undescribed
   session (whose shell would be booked as host overhead) ⇒ no line, never `0 B`. An idle host with no
   session is still measured.
 - **Dev-server ports**: one PowerShell call per scan — `Win32_Process` plus

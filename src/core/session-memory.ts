@@ -637,7 +637,14 @@ export async function collectSessionHostMemory(deps: SessionHostMemoryDeps): Pro
   const report = withUnmeasured(buildReport(panes, table, mem))
   // A session the host named but did not describe has a shell among the host's children that no
   // row excludes, so its memory would be booked as host overhead. Report nothing rather than that.
-  const host = unmeasured === 0 ? hostOverhead(table, hostPid, panes.map((p) => p.panePid)) : undefined
+  // The same holds for a session outside the `nt-` namespace (the host accepts any name, and the
+  // rows only cover ours): every session the host NAMED must be described, and every described
+  // shell — whatever its name — is excluded from the overhead walk.
+  const allDescribed = listing.names.every((n) => described.has(n))
+  const host =
+    unmeasured === 0 && allDescribed
+      ? hostOverhead(table, hostPid, (listing.sessions ?? []).map((row) => row.pid))
+      : undefined
   return host ? { ...report, host } : report
 }
 

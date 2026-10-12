@@ -290,6 +290,29 @@ describe('collectSessionHostMemory: the host\'s own cost', () => {
     expect(r.host).toBeUndefined()
   })
 
+  it('a described session outside nt- is not a row, and its shell is not booked as host overhead', async () => {
+    const extra = [...table, N(200, 900, 1024, 'cmd.exe'), N(201, 200, 500 * 1024, 'node.exe')]
+    const r = await collectSessionHostMemory({
+      list: async () => listing({ names: ['nt-a', 'other'], sessions: [row('nt-a', 100), row('other', 200)] }),
+      readTable: async () => extra,
+      readMem: () => MEM
+    })
+    expect(r.rows.map((x) => x.session)).toEqual(['nt-a'])
+    expect(r.host).toEqual({ pid: 900, selfMb: 60, consoleMb: 8, consoleCount: 1, totalMb: 68 })
+  })
+
+  it('an UNDESCRIBED session outside nt- withholds the host line (its shell could not be excluded)', async () => {
+    const extra = [...table, N(200, 900, 500 * 1024, 'cmd.exe')]
+    const r = await collectSessionHostMemory({
+      list: async () => listing({ names: ['nt-a', 'other'] }),
+      readTable: async () => extra,
+      readMem: () => MEM
+    })
+    expect(r.unmeasured).toBeUndefined()
+    expect(r.rows).toHaveLength(1)
+    expect(r.host).toBeUndefined()
+  })
+
   it('ok:false carries no host', async () => {
     const r = await collectSessionHostMemory({ list: async () => listing(), readTable: async () => null, readMem: () => MEM })
     expect(r).toEqual({ ok: false, rows: [], mem: MEM })

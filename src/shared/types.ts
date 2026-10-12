@@ -3116,7 +3116,8 @@ export interface SessionHostOverhead {
   pid: number
   /** The session-host process itself. */
   selfMb: number
-  /** Its non-shell children (conhost / OpenConsole, plus anything under them). */
+  /** Its non-shell children (conhost / OpenConsole, plus anything under them — including the
+   *  pane-probe PowerShell worker while it is warm, which is the host's child and its cost). */
   consoleMb: number
   /** Direct children recognised as a console host — "N consoles" in the panel. */
   consoleCount: number

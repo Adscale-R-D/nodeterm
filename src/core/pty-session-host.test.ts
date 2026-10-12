@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { IPC } from '../shared/ipc'
 import { initPlatform, resetPlatformForTests } from './platform'
 import { fakePlatform, type FakePlatform } from './platform-fake'
@@ -88,6 +88,15 @@ function fakeSessionHostPty(ready = Promise.resolve({ fresh: true })) {
 describe('PtyManager session-host contracts', () => {
   let manager: import('./pty-manager').PtyManager | undefined
   let host: FakePlatform
+  let PtyManagerCtor: typeof import('./pty-manager').PtyManager
+
+  // The first dynamic import of pty-manager is cold and heavy (~5 s on the windows-latest runner).
+  // Paying it inside makeManager() charged it to whichever test ran first, which then hit the
+  // default 5 s test timeout (the #914 size test failed that way twice). Load it once, here, under
+  // a hook timeout sized for a cold import; every test then only constructs.
+  beforeAll(async () => {
+    PtyManagerCtor = (await import('./pty-manager')).PtyManager
+  }, 60_000)
 
   beforeEach(() => {
     host = fakePlatform()
@@ -110,8 +119,7 @@ describe('PtyManager session-host contracts', () => {
   })
 
   async function makeManager() {
-    const { PtyManager } = await import('./pty-manager')
-    manager = new PtyManager()
+    manager = new PtyManagerCtor()
     return manager
   }
 

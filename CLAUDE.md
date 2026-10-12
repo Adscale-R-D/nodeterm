@@ -1489,7 +1489,11 @@ seed** — the cases are:
 xterm's own `scrollback` (`xtermScrollback(settings.tmuxScrollback)`, floored at 1000, capped at
 `XTERM_SCROLLBACK_MAX` = 10000) is kept for the sessions tmux does *not* back (a plain shell when
 tmux is unavailable) and for the cold-snapshot replay — it is not what the user scrolls in a tmux
-session.
+session. **The Windows session host's headless emulator (and `NativeWindowsPane`) uses the SAME
+clamp** (`src/shared/scrollback.ts`, re-clamped inside the host for older clients), never the raw
+`tmuxScrollback`: xterm holds every line at full width (cols × 12 B, ~72 MB for 50k × 120 cols per
+session) where tmux stores only used cells, and nothing above the renderer's cap is ever shown.
+tmux's `history-limit` keeps the raw value.
 
 ## Terminal node lifecycle (gotchas)
 

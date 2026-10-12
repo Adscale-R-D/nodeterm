@@ -676,16 +676,33 @@ app already keeps at rest (accounts, hook tokens) relies on.
 
 ## Memory bound
 
-Each `HostSession` holds one `@xterm/headless` `Terminal` with `scrollback` capped at
-`settings.tmuxScrollback` (default 50,000 lines) — the exact same setting that already bounds real
-tmux's `history-limit`, so a machine that already accepted the cost of N tmux panes accepts the
-same order of cost for N session-host sessions. The per-session cost is a cell buffer sized
-`cols × (rows + scrollback)`, plus `SerializeAddon`'s own transient string-building cost only at
-the moment `serialize()` is actually called (attach, join, periodic snapshot, capture request) —
-never held continuously. This is a genuinely new per-session cost the tmux backend does not pay
-(tmux's server keeps its own C-side pane buffer regardless, but that cost is outside this app's
-process); it was a deliberate choice per the task brief ("bound the memory... document the cost
-you chose and why") rather than an oversight.
+Each `HostSession` holds one `@xterm/headless` `Terminal` whose `scrollback` is
+`xtermScrollback(settings.tmuxScrollback)` — floored at 1,000 and **capped at 10,000 lines**
+(`src/shared/scrollback.ts`), the same clamp as the renderer's own xterm. Core sends the clamped
+value, and the host clamps again at the `attach` request boundary (`clampEmulatorScrollback`) so an
+older client still sending the raw 50,000 is bounded too; the clamp runs before both the
+replacement-replay fingerprint and construction, so a replay of the same request still matches.
+The main-process `NativeWindowsPane` mirror (non-persisted win32 panes) uses the same clamp.
+
+Why not reuse tmux's `history-limit` (default 50,000): the costs are not the same order. tmux
+stores only the cells a line actually uses, in C. xterm's `BufferLine` is a `Uint32Array(cols × 3)`
+— **12 B per cell for every buffered line, whatever it holds** — so a 120-column session that fills
+50,000 lines holds ~72 MB of ArrayBuffer (measured ~91 MB with heap overhead; ~139 MB at 200 cols)
+inside the one shared host process, against ~14–18 MB at 10,000. And lines past the renderer's
+10,000 were never reachable: on this backend the renderer's xterm is the only surface a user
+scrolls, yet every warm attach serialized the full history, shipped it over the pipe and IPC, and
+the receiving xterm discarded 80% of it (measured: 50k lines → 5.4 MB string built synchronously in
+~0.7 s, stalling every session's output; 10k → 1.1 MB in ~0.13 s). Capping the emulator bounds that
+attach seed, the co-attach resync and `capture`'s `full: true` by construction — no protocol field
+was needed.
+
+Not reclaimed in place: a session that an OLDER host created at 50,000 keeps that buffer until it
+ends — installing a new app does not upgrade a running host (see below), and an old host cannot be
+told to shrink. Lowering the setting likewise applies to new sessions only. Beyond the emulator,
+the remaining per-session cost is `SerializeAddon`'s transient string at the moment `serialize()`
+runs (attach, join, periodic snapshot, capture request) — never held continuously.
+
+Device check owed (not blocking): host RSS with 10–20 busy normal-screen sessions, before and after.
 
 A DETACHED session's cost is bounded by the same session budget tmux sessions are
 (`core/session-budget.ts`): past the grace window, under memory pressure or past the detached-count

@@ -5251,6 +5251,7 @@ body,
   border-top-color: #fff;
   border-radius: 50%;
   animation: nt-spin 0.8s linear infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 
 .update-card__actions {

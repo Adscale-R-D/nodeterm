@@ -17747,7 +17747,7 @@ export function Canvas() {
       if (dwell) clearTimeout(dwell)
       dwell = null
     }
-    const off = window.nodeTerminal.onWindowVisibility?.((state) => {
+    const onSignal = (state: 'hidden' | 'shown'): void => {
       const hidden = state === 'hidden'
       setWindowBackgrounded(hidden)
       if (!hidden) return clearDwell()
@@ -17756,9 +17756,18 @@ export function Canvas() {
         dwell = null
         if (isWindowBackgrounded()) runReclaimLevers()
       }, BACKGROUND_RELEASE_DWELL_MS)
-    })
+    }
+    const off = window.nodeTerminal.onWindowVisibility?.(onSignal)
+    // Fail-safe for a missed `'shown'` (a window manager that restores without a `restore` event):
+    // a document that has FOCUS is being looked at, so it can never stay backgrounded — otherwise
+    // the user would sit in front of released plates until the next hide/show cycle.
+    const onFocus = (): void => {
+      if (isWindowBackgrounded()) onSignal('shown')
+    }
+    window.addEventListener('focus', onFocus)
     return () => {
       off?.()
+      window.removeEventListener('focus', onFocus)
       clearDwell()
       setWindowBackgrounded(false)
     }

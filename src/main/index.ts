@@ -1369,9 +1369,14 @@ function createWindow(): BrowserWindow {
   // default), hide-on-close (macOS) or minimized window lets its terminals count as offscreen and
   // the existing reclaim levers give memory back (renderer/terminal/window-backgrounded.ts). Every
   // platform; the mapping is the pure main/window-visibility.ts.
+  let windowHiddenByApp = false
+  // `hiddenByApp` is set right before the close branch's own `win.hide()`: on macOS Electron also
+  // emits `hide` for a window that is merely OCCLUDED (or ⌘H-hidden), and that must not count.
   for (const ev of WINDOW_VISIBILITY_EVENTS) {
     win.on(ev as 'hide', () => {
-      if (!win.isDestroyed()) win.webContents.send(IPC.appWindowVisibility, windowVisibilitySignal(ev))
+      const signal = windowVisibilitySignal(ev, { hiddenByApp: windowHiddenByApp })
+      if (ev === 'show' || ev === 'restore') windowHiddenByApp = false
+      if (signal && !win.isDestroyed()) win.webContents.send(IPC.appWindowVisibility, signal)
     })
   }
   // Windows: the taskbar flash raised by an unread rise (appSetBadge) ends when the user comes back.
@@ -1390,6 +1395,7 @@ function createWindow(): BrowserWindow {
     const action = closeAction(process.platform, quitting, win.isFullScreen(), backgroundOnCloseActive())
     if (action === 'hide') {
       e.preventDefault()
+      windowHiddenByApp = true
       win.hide()
       // Off macOS this is a background-mode hide (nothing is quitting, so no confirm gate either).
       if (process.platform !== 'darwin') noteBackgroundHide()
@@ -1401,7 +1407,10 @@ function createWindow(): BrowserWindow {
         leavingFullScreen = true
         win.once('leave-full-screen', () => {
           leavingFullScreen = false
-          if (!win.isDestroyed() && !quitting) win.hide()
+          if (!win.isDestroyed() && !quitting) {
+            windowHiddenByApp = true
+            win.hide()
+          }
         })
         win.setFullScreen(false)
       }

@@ -14,7 +14,14 @@ describe('hidden-window reclaim wiring', () => {
   it('main sends the signal for every window visibility event', () => {
     const main = read('../../main/index.ts')
     expect(main).toMatch(/for \(const ev of WINDOW_VISIBILITY_EVENTS\)/)
-    expect(main).toContain('win.webContents.send(IPC.appWindowVisibility, windowVisibilitySignal(ev))')
+    expect(main).toContain('windowVisibilitySignal(ev, { hiddenByApp: windowHiddenByApp })')
+    expect(main).toContain('win.webContents.send(IPC.appWindowVisibility, signal)')
+    // Only the app's OWN hide counts (macOS emits `hide` on mere occlusion): every `win.hide()` in
+    // main is the close branch's, and each one is preceded by the flag.
+    const hides = (main.match(/^\s*win\.hide\(\)\s*$/gm) ?? []).length
+    const flagged = main.split('windowHiddenByApp = true\n').length - 1
+    expect(hides).toBeGreaterThan(0)
+    expect(flagged).toBe(hides)
   })
 
   it('the preload forwards it and the Server Edition declares it a no-op', () => {
@@ -24,12 +31,14 @@ describe('hidden-window reclaim wiring', () => {
 
   it('Canvas sets the flag and runs the shared reclaim pair after the dwell', () => {
     const canvas = read('../canvas/Canvas.tsx')
-    const at = canvas.indexOf('window.nodeTerminal.onWindowVisibility?.(')
+    const at = canvas.indexOf('const onSignal = (state:')
     expect(at).toBeGreaterThan(-1)
     const effect = canvas.slice(at, canvas.indexOf('}, [])', at))
     expect(effect).toContain('setWindowBackgrounded(hidden)')
     expect(effect).toContain('BACKGROUND_RELEASE_DWELL_MS')
     expect(effect).toContain('runReclaimLevers()')
+    // A focused document is being looked at: it clears a missed 'shown'.
+    expect(effect).toContain("window.addEventListener('focus', onFocus)")
     // Memory pressure shares the same pair rather than a second copy of it.
     expect(canvas).toContain('onMemoryPressure?.(() => runReclaimLevers())')
   })

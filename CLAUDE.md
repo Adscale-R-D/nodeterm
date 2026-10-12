@@ -648,7 +648,11 @@ Lifecycle, by intent:
   all read hidden. Show cancels the dwell and revives warm. It feeds existing levers — it is not a
   new one — and an occluded window or a Server Edition tab switch never triggers it (explicit IPC,
   not `visibilitychange`; the bridge declares it a no-op). Eco and the liveness poll see a hidden
-  window as "nobody watching" too.
+  window as "nobody watching" too. **A raw Electron `hide` is NOT the signal**: on macOS
+  `BrowserWindow` emits `hide`/`show` from occlusion changes (a window merely covered by another
+  app, another Space, ⌘H), so main forwards `hide` only when the close branch set
+  `windowHiddenByApp` before its own `win.hide()`; `minimize` always counts. A focused renderer
+  clears the flag (fail-safe for a WM that restores without a `restore` event).
 - **Every memory lever must ask whether the kill ends live work** (`terminal/live-work.ts`). The
   renderer reclaims terminal memory in FOUR places — park window expiry, the park's LRU cap, the
   memory-pressure drop (all three in `park-budget.ts`) and the offscreen viewer release

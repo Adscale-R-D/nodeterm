@@ -2234,7 +2234,9 @@ else, and its context links must keep classifying across restarts).
   group (never types `/exit`) and RECYCLES the tmux session before cold-resume: an existing shell may
   predate the gateway setting, and tmux env changes do not retroactively change that shell's
   environment. Recreating it guarantees the current URL/key applies without typing a secret into
-  the pane. Ordinary Restart stays in-place. Custom-agent env is still merged last and may override
+  the pane. On Windows (session host / direct ConPTY — no process groups) the kill is `taskkill /T
+  /F` on the re-proven agent pid only, never the console root, and requires the agent-identity gate
+  (`session-host/terminate-owner.ts`; an older live host answers `'unsupported'`). Ordinary Restart stays in-place. Custom-agent env is still merged last and may override
   the shared mapping. Desktop and Server Edition use the same core handler; relay tabs deliberately
   do not apply this machine's gateway to another core. Mobile needs a settings/model-picker surface
   before it can expose the feature.

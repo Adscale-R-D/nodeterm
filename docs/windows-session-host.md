@@ -138,6 +138,8 @@ long-lived connection (no positional-FIFO fragility, unlike this app's tmux cont
 | `attach`                         | `new-session -A` / `attach-session`     | full, plus a screen the tmux path never needed (see below) |
 | `hasSession`                     | `has-session -t <name>`                 | full (implemented; not on the hot create path — see below) |
 | `write`                          | raw bytes on an attached client's stdin | full |
+| `writeDetachedV1`                | `send-keys -H` into a released session (no client) | full — additive; an older host answers `unknown command` and the write fails closed (never re-sent as `sendKeys`) |
+| `terminateOwnerV1`               | `kill -TERM -<foreground pgid>`         | Windows shape — `taskkill /T /F` on the re-proven agent pid, never the console root (see below) |
 | `resize`                         | ConPTY/pty resize + `refresh-client -C` | full; each view claims a size, the app's grid follows its most recently active view (issue #914) |
 | `pause` / `resume`               | node-pty `pause()`/`resume()`           | full; per-viewer in core and per-connection in the host (first pause / last resume) |
 | `sendKeys`                       | `send-keys -l -- <text>` (+ `Enter`)    | full — works with no attached client, exactly like tmux |
@@ -163,7 +165,11 @@ long-lived connection (no positional-FIFO fragility, unlike this app's tmux cont
   tmux CLI command (a whole subprocess per invocation), every session-host verb is a stateless
   request over the ONE already-open connection, addressed by session name — the exact problem the
   shadow-client machinery exists to make cheap for tmux is simply not a problem here. See the
-  `sendKeys`/`paneCommand`/`capture` rows above: none of them need an attached client.
+  `sendKeys`/`paneCommand`/`capture` rows above: none of them need an attached client. A raw
+  background write to a RELEASED node (`PtyManager.backgroundWrite`, the tier tmux serves through a
+  shadow) uses `writeDetachedV1`: verbatim bytes, addressed by name, no attachment. It is not gated
+  on `ptyShadowClients` (that switch governs `tmux -C` children) and is never retried — a lost
+  reply may still have typed.
 
 ## The seeding trap (read this before touching `spawnNew`/`join`/`SessionHostPty`)
 
@@ -728,6 +734,18 @@ A host-backed session stays addressable after the desktop releases its client (p
 offscreen release). `targetLive` comes from `PtyManager.sessionExists`, and the three messaging
 probes route by `sessionHostOwns`, which reads the release record when no `Session` is left and
 otherwise applies `sendText`'s rule (no local tmux means the host owns persistence).
+
+**Stopping the agent (`terminateOwnerV1`, model switch / "Restart on subscription").** Windows has
+no foreground process group, so `PtyManager.terminateForeground` cannot SIGTERM one. On a
+session-host pane it sends the owner it just proved with `messageOwnerV1` (the agent-identity gate
+is MANDATORY here — the legacy "not a shell" guard is not provable on Windows); the host re-reads
+the owner, requires `sameNativeProcess` (pane generation, root pid, the single pid, OS birth time,
+executable), refuses the console root and any shell, and only then runs `taskkill /T /F` on that
+pid (`session-host/terminate-owner.ts`). The shell survives for the recycle that follows. A direct
+ConPTY pane runs the same helper in core against `NativeWindowsPane.owner()`. An older host answers
+`unknown command`; the client maps that to `'unsupported'` and the canvas says the host predates
+the verb instead of "busy". Unlike SIGTERM, `/F` gives the agent no chance to flush — the CLI's
+transcript is appended per message, so `--resume` still finds the conversation (device item).
 
 The extension is independently versioned so the existing terminal protocol v1/v2 is unchanged.
 Old live hosts reject the new command names, and the client returns null/false without falling

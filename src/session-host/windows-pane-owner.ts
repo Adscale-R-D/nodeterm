@@ -37,6 +37,10 @@ export interface WindowsConsoleSnapshot {
 }
 
 const SHELLS = new Set(['pwsh', 'powershell', 'cmd', 'bash', 'sh'])
+/** Is `command` (a `PaneOwner.command`, i.e. the lower-cased executable name) a console shell? */
+export function isConsoleShellBinary(command: string): boolean {
+  return SHELLS.has(command.toLowerCase().replace(/\.exe$/, ''))
+}
 /**
  * Interpreters whose identity is the script they run, not their own executable. An npm-installed
  * agent CLI on Windows is `cmd` -> `node <package>\bin\<cli>.js` (Codex measured 2026-09-14, with

@@ -1531,6 +1531,12 @@ describe('summarizeBulkRestart', () => {
     ).toBe('1 restarted · 1 skipped (working) · 3 skipped (no session)')
   })
 
+  it("folds 'host-unsupported' into the same skip bucket, so it never vanishes from the line", () => {
+    expect(summarizeBulkRestart(['restarted', 'host-unsupported'], { working: 0, noSession: 0 })).toBe(
+      '1 restarted · 1 skipped (no session)'
+    )
+  })
+
   it('reports a run where every node was busy', () => {
     expect(summarizeBulkRestart([], { working: 2, noSession: 0 })).toBe(
       '0 restarted · 2 skipped (working)'

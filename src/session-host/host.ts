@@ -29,6 +29,7 @@ import {
   type HasSessionResult,
   type PaneCommandResult,
   type CaptureResult,
+  type TerminateOwnerResult,
   type KillSessionResult,
   type ListSessionsResult,
   type ShutdownResult
@@ -37,6 +38,8 @@ import { HostSession } from './session'
 import { sendTextWhenSettled } from '../core/settled-text'
 import { paneCommand as readPaneCommand } from './process-tree'
 import { terminateWindowsProcessTree } from './windows-process-tree'
+import { terminatePaneOwner } from './terminate-owner'
+import { readWindowsConsoleOwner } from './windows-pane-owner'
 import { publishSessionHostState } from './state-file'
 import {
   EMPTY_LOCK_STALE_MS,
@@ -993,6 +996,21 @@ async function main(): Promise<void> {
           ok: true,
           result: await hostMessagePane(() => sessions.get(req.name)).send(req.envelope, req.expected)
         }
+      case 'terminateOwnerV1': {
+        const terminated = await terminatePaneOwner(() => sessions.get(req.name), req.expected, {
+          probe: readWindowsConsoleOwner,
+          terminate: (pid) => terminateWindowsProcessTree(pid)
+        })
+        return { ok: true, result: { terminated } satisfies TerminateOwnerResult }
+      }
+      case 'writeDetachedV1': {
+        // No subscriber check, exactly like sendKeys: the caller holds no attachment on purpose.
+        const s = sessions.get(req.name)
+        if (!s || s.exited) return { ok: false, error: 'no such session' }
+        if (typeof req.data !== 'string' || !req.data) return { ok: false, error: 'nothing to write' }
+        s.proc.write(req.data)
+        return { ok: true }
+      }
       case 'capture': {
         const s = sessions.get(req.name)
         if (!s || s.exited) return { ok: true, result: { text: '' } satisfies CaptureResult }

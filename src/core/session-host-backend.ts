@@ -34,6 +34,18 @@ export async function sessionHostMessageEnvelope(
   return getClient().messageEnvelope(name, envelope, expected)
 }
 
+/** End the proven agent tree on a session-host pane (never the shell). See `terminateOwner`. */
+export async function sessionHostTerminateOwner(
+  name: string, expected: PaneOwner
+): Promise<boolean | 'unsupported'> {
+  return getClient().terminateOwner(name, expected)
+}
+
+/** Raw verbatim write into a released (unattached) session. False = not delivered or unknown. */
+export async function sessionHostWriteDetached(name: string, data: string): Promise<boolean> {
+  return getClient().writeDetached(name, data)
+}
+
 let client: SessionHostClient | null = null
 
 function getClient(): SessionHostClient {

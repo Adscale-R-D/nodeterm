@@ -98,6 +98,14 @@ export type SessionHostRequest =
   | { id: number; cmd: 'messageOwnerV1'; name: string }
   | { id: number; cmd: 'messagePasteReadyV1'; name: string }
   | { id: number; cmd: 'messageEnvelopeV1'; name: string; envelope: string; expected: PaneOwner }
+  /** End the proven agent process tree (`expected`, from `messageOwnerV1`) without touching the
+   *  console root. Result: `TerminateOwnerResult`. Additive like the messaging extension: an older
+   *  live host answers `unknown command`, which the client reports as unsupported. */
+  | { id: number; cmd: 'terminateOwnerV1'; name: string; expected: PaneOwner }
+  /** Raw, verbatim keystroke bytes into a session this connection need NOT be attached to — the
+   *  `tmux send-keys -H` of a released node. No framing, no sanitizing, no Enter. An older host
+   *  answers `unknown command`; the client then fails closed and never falls back to sendKeys. */
+  | { id: number; cmd: 'writeDetachedV1'; name: string; data: string }
   | { id: number; cmd: 'capture'; name: string; full: boolean }
   | {
       id: number
@@ -237,6 +245,9 @@ export interface ExecuteLaunchResult {
 }
 export interface PaneCommandResult {
   command: string | null
+}
+export interface TerminateOwnerResult {
+  terminated: boolean
 }
 export interface CaptureResult {
   text: string

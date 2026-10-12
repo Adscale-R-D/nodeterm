@@ -142,7 +142,10 @@ export function clearEnvEligibility(
   return { ok: true }
 }
 
-export type RestartOutcome = 'restarted' | 'exit-timeout' | 'not-eligible'
+/** `'host-unsupported'`: the kill a model switch / "Restart on subscription" needs went to a
+ *  Windows session host that predates `terminateOwnerV1`. Nothing was signalled or written; the
+ *  remedy (restart the app so a current host serves new sessions) differs from `'not-eligible'`'s. */
+export type RestartOutcome = 'restarted' | 'exit-timeout' | 'not-eligible' | 'host-unsupported'
 
 export const RESTART_EXIT_TIMEOUT_MS = 6000
 export const RESTART_POLL_MS = 250
@@ -837,7 +840,7 @@ export function summarizeBulkRestart(
   outcomes: RestartOutcome[],
   skipped: { working: number; noSession: number }
 ): string {
-  const notEligible = outcomes.filter((o) => o === 'not-eligible').length
+  const notEligible = outcomes.filter((o) => o === 'not-eligible' || o === 'host-unsupported').length
   return summarizeOutcomes(outcomes, {
     working: skipped.working,
     noSession: skipped.noSession + notEligible

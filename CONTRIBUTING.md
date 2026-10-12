@@ -323,6 +323,13 @@ anything else. Board-level fields survive every transform — `pullLinks` is one
   cannot read) and test Windows dispatch WITHOUT `windowsVerbatimArguments`; keep the `AutoRun`
   refusal. Deep version: `docs/antigravity-agent.md` and CLAUDE.md § Agent support.
 
+- **On Windows, only claude runs POSIX.** Claude Code runs hooks and tools through Git Bash; codex,
+  gemini, grok and copilot run them in PowerShell/cmd.exe. So a hook command or a "run this shim"
+  line for any other agent goes through the `.cmd` helpers in
+  `src/core/agents/hooks/windows-hook-wrapper.ts` / `shared/agents/shim-invocation.ts`, and every
+  builder takes the RUNNING machine's platform with a POSIX default — never `process.platform`
+  inside a builder an SSH installer also calls. Deep version: CLAUDE.md § Hook installers.
+
 - **Finding `agy` for hook installation is not enough to launch it.** The measured Windows
   installer wrote `%LOCALAPPDATA%\agy\bin` into a `REG_SZ` user PATH, so command lookup kept the
   percent expression literal and `agy` was not found even though its executable existed. Local

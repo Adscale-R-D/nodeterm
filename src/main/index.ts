@@ -163,7 +163,7 @@ import {
   generateGroupName,
   generateTerminalName
 } from '../core/commit-message'
-import { initUpdater } from './updater'
+import { initUpdater, type UpdaterHandle } from './updater'
 import { requestRendererFlush } from './renderer-flush'
 import { fetchCheck } from '../core/check'
 import {
@@ -822,7 +822,9 @@ function confirmQuit(parentWin: BrowserWindow | null): Promise<boolean> {
 // down in before-quit. Its state is fed from facts main already holds — the unread count the
 // renderer sends for the badge, and the phone-access setting — never from the hook-event stream.
 let backgroundTray: BackgroundTray | undefined
-const trayState: TrayState = { unread: 0, phoneAccess: false }
+const trayState: TrayState = { unread: 0, phoneAccess: false, updateReady: null }
+// The updater's guarded restart path, for the tray's "Restart to update" item (set in whenReady).
+let updater: UpdaterHandle | undefined
 
 /** Hide-on-close is in force off macOS only while the tray actually exists: a tray that failed to
  *  construct must not turn the window's × into a hide with no way back. */
@@ -865,7 +867,12 @@ function syncBackgroundTray(): void {
       initial: { ...trayState },
       // Quit is the ordinary app.quit(): before-quit (and its confirm dialog) runs exactly as for
       // Ctrl+Q. `quitting` is NOT set here — a cancelled confirm must leave the × hiding again.
-      onAction: (action) => (action === 'open' ? showMainWindowFromBackground() : app.quit())
+      onAction: (action) =>
+        action === 'open'
+          ? showMainWindowFromBackground()
+          : action === 'restart-update'
+            ? updater?.restartToUpdate()
+            : app.quit()
     })
   } catch (e) {
     console.warn('[tray] could not create the notification-area icon; window close will quit', e)
@@ -2369,9 +2376,21 @@ app.whenReady().then(async () => {
   // quitAndInstall closes all windows then calls app.quit(), which our hide-on-close would block.
   // Also skip the confirm dialog — this is a restart-to-update the user already asked for via the
   // "Restart to update" card, not an exit, and a modal here would just block the install.
-  initUpdater(() => {
-    quitting = true
-    skipQuitConfirmation = true
+  // Both flags flip only when the install REALLY starts (on macOS: after Squirrel.Mac staged the
+  // update — updater.ts `restartToUpdate`), and are put back if it then fails.
+  updater = initUpdater({
+    onBeforeRestart: () => {
+      quitting = true
+      skipQuitConfirmation = true
+    },
+    onRestartAborted: () => {
+      quitting = false
+      skipQuitConfirmation = false
+    },
+    onUpdateReady: (version) => {
+      trayState.updateReady = version
+      backgroundTray?.update({ ...trayState })
+    }
   })
   // Prepare-for-update (Windows session host, issue #829). The user confirmed the whole flow in
   // its own dialog, so the quit at its end skips the ordinary quit confirmation, like the

@@ -34,7 +34,10 @@ vi.mock('electron', () => ({
       ipcHandle[ch] = fn
     }
   },
-  Notification: Object.assign(function () {}, { isSupported: () => false })
+  Notification: Object.assign(function () {}, { isSupported: () => false }),
+  // Electron's own (Squirrel) autoUpdater — only wired on darwin; the restart flow is pinned in
+  // updater.restart.test.ts.
+  autoUpdater: { on: () => {} }
 }))
 
 // `vi.mock` factories are hoisted above every const, so the double the factory returns has to be
@@ -47,6 +50,7 @@ const { updaterEvents, autoUpdater } = vi.hoisted(() => {
       autoDownload: true,
       autoInstallOnAppQuit: true,
       checkForUpdates: vi.fn(() => Promise.resolve(null)),
+      downloadUpdate: vi.fn(() => Promise.resolve([])),
       quitAndInstall: vi.fn(),
       on: (ev: string, fn: (...a: unknown[]) => void) => {
         events[ev] = fn
@@ -224,7 +228,7 @@ describe('the unsigned Windows beta (manual marker)', () => {
     onBeforeRestart.mockClear()
     setPlatform('win32')
     packageWith('manual')
-    initUpdater(onBeforeRestart)
+    initUpdater({ onBeforeRestart })
   })
 
   it('checks the feed on launch and every six hours', () => {
@@ -253,11 +257,16 @@ describe('the unsigned Windows beta (manual marker)', () => {
     // that does not serve latest.yml yet) — that must not put an error card up on every launch.
     updaterEvents['error']?.(new Error('HttpError: 404 latest.yml'))
     expect(channels()).not.toContain(IPC.appUpdateError)
-    autoUpdater.checkForUpdates.mockImplementationOnce(() => Promise.reject(new Error('offline')))
+    // electron-updater emits 'error' for the rejected manual check too; that listener is the one
+    // owner of the report (the catch only logs), so exactly one card comes up.
+    autoUpdater.checkForUpdates.mockImplementationOnce(() => {
+      updaterEvents['error']?.(new Error('offline'))
+      return Promise.reject(new Error('offline'))
+    })
     check()
     await Promise.resolve()
     await Promise.resolve()
-    expect(channels()).toContain(IPC.appUpdateError)
+    expect(channels().filter((c) => c === IPC.appUpdateError)).toHaveLength(1)
   })
 
   it('refuses restart-to-update in main: quitAndInstall never runs', () => {
@@ -269,22 +278,31 @@ describe('the unsigned Windows beta (manual marker)', () => {
 })
 
 describe('restart-to-update elsewhere', () => {
-  it('a self-installing release still restarts into the update', () => {
+  it('a self-installing release still restarts into a downloaded update', async () => {
+    // (macOS's wait for Squirrel.Mac is pinned in updater.restart.test.ts; AppImage installs from
+    // the downloaded file, so it is the immediate case.)
     const onBeforeRestart = vi.fn()
-    setPlatform('darwin')
+    setPlatform('linux')
+    process.env.APPIMAGE = '/tmp/nodeterm.AppImage'
     packageWith(undefined)
-    initUpdater(onBeforeRestart)
+    initUpdater({ onBeforeRestart, flushRenderer: () => Promise.resolve() })
+    updaterEvents['update-downloaded']?.({ version: '9.9.9' })
     restart()
+    await vi.waitFor(() => expect(autoUpdater.quitAndInstall).toHaveBeenCalledTimes(1))
     expect(onBeforeRestart).toHaveBeenCalledTimes(1)
-    expect(autoUpdater.quitAndInstall).toHaveBeenCalledTimes(1)
   })
 
-  it('a Linux .deb still surfaces an update error event, as before', () => {
+  it('a Linux .deb: a BACKGROUND check failure is logged, not carded; a user check still reports', () => {
     setPlatform('linux')
     packageWith(undefined)
     initUpdater()
     updaterEvents['error']?.(new Error('boom'))
-    expect(channels()).toContain(IPC.appUpdateError)
+    expect(channels()).not.toContain(IPC.appUpdateError)
+    check()
+    updaterEvents['error']?.(new Error('boom'))
+    expect(sent.filter((s) => s.channel === IPC.appUpdateError)).toEqual([
+      { channel: IPC.appUpdateError, payload: 'boom' }
+    ])
   })
 
   it('a Linux .deb (manual-install) refuses it too', () => {

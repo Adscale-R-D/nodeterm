@@ -12,6 +12,9 @@ import { build, type Plugin } from 'esbuild'
 import { LineFramer, encodeFrame, type SessionHostFrame, type SessionHostResponse } from './protocol'
 import { sessionHostPaths, type SessionHostState } from './paths'
 
+/** A fake shell that exits by itself (see fakePtyPlugin). */
+const EXITING_SHELL = 'fake-exiting-shell'
+
 function fakePtyPlugin(): Plugin {
   return {
     name: 'session-host-agent-ops-fake-pty',
@@ -21,12 +24,18 @@ function fakePtyPlugin(): Plugin {
         loader: 'js',
         contents: `
           const fs = require('fs')
-          export function spawn() {
+          export function spawn(file) {
             let onExit
             return {
               pid: 4242,
               onData() {},
-              onExit(cb) { onExit = cb },
+              // A shell named EXITING_SHELL ends on its own shortly after the host listens for it —
+              // the pty's OWN exit path, identical on every platform (unlike killSession, which on
+              // win32 goes through a real taskkill of this never-spawned pid and reports ok:false).
+              onExit(cb) {
+                onExit = cb
+                if (file === '${EXITING_SHELL}') setTimeout(() => onExit?.({ exitCode: 0 }), 50)
+              },
               write(data) { fs.appendFileSync(process.env.NT_TEST_WRITE_LOG, JSON.stringify(data) + '\\n') },
               resize() {}, pause() {}, resume() {},
               kill() { setTimeout(() => onExit?.({ exitCode: 0 }), 20) }
@@ -162,9 +171,18 @@ describe('session-host agent-operation verbs', () => {
   it('writeDetachedV1 refuses an exited session', async () => {
     const host = await bootHost()
     const owner = await host.connect()
-    await owner.call({ cmd: 'attach', name: 'nt-b', spawn: SPAWN, scrollback: 100 })
-    await expect(owner.call({ cmd: 'killSession', name: 'nt-b', operationId: 'op-1', reserveReplacement: false }))
+    await expect(owner.call({ cmd: 'attach', name: 'nt-b', spawn: { ...SPAWN, shell: EXITING_SHELL }, scrollback: 100 }))
       .resolves.toMatchObject({ ok: true })
+    // Wait for the host to observe the exit. Not killSession: on win32 that kills through a real
+    // taskkill of the fixture's never-spawned pid and (correctly) answers ok:false — see the same
+    // note in host-routing.test.ts. The invariant here is about an EXITED session, however it ended.
+    let gone = false
+    for (let i = 0; i < 200 && !gone; i++) {
+      const r = await owner.call({ cmd: 'hasSession', name: 'nt-b' })
+      gone = (r as { result?: { exists?: boolean } }).result?.exists === false
+      if (!gone) await new Promise((resolve) => setTimeout(resolve, 20))
+    }
+    expect(gone).toBe(true)
     await expect(owner.call({ cmd: 'writeDetachedV1', name: 'nt-b', data: 'x' }))
       .resolves.toMatchObject({ ok: false, error: 'no such session' })
     expect(host.writes()).toEqual([])

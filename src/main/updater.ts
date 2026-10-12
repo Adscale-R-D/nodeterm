@@ -14,6 +14,7 @@ import { autoUpdater } from 'electron-updater'
 import { IPC } from '../shared/ipc'
 import {
   installReadiness,
+  MANUAL_UPDATE_MODE,
   mayQuitAndInstall,
   releaseNotesText,
   toUpdateAvailablePayload,
@@ -30,8 +31,34 @@ import type { UpdateInstalling } from '../shared/types'
 import { getMainWindow, sendToMain } from './main-window'
 import { retainUntilDismissed } from './notifications'
 import { requestRendererFlush } from './renderer-flush'
+import { consumeUpdateFailedMarker, describeUpdateInstallFailure } from './update-install-marker'
 
 const SIX_HOURS = 6 * 60 * 60 * 1000
+
+/** The outcome of the most recent feed check (any trigger). Recorded so a check-only build's
+ *  silent automatic failures are still observable — see the 'error' handler. */
+export interface UpdateCheckRecord {
+  at: number
+  ok: boolean
+  message?: string
+}
+let lastCheck: UpdateCheckRecord | null = null
+export function lastUpdateCheck(): UpdateCheckRecord | null {
+  return lastCheck
+}
+
+/**
+ * One actionable log line for a failed check in a check-only build. A 404 on a `latest*.yml` is
+ * the feed itself missing — the nodeterm.dev/updates mirror not serving that platform's file —
+ * which is an ops fix, not a network blip, and reads like one in a device report. Pure; exported
+ * for tests.
+ */
+export function describeCheckFailure(message: string): string {
+  const feedMissing = /\b404\b/.test(message) && /latest[\w.-]*\.yml/i.test(message)
+  return feedMissing
+    ? `update feed is missing this platform's latest*.yml (${message}); the passive update notice cannot fire until the update mirror serves it`
+    : `update check failed: ${message}`
+}
 
 /**
  * How long a restart-to-update may sit in `preparing` (macOS: Squirrel.Mac re-reading the zip and
@@ -108,6 +135,14 @@ export function initUpdater(hooks: UpdaterHooks = {}): UpdaterHandle {
   const flushRenderer =
     hooks.flushRenderer ?? (() => requestRendererFlush(getMainWindow()?.webContents, ipcMain))
   const platform = process.platform
+
+  // A self-update the installer refused on the way in (build/installer.nsh writes this note and
+  // restarts the previous version). Read once and deleted; Windows only, a no-op elsewhere.
+  const failedInstall = consumeUpdateFailedMarker({
+    platform: process.platform,
+    localAppData: process.env.LOCALAPPDATA
+  })
+  if (failedInstall) console.warn('[updater]', describeUpdateInstallFailure(failedInstall))
 
   const updateMode = packagedUpdateMode()
   const delivery = updateDelivery({
@@ -261,7 +296,12 @@ export function initUpdater(hooks: UpdaterHooks = {}): UpdaterHandle {
   let downloadFailures = 0
   let retryTimer: ReturnType<typeof setTimeout> | undefined
 
+  const recordCheck = (ok: boolean, message?: string): void => {
+    lastCheck = { at: Date.now(), ok, ...(message === undefined ? {} : { message }) }
+  }
+
   autoUpdater.on('update-available', (info) => {
+    recordCheck(true)
     const d = gate.onAvailable(info.version, { userInitiated: userFlow })
     if (!d.download && restageNeeded && info.version === stagedVersion) {
       // Squirrel.Mac failed to stage this version: hand it the (cached) download again.
@@ -336,6 +376,7 @@ export function initUpdater(hooks: UpdaterHooks = {}): UpdaterHandle {
   })
 
   autoUpdater.on('update-not-available', () => {
+    recordCheck(true)
     downloading = false
     userFlow = false
     send(IPC.appUpdateNotAvailable)
@@ -369,16 +410,24 @@ export function initUpdater(hooks: UpdaterHooks = {}): UpdaterHandle {
     })
   }
 
+  // A check-only build (`nodeTermUpdates=manual`, the unsigned Windows beta) downloads nothing, so
+  // every 'error' it sees outside a restart is a CHECK failure. Its silent launch/6h check failures
+  // are not shown (classifyUpdaterError already keeps every auto-check off the card) — but they are
+  // NOT silent either: recorded (`lastUpdateCheck`) and logged as one actionable warning, so a feed
+  // that 404s (the mirror not serving latest.yml) reads as an ops fix in the debug log instead of
+  // looking like "no update yet".
+  const checkOnly = delivery === 'manual-install' && updateMode === MANUAL_UPDATE_MODE
+
   // One owner for error reporting: this listener. electron-updater emits 'error' for every failed
   // check (manual and automatic alike) and download, so the manual handler below only logs its
   // rejection — answering there too used to put the same error up twice.
   autoUpdater.on('error', (err) => {
     const raw = err?.message ?? String(err)
-    console.error('[updater]', raw)
     // Once quitAndInstall ran, an error is the install failing. While still waiting on Squirrel
     // the native 'error' above is the authority — an unrelated background check failing in that
     // window must not cancel the user's restart.
     if (restart.requested && restart.beforeRestartRan) {
+      console.error('[updater]', raw)
       abortRestart(raw)
       return
     }
@@ -389,6 +438,9 @@ export function initUpdater(hooks: UpdaterHooks = {}): UpdaterHandle {
       : userFlow
         ? 'manual-check'
         : 'auto-check'
+    if (origin === 'auto-check' || origin === 'manual-check') recordCheck(false, raw)
+    if (checkOnly && origin === 'auto-check') console.warn('[updater]', describeCheckFailure(raw))
+    else console.error('[updater]', raw)
     const wasDownloading = downloading
     downloading = false
     userFlow = false

@@ -121,6 +121,9 @@ confirms what still stops (Cancel focused), then sends the host's `shutdown` com
 once the host process is confirmed gone. `shutdown` is a negotiated hello feature: never send it to
 a host that did not advertise it, and never add a taskkill/name-kill fallback — an older host gets
 the manual steps. The flow never deletes a node. Server Edition: degraded stub (`unsupported`).
+A host classified `staged` (runs from its `%LOCALAPPDATA%` copy) only needs a quit, so the dialog
+leads with "Quit nodeterm (sessions keep running)"; `unknown` must never be treated as staged.
+The NSIS preflight waits (bounded, exit 10 only) in silent/`--updated` runs and never kills.
 
 Staged host runtime (#829 step 3): a packaged Windows build launches the host from a private
 copy, `%LOCALAPPDATA%\nodeterm\session-host\<version>-<fingerprint>\nodeterm-sessionhost-v2.exe`

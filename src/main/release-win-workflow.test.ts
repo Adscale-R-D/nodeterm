@@ -60,3 +60,32 @@ describe('release.yml release-win', () => {
     expect(publish).not.toContain('release-win')
   })
 })
+
+// U2: the feed the apps read is a mirror outside this repo; this job is the only thing that
+// notices when it does not serve a release's latest*.yml.
+describe('release.yml verify-feed', () => {
+  const text = fs.readFileSync(WORKFLOW, 'utf8')
+  const job = commands(jobBlock(text, 'verify-feed'))
+
+  it('runs after the promote, even when the best-effort Windows job did not succeed', () => {
+    expect(job).toMatch(/needs: \[publish, release-win\]/)
+    expect(job).toContain("if: ${{ always() && needs.publish.result == 'success' }}")
+  })
+
+  it('checks every platform feed file against the tag on the real update URL', () => {
+    expect(job).toContain('FEED: https://nodeterm.dev/updates')
+    expect(job).toMatch(/STRICT: latest-mac\.yml latest-linux\.yml/)
+    expect(job).toMatch(/ADVISORY: latest\.yml/)
+    expect(job).toContain('want="${GITHUB_REF_NAME#v}"')
+    expect(job).toContain('curl -fsSL')
+    expect(job).toMatch(/s\/\^version:/)
+  })
+
+  it('retries for mirror delay, fails only on strict files, and never gates publish', () => {
+    expect(job).toMatch(/while \[ "\$n" -le 10 \]/)
+    expect(job).toContain('::$level::')
+    expect(job).toContain('exit "$fail"')
+    const publish = commands(jobBlock(text, 'publish'))
+    expect(publish).not.toContain('verify-feed')
+  })
+})

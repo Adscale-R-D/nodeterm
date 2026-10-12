@@ -728,10 +728,57 @@ older host never answers, and the client reports `sessions: null` — named but 
   open — never polled; always the absolute `%SystemRoot%\System32\WindowsPowerShell\v1.0` path,
   `powershellExe()`, because Windows resolves a bare name against the cwd first). Sessions an older host cannot describe are `unmeasured`, with their own
   sentence. No host running is "no sessions", not a failure.
+- **The host's own cost** (`SessionMemoryReport.host`, `hostOverhead` in `core/session-memory.ts`):
+  rows roll up from each pane's SHELL, and ConPTY's conhost/OpenConsole is the host's child (the
+  shell's sibling), so neither it nor the host process itself — every session's headless emulator,
+  node-pty's per-session conout worker thread — was in any row. The listing now carries the host pid
+  from the state file (`SessionHostListing.hostPid`; every host version writes it, so no protocol
+  change), and the panel shows one non-killable line, `nodeterm session host (N consoles)`, added to
+  the total only under the `measured` gate. Both figures are MEASURED working sets, labelled as
+  such; nothing is estimated. Unknown host pid, a pid missing from the table, or an undescribed
+  session (whose shell would be booked as host overhead) ⇒ no line, never `0 B`. An idle host with no
+  session is still measured.
 - **Dev-server ports**: one PowerShell call per scan — `Win32_Process` plus
   `Get-NetTCPConnection` (owning pid is a kernel field, nothing a process can rename itself into),
   falling back to `netstat -ano` (listeners recognised by a foreign port of 0, because the state
   column is localized). A non-zero exit is `unreachable`; with no nt- session nothing is spawned.
+
+### Pane probes: one long-lived PowerShell per process
+
+`paneCommand` (restart/Eco exit poll, agent liveness, launch readiness) and the console-owner probe
+(`readWindowsConsoleOwner` — messaging, Eco's owner read, `terminateOwnerV1`) used to start a fresh
+`powershell.exe` per call; the owner probe also re-ran `Add-Type` (csc + a temp assembly on PS 5.1)
+every time. Both now go through `session-host/windows-probe-worker.ts`: one lazy child per process
+(the host's, or main's for a direct Windows PTY) that compiles the type ONCE and answers JSON-line
+requests FIFO. Rules a refactor must keep:
+
+- **Fallback, not replacement.** `unavailable` (could not start, timed out, died, garbage) falls
+  back to the original one-shot script; `failed` (the worker ran the probe and it failed) is a
+  real answer and is not retried. Two consecutive transport failures bench the worker for 5 min —
+  never a respawn loop. Deadlines: 6 s for the first request after a spawn (startup + compile),
+  1.5 s warm. Idle exit after 60 s; stdin closing ends the loop, so it dies with its parent.
+- **The worker holds its own stdio first** (`OpenStandardInput/Output` before any probe), because
+  the probe `FreeConsole`/`AttachConsole`s. Unverified on a device — checklist item P1 below.
+- **Table reads are coalesced in flight, never cached by time** (`createProcessTableReader`). The
+  exit poll accepts a changed reading only on two CONSECUTIVE polls; a cached snapshot answering
+  both would confirm a momentary child of a still-running CLI from ONE observation and type the
+  resume line into a live agent.
+- **Every one-shot path is the absolute `%SystemRoot%` PowerShell** (`powershellExe()`), never a
+  bare name.
+- **A slow read still gets its samples.** The exit phase owes a pane that keeps answering at least
+  `RESTART_MIN_EXIT_SAMPLES` (4) readings, each with `max(window left, timeoutMs/2)`, so a cold
+  ~1.5 s read cannot turn a CLI that quit at 8 s into a false `exit-timeout` (inert on tmux).
+
+### node-pty's conout worker thread (documented, not changed)
+
+node-pty 1.1.0 starts one `worker_threads` Worker (a full V8 isolate) per ConPTY
+(`lib/windowsConoutConnection.js`), measured on plain Node at ~11–12 MB RSS each idle (10 workers
++118 MB, 30 workers +349 MB); under `ELECTRON_RUN_AS_NODE` it is probably a little more. It is
+node-pty's design for keeping conout reads off the main thread (a `ClosePseudoConsole` must never
+block on an undrained pipe), and we pin and patch exactly 1.1.0, so we do not remove it. It is now
+VISIBLE — it is inside the session-host line of the memory panel — and the lever on our side is
+session count (offscreen release, Eco, the reaper for detached sessions). Sharing one conout worker
+via `scripts/patch-node-pty.mjs` is worth doing only if a device shows ≥ ~8 MB per session: item P4.
 
 ## Honest limitations
 
@@ -955,6 +1002,23 @@ Written and unit-tested on Linux; nothing below has run on Windows yet.
     staged folder remains; after the host exits the folder can be deleted.
 11. **Two users / all-users install.** Each user stages their own copy; one user's host does not
     block another user's update.
+
+### Session-host overhead and Windows probes — device checklist
+
+P1. **Probe worker stdio.** With the worker warm, run 100 agent messages and an Eco cycle: every
+    probe answers, no `csc.exe`/`powershell.exe` sawtooth in Process Explorer, and
+    `FreeConsole`/`AttachConsole` inside the persistent process never breaks its own stdin/stdout.
+P2. **Probe latency.** Time a cold and a warm `paneCommand` and owner probe on PS 5.1. Target: warm
+    under ~300 ms, well inside the 2 s pane-probe budget; cold inside the 6 s first-request deadline.
+P3. **conhost parentage.** `Get-CimInstance Win32_Process` shows conhost.exe / OpenConsole.exe with
+    `ParentProcessId` = the session host's pid (so the panel's line counts it), for inbox ConPTY.
+P4. **Per-session host cost.** Session-host working set + private bytes at 0 / 10 / 30 idle `cmd`
+    sessions, and again with `useConptyDll`. Record the per-session delta here; patch a shared
+    conout worker only if the worker share is ≥ ~8 MB per session.
+P5. **Eco on Windows**, with pwsh and with cmd as the default shell: idle → `/exit` → SLEEPING →
+    wake → `claude --resume <id>` typed once; the session-memory panel shows the tree drop to the
+    shell alone. Repeat with a native `claude.exe` and an npm `claude.cmd`; a node with an MCP child
+    (`node` → `cmd /c` → `node`) is not misread as a shell; a `blocked` node is never exited.
 
 ### Earlier items
 

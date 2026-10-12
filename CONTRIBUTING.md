@@ -484,6 +484,12 @@ anything else. Board-level fields survive every transform — `pullLinks` is one
   on POSIX a backslash is legal filename text — do not treat both separators as interchangeable
   unless the owning filesystem is known to be Windows.
 
+- **No unix sockets and no symlink privilege on Windows.** A `ws+unix://` dial (the Codex
+  app-server) cannot work there — read the same fact from disk instead (managed Codex identity is
+  the `auth.json` JWT email, `codexAppServerReachable` is the gate). An untyped `fs.symlink` throws
+  EPERM on a stock account: link a shared asset through `linkSharedEntry`
+  (`src/core/shared-entry-link.ts` — junction for directories, hardlink then warned copy for files).
+
 - **Anything tmux does for us on POSIX, the session host owes on Windows.** The two delivery paths
   are not symmetric and the missing half fails in the direction that LOOKS like success: `sendText`
   rides `tmux paste-buffer -p` on POSIX, which frames the payload from the pane's real

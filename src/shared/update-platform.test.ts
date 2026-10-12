@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest'
 import fs from 'fs'
 import path from 'path'
 import {
+  MANUAL_UPDATE_MODE,
   isManualUpdatePlatform,
+  mayQuitAndInstall,
   noSelfInstallCopy,
   shouldEnableUpdater,
   toUpdateAvailablePayload,
@@ -53,15 +55,36 @@ describe('local dist scripts opt out of the production update feed', () => {
     fs.readFileSync(path.join(__dirname, '..', '..', 'package.json'), 'utf8')
   ) as { scripts: Record<string, string> }
   const MARKER = '-c.extraMetadata.nodeTermUpdates=disabled'
+  const MANUAL = `-c.extraMetadata.nodeTermUpdates=${MANUAL_UPDATE_MODE}`
+  // The one dist-named script that is a RELEASE package: the unsigned Windows beta, which checks
+  // the feed but never self-installs. Everything else under `dist*` is a local package.
+  const WIN_RELEASE = 'dist:win:release'
 
-  it('every dist script carries the marker — not just the one whose 404 was noticed', () => {
-    const dist = Object.keys(pkg.scripts).filter((s) => s === 'dist' || s.startsWith('dist:'))
-    expect(dist.length).toBeGreaterThanOrEqual(2) // dist, dist:linux
+  it('every local dist script carries the marker — not just the one whose 404 was noticed', () => {
+    const dist = Object.keys(pkg.scripts).filter(
+      (s) => (s === 'dist' || s.startsWith('dist:')) && s !== WIN_RELEASE
+    )
+    expect(dist.length).toBeGreaterThanOrEqual(3) // dist, dist:linux, dist:win
     expect(dist.filter((s) => !pkg.scripts[s].includes(MARKER))).toEqual([])
+  })
+
+  it('plain dist:win stays a local package that never polls', () => {
+    expect(pkg.scripts['dist:win']).toContain(MARKER)
+    expect(pkg.scripts['dist:win']).not.toContain(MANUAL)
+  })
+
+  it('the Windows release package is stamped manual — feed check, never self-install', () => {
+    const cmd = pkg.scripts[WIN_RELEASE]
+    expect(cmd).toContain(MANUAL)
+    expect(cmd).not.toContain(MARKER)
+    expect(cmd).toContain('--win')
+    // It still never publishes from the build step; release.yml uploads the assets itself.
+    expect(cmd).toContain('--publish never')
   })
 
   it('release does NOT carry it — a promoted build must keep updating itself', () => {
     expect(pkg.scripts.release).not.toContain(MARKER)
+    expect(pkg.scripts.release).not.toContain(MANUAL)
   })
 })
 
@@ -88,10 +111,10 @@ describe('toUpdateAvailablePayload', () => {
 
 
 /**
- * Issue #814: a Windows build carries `nodeTermUpdates=disabled` (no signed release job, no
- * `latest.yml`), so the updater never wires a feed — and the one thing that branch DID wire was a
- * manual check answering "up to date". These pin the three delivery paths apart, and pin that the
- * macOS and Linux release paths are untouched by the new one.
+ * Issue #814: a local package carries `nodeTermUpdates=disabled` (no feed), so the updater never
+ * wires a feed — and the one thing that branch DID wire was a manual check answering "up to date".
+ * These pin the delivery paths apart, and pin that the macOS and Linux release paths are untouched
+ * by the Windows `manual` marker.
  */
 describe('updateDelivery', () => {
   const pkgd = { isPackaged: true, updateMode: undefined as unknown, hasAppImage: false }
@@ -131,6 +154,24 @@ describe('updateDelivery', () => {
     }
   })
 
+  it('the manual marker is a feed check that never self-installs (the unsigned Windows beta)', () => {
+    expect(updateDelivery({ ...pkgd, updateMode: 'manual', platform: 'win32' })).toBe('manual-install')
+    expect(shouldEnableUpdater(true, 'manual')).toBe(true)
+  })
+
+  it('the manual marker wins over the platform — even where self-install would work', () => {
+    expect(updateDelivery({ ...pkgd, updateMode: 'manual', platform: 'darwin' })).toBe('manual-install')
+    expect(
+      updateDelivery({ ...pkgd, updateMode: 'manual', platform: 'linux', hasAppImage: true })
+    ).toBe('manual-install')
+  })
+
+  it('an unpackaged run with the manual marker is still dev', () => {
+    expect(
+      updateDelivery({ isPackaged: false, updateMode: 'manual', platform: 'win32', hasAppImage: false })
+    ).toBe('dev')
+  })
+
   it('stays composed from the two primitives — no second definition to drift', () => {
     for (const platform of ['win32', 'darwin', 'linux']) {
       for (const hasAppImage of [false, true]) {
@@ -143,6 +184,20 @@ describe('updateDelivery', () => {
         }
       }
     }
+  })
+})
+
+describe('mayQuitAndInstall', () => {
+  it('only a self-installing build (or dev, unchanged) may reach quitAndInstall', () => {
+    expect(mayQuitAndInstall('self-install')).toBe(true)
+    expect(mayQuitAndInstall('dev')).toBe(true)
+    expect(mayQuitAndInstall('manual-install')).toBe(false)
+    expect(mayQuitAndInstall('no-channel')).toBe(false)
+  })
+
+  it('the unsigned Windows beta can never install from the feed', () => {
+    const d = updateDelivery({ isPackaged: true, updateMode: 'manual', platform: 'win32', hasAppImage: false })
+    expect(mayQuitAndInstall(d)).toBe(false)
   })
 })
 

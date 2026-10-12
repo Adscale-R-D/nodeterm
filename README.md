@@ -216,7 +216,7 @@ detects your platform. Everything is also listed at
 - **Windows (x64) — beta** — `nodeterm-Setup-<version>.exe` (per-user installer) or a
   portable `-win.zip`. Early support, so know what you are getting: the installer is
   **unsigned** (SmartScreen will ask — *More info → Run anyway*), **updates are manual**
-  for now (grab the next build from the same page), and **session continuity across
+  for now (the app tells you when a new version is out and links the download), and **session continuity across
   restarts is still landing** — Windows has no tmux, so the standalone session host that
   replaces it is being packaged in [#579](https://github.com/eneskirca/nodeterm/pull/579).
   Everything else — canvas, agents, kanban, hooks — is the same app. Please

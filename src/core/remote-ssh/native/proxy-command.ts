@@ -64,15 +64,38 @@ export function expandProxyTokens(cmd: string, t: ProxyTokens): string {
   })
 }
 
+/** Drive letters, as constants: the environment may SELECT one, never supply the string. */
+const DRIVE_LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('')
+
+/**
+ * The Windows command processor that runs a ProxyCommand: `<drive>:\Windows\System32\cmd.exe`.
+ *
+ * NOT `%ComSpec%`. The shell is the one thing in the line nodeterm chooses (the command is the
+ * user's own ssh_config), and an inherited environment variable is not a trusted place to choose an
+ * executable from — whoever can set `ComSpec` for the app would pick the program every proxied
+ * connection runs (CodeQL js/indirect-command-line-injection). Only the system DRIVE is taken from
+ * `SystemRoot`/`WINDIR`, and only when that value is exactly `<letter>:\Windows` (every supported
+ * Windows install); it selects a letter from a constant table, so no environment text reaches the
+ * path. Anything else falls back to `C:`. POSIX is untouched: `/bin/sh` was always a fixed path.
+ */
+export function windowsCmdExePath(env: NodeJS.ProcessEnv = process.env): string {
+  const root = env.SystemRoot || env.WINDIR || ''
+  const m = /^([A-Za-z]):\\Windows\\?$/i.exec(root)
+  const letter = m ? m[1].toUpperCase() : 'C'
+  const drive = DRIVE_LETTERS.find((d) => d === letter) ?? 'C'
+  return `${drive}:\\Windows\\System32\\cmd.exe`
+}
+
 /** argv for a ProxyCommand on this platform: POSIX `sh -c 'exec …'` (OpenSSH's own form);
- *  Windows `cmd.exe /d /s /c "…"`, which is how a command line is run there without a POSIX shell. */
+ *  Windows `cmd.exe /d /s /c "…"`, which is how a command line is run there without a POSIX shell.
+ *  Both interpreters are fixed absolute paths (see `windowsCmdExePath`). */
 export function proxyCommandArgv(
   cmd: string,
   platform: NodeJS.Platform = process.platform,
   env: NodeJS.ProcessEnv = process.env
 ): { file: string; args: string[]; verbatim: boolean } {
   if (platform === 'win32') {
-    return { file: env.ComSpec || env.COMSPEC || 'cmd.exe', args: ['/d', '/s', '/c', `"${cmd}"`], verbatim: true }
+    return { file: windowsCmdExePath(env), args: ['/d', '/s', '/c', `"${cmd}"`], verbatim: true }
   }
   return { file: '/bin/sh', args: ['-c', `exec ${cmd}`], verbatim: false }
 }

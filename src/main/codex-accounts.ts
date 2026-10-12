@@ -37,6 +37,7 @@ import {
 import { readCodexAccountAt, readCodexThreadAt } from '../core/codex-session-name'
 import { directExecutableInvocation } from '../core/exec-path'
 import { linkSharedEntry } from '../core/shared-entry-link'
+import { readRegularFileNoFollow } from '../core/read-regular-file'
 import { ensureCodexRelayRoot } from './codex-relay-daemon'
 import { platform } from '../core/platform'
 import { findInLoginPath } from '../core/pty-manager'
@@ -174,13 +175,11 @@ async function accountIdentity(accountId?: string): Promise<{ email: string | nu
 async function authFileIdentity(accountId?: string): Promise<{ email: string | null } | null> {
   const home = accountId ? localCodexAccountHome(accountId) : systemCodexHome()
   const file = path.join(home, 'auth.json')
-  try {
-    const auth = await fs.lstat(file)
-    if (!auth.isFile() || auth.isSymbolicLink()) return null
-    return { email: readCodexAuthEmail(await fs.readFile(file, 'utf8')) }
-  } catch {
-    return null
-  }
+  // The gate and the read share ONE descriptor (no lstat-then-read on the name — a swap in between
+  // could hand the read a symlink the gate never saw): a link, FIFO, directory or absent file is null.
+  const text = await readRegularFileNoFollow(file)
+  if (text === null) return null
+  return { email: readCodexAuthEmail(text) }
 }
 
 /**

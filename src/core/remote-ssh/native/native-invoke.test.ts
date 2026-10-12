@@ -355,10 +355,12 @@ describe('download() — a remote tree onto a Windows filesystem', () => {
   const files = (root: string): Record<string, string> => {
     const out: Record<string, string> = {}
     const walk = (d: string, rel: string): void => {
-      for (const n of fs.readdirSync(d)) {
-        const full = path.join(d, n)
-        if (fs.statSync(full).isDirectory()) walk(full, `${rel}${n}/`)
-        else out[`${rel}${n}`] = fs.readFileSync(full, 'utf8')
+      // The entry's type comes from the listing itself (no stat-then-read on the path — CodeQL
+      // js/file-system-race), which is also what a test over a temp tree needs.
+      for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+        const full = path.join(d, e.name)
+        if (e.isDirectory()) walk(full, `${rel}${e.name}/`)
+        else out[`${rel}${e.name}`] = fs.readFileSync(full, 'utf8')
       }
     }
     walk(root, '')

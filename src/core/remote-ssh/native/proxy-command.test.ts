@@ -79,7 +79,20 @@ const nodeSpawn = (script: string, seen?: { file: string; args: string[] }[]): P
 
 describe('proxyCommandSocket', () => {
   it('speaks over the proxy\'s stdio (a node stdio↔TCP pipe), both ways', async () => {
-    const echo = net.createServer((s) => s.pipe(s))
+    // The echo server's accepted socket is the peer of the proxy child's TCP connection. Tearing
+    // the stream down KILLS that child, and on Windows the killed peer reads as `read ECONNRESET`
+    // on this socket — an async 'error' event that, unlisted, was an uncaught exception failing the
+    // whole run (reported against whichever test ran next). Every server-side socket and the server
+    // itself get a listener; a peer reset/broken pipe is the expected teardown, anything else fails.
+    const conns = new Set<net.Socket>()
+    const peerErrors: NodeJS.ErrnoException[] = []
+    const echo = net.createServer((s) => {
+      conns.add(s)
+      s.on('error', (e: NodeJS.ErrnoException) => peerErrors.push(e))
+      s.on('close', () => conns.delete(s))
+      s.pipe(s)
+    })
+    echo.on('error', (e: NodeJS.ErrnoException) => peerErrors.push(e))
     await new Promise<void>((r) => echo.listen(0, '127.0.0.1', () => r()))
     const port = (echo.address() as AddressInfo).port
     const pipe = `const s=require('net').connect(${port},'127.0.0.1');process.stdin.pipe(s).pipe(process.stdout)`
@@ -95,8 +108,12 @@ describe('proxyCommandSocket', () => {
       expect(seen[0]).toEqual({ file: '/bin/sh', args: ['-c', 'exec ignored %h'] })
     } finally {
       sock.destroy()
-      echo.close()
+      // Close the server and every accepted socket, and WAIT for it: nothing from this test may
+      // still be open (and able to reset) while the next one runs.
+      for (const c of conns) c.destroy()
+      await new Promise<void>((r) => echo.close(() => r()))
     }
+    expect(peerErrors.filter((e) => e.code !== 'ECONNRESET' && e.code !== 'EPIPE')).toEqual([])
   })
 
   it('an early exit is an error carrying the proxy\'s stderr', async () => {

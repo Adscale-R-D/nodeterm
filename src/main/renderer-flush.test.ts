@@ -63,3 +63,16 @@ describe('requestRendererFlush', () => {
     expect(new Set(sentIds).size).toBe(2)
   })
 })
+
+describe('before-quit wiring (source guard)', () => {
+  it('re-runs the SSH mirror flush AFTER the renderer flush answered', async () => {
+    const { readFileSync } = await import('fs')
+    const { join } = await import('path')
+    const src = readFileSync(join(__dirname, 'index.ts'), 'utf-8')
+    // The renderer's save may queue a throttled mirror write after the parallel remote flush took
+    // its snapshot; without the chained flush that write dies with the ControlMasters.
+    expect(src).toMatch(
+      /requestRendererFlush\(getMainWindow\(\)\?\.webContents, ipcMain\)\.then\(\(\) => remoteWorkspaceIO\.flush\(\)\)/
+    )
+  })
+})

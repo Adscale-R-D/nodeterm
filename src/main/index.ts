@@ -5370,8 +5370,10 @@ app.on('before-quit', (e) => {
   // The renderer's debounced canvas save rides the same race (src/main/renderer-flush.ts, capped
   // at 1 s and never throwing): ⌘Q / tray Quit used to drop the last ~800 ms of canvas edits. A
   // restart-to-update flushes earlier, in the updater — on macOS its windows are gone by now.
+  // The renderer's save can itself queue a throttled SSH mirror write AFTER the first remote
+  // flush took its snapshot, so the remote flush runs again once the renderer answered.
   const flush = Promise.allSettled([
-    requestRendererFlush(getMainWindow()?.webContents, ipcMain),
+    requestRendererFlush(getMainWindow()?.webContents, ipcMain).then(() => remoteWorkspaceIO.flush()),
     remoteWorkspaceIO.flush(),
     ptyManager.killAll(),
     watchLinksStopped

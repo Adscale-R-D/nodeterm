@@ -862,6 +862,11 @@ const api: NodeTerminalApi = {
     ipcRenderer.on(IPC.appMemoryPressure, handler)
     return () => ipcRenderer.removeListener(IPC.appMemoryPressure, handler)
   },
+  onWindowVisibility: (listener) => {
+    const handler = (_e: unknown, state: 'hidden' | 'shown') => listener(state)
+    ipcRenderer.on(IPC.appWindowVisibility, handler)
+    return () => ipcRenderer.removeListener(IPC.appWindowVisibility, handler)
+  },
   onPtyPressure: (listener) => {
     const handler = (_e: unknown, reading: PtyPressure) => listener(reading)
     ipcRenderer.on(IPC.ptyPressure, handler)

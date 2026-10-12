@@ -185,6 +185,7 @@ import {
 import { answerHeldPermission, isStructuredTicket, type HeldPermissionIo } from '../core/agents/permission-decision'
 import type { AnswerPermissionPayload } from '../shared/agents/permission-answer'
 import { setMainWindow, getMainWindow, sendToMain, closeAction, createCrashReloadPolicy } from './main-window'
+import { WINDOW_VISIBILITY_EVENTS, windowVisibilitySignal } from './window-visibility'
 import {
   MENU_ITEM_ID_CLOSE,
   MENU_ITEM_ID_KANBAN,
@@ -1358,6 +1359,20 @@ function createWindow(): BrowserWindow {
   // The main window is a regular app window; establishing its Dock presence explicitly means the
   // later focusable:false Notch HUD panel can never leave the app looking like an accessory.
   win.on('show', () => assertRegularDockPresence())
+  // Tell the renderer when the window is put away / brought back, so a tray-hidden (Windows
+  // default), hide-on-close (macOS) or minimized window lets its terminals count as offscreen and
+  // the existing reclaim levers give memory back (renderer/terminal/window-backgrounded.ts). Every
+  // platform; the mapping is the pure main/window-visibility.ts.
+  let windowHiddenByApp = false
+  // `hiddenByApp` is set right before the close branch's own `win.hide()`: on macOS Electron also
+  // emits `hide` for a window that is merely OCCLUDED (or ⌘H-hidden), and that must not count.
+  for (const ev of WINDOW_VISIBILITY_EVENTS) {
+    win.on(ev as 'hide', () => {
+      const signal = windowVisibilitySignal(ev, { hiddenByApp: windowHiddenByApp })
+      if (ev === 'show' || ev === 'restore') windowHiddenByApp = false
+      if (signal && !win.isDestroyed()) win.webContents.send(IPC.appWindowVisibility, signal)
+    })
+  }
   // Windows: the taskbar flash raised by an unread rise (appSetBadge) ends when the user comes back.
   if (process.platform === 'win32') win.on('focus', () => win.flashFrame(false))
 
@@ -1374,6 +1389,7 @@ function createWindow(): BrowserWindow {
     const action = closeAction(process.platform, quitting, win.isFullScreen(), backgroundOnCloseActive())
     if (action === 'hide') {
       e.preventDefault()
+      windowHiddenByApp = true
       win.hide()
       // Off macOS this is a background-mode hide (nothing is quitting, so no confirm gate either).
       if (process.platform !== 'darwin') noteBackgroundHide()
@@ -1385,7 +1401,10 @@ function createWindow(): BrowserWindow {
         leavingFullScreen = true
         win.once('leave-full-screen', () => {
           leavingFullScreen = false
-          if (!win.isDestroyed() && !quitting) win.hide()
+          if (!win.isDestroyed() && !quitting) {
+            windowHiddenByApp = true
+            win.hide()
+          }
         })
         win.setFullScreen(false)
       }

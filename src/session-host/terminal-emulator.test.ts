@@ -89,3 +89,35 @@ describe('captureVisible tail', () => {
     expect(cap.cursor).toEqual({ x: 0, y: 0 })
   })
 })
+
+describe('TerminalEmulator scrollback cap (Windows session-host memory bound)', () => {
+  function lines(from: number, to: number): string {
+    let data = ''
+    for (let i = from; i < to; i++) data += `line ${i}\r\n`
+    return data
+  }
+
+  it('caps a raw 50,000-line request at the renderer cap, so history stays bounded', async () => {
+    const rows = 4
+    const e = new TerminalEmulator({ cols: 20, rows, scrollback: 50000 })
+    emulators.push(e)
+    const term = (e as unknown as { term: { options: { scrollback: number }; buffer: { normal: { length: number } } } }).term
+    expect(term.options.scrollback).toBe(10000)
+
+    await e.write(lines(0, 20000))
+    expect(term.buffer.normal.length).toBeLessThanOrEqual(10000 + rows)
+
+    // The warm-attach replay is bounded by the same cap: the oldest lines are gone.
+    const screen = e.serialize()
+    expect(screen.split('\r\n').length).toBeLessThanOrEqual(10000 + rows)
+    const rowsText = text(screen).split('\r\n')
+    expect(rowsText).not.toContain('line 0')
+    expect(rowsText).toContain('line 19999')
+  })
+
+  it('keeps a request below the cap as asked', () => {
+    const e = new TerminalEmulator({ cols: 20, rows: 4, scrollback: 3000 })
+    emulators.push(e)
+    expect((e as unknown as { term: { options: { scrollback: number } } }).term.options.scrollback).toBe(3000)
+  })
+})

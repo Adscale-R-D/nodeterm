@@ -65,7 +65,9 @@ export type SessionHostRequest =
       name: string
       spawn: SessionHostSpawnOptions
       /** Cap on both the emulator's live scrollback buffer and how much `capture`'s `full: true`
-       *  returns — mirrors `settings.tmuxScrollback` / tmux's own `history-limit`. */
+       *  returns. Clients send `xtermScrollback(settings.tmuxScrollback)` (≤ 10k — the renderer's
+       *  own cap, NOT tmux's history-limit); the host clamps again (`clampEmulatorScrollback`) so
+       *  an older client's raw 50,000 cannot allocate history nobody can scroll to. */
       scrollback: number
       /** Capability established by a confirmed kill. Required to cold-create that reserved name;
        * other authenticated app clients cannot steal the replacement window. */

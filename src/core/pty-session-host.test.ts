@@ -241,6 +241,29 @@ describe('PtyManager session-host contracts', () => {
     expect(spawn.args).toEqual([])
   })
 
+  it('caps the session-host emulator at the renderer scrollback cap, not tmux history-limit', async () => {
+    const { PtyManager } = await import('./pty-manager')
+    for (const [tmuxScrollback, expected] of [
+      [50000, 10000],
+      [2000, 2000],
+      [500, 1000]
+    ] as const) {
+      backend.create.mockClear()
+      const m = new PtyManager({ runtimePlatform: 'win32' })
+      ;(m as unknown as { getSettings: () => unknown }).getSettings = () => ({
+        ...DEFAULT_SETTINGS,
+        tmuxScrollback
+      })
+      m.createDetached(
+        { cols: 80, rows: 24, persistKey: `node-sb-${tmuxScrollback}` },
+        { onData: () => {}, onExit: () => {} }
+      )
+      expect(backend.create).toHaveBeenCalledTimes(1)
+      expect(backend.create.mock.calls[0][2]).toBe(expected)
+      await m.killAll()
+    }
+  })
+
   it('sends no launch dialect from a POSIX core, so its spawn request is unchanged', async () => {
     const { PtyManager } = await import('./pty-manager')
     for (const runtimePlatform of ['darwin', 'linux'] as const) {

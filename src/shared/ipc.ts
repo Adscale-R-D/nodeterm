@@ -348,6 +348,8 @@ export const IPC = {
   appUpdatePrepQuit: 'app:update-prep-quit',
   /** main → renderer: restart-to-update was accepted; `{phase:'preparing'|'restarting', version}`. */
   appUpdateInstalling: 'app:update-installing',
+  /** renderer → main (invoke): the update already staged this run, `{version, notes}` or null. */
+  appGetStagedUpdate: 'app:get-staged-update',
   /** main → renderer: write any pending canvas edits now (payload: request id). Quit / restart. */
   appFlushRequest: 'app:flush-request',
   /** renderer → main: the flush for that request id settled. */

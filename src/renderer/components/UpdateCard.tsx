@@ -64,7 +64,20 @@ export function UpdateCard(): JSX.Element | null {
       u.onError((message) => dispatch({ type: 'error', message })),
       u.onInstalling((s) => dispatch({ type: 'installing', phase: s.phase, version: s.version }))
     ]
-    return () => offs.forEach((off) => off())
+    // Already staged before this renderer loaded (⌘R, a recreated window): main announced it once
+    // and will not repeat it, so ask. A repeat of what the card shows is a no-op in the reducer.
+    let live = true
+    Promise.resolve()
+      .then(() => u.getStaged?.())
+      .then((s) => {
+        if (live && s && typeof s.version === 'string')
+          dispatch({ type: 'downloaded', version: s.version, notes: s.notes || undefined })
+      })
+      .catch(() => {})
+    return () => {
+      live = false
+      offs.forEach((off) => off())
+    }
   }, [])
 
   // "You're up to date" is a toast, not a card that stays.

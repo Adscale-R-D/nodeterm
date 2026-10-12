@@ -520,6 +520,7 @@ const api: NodeTerminalApi = {
     check: () => ipcRenderer.send(IPC.appCheckForUpdates),
     getVersion: () => ipcRenderer.invoke(IPC.appGetVersion),
     getPolicy: () => ipcRenderer.invoke(IPC.appUpdatePolicy),
+    getStaged: () => ipcRenderer.invoke(IPC.appGetStagedUpdate),
     restart: () => ipcRenderer.send(IPC.appRestartToUpdate),
     prepareInspect: () => ipcRenderer.invoke(IPC.appUpdatePrepInspect),
     prepareShutdownHost: () => ipcRenderer.invoke(IPC.appUpdatePrepShutdown),

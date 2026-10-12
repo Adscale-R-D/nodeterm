@@ -9434,6 +9434,10 @@ Rules a refactor must not undo (pure + tested: `shared/update-gate.ts`, `rendere
   through Squirrel). The gate forwards and notifies **once per version**; once staged, `autoDownload`
   goes off and only a strictly newer release is downloaded (`downloadUpdate()` on purpose). The card
   never downgrades `downloaded`/`required`, never un-minimizes on a repeat, respects a dismissed version.
+  Two consequences that must stay paired with that: a renderer loading after the one-time
+  announcement (⌘R, a recreated window) asks `updates.getStaged()` on mount, and a **failed
+  Squirrel.Mac staging run is re-staged** on the next check (or a Restart click — once per click,
+  never in a loop from the error itself), because with `autoDownload` off nothing else would.
 - **macOS `update-downloaded` fires BEFORE Squirrel.Mac has the update** (MacUpdater dispatches, then
   asks the native updater to fetch + verify the zip). Until Electron's own `autoUpdater` emits
   `update-downloaded`, `quitAndInstall()` only queues a listener. So a click there sends

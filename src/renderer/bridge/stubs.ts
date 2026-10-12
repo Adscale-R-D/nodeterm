@@ -248,6 +248,8 @@ export function buildStubApi(): Omit<
       onNoChannel: noopUnsub,
       // No self-install in a browser, so there is never an install in progress to report.
       onInstalling: noopUnsub,
+      // Nothing is ever staged in a browser.
+      getStaged: () => Promise.resolve(null),
       check: noop,
       getVersion: U('updates.getVersion'),
       // Boot path awaits this and reads `p.mandatory` UNGUARDED (UpdateCard.tsx), so the old

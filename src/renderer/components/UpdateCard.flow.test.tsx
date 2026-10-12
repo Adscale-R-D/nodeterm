@@ -23,6 +23,7 @@ let container: HTMLDivElement
 let root: ReturnType<typeof createRoot>
 let policies: Array<UpdatePolicy | Error>
 let version: string
+let staged: { version: string; notes: string } | null
 const restart = vi.fn()
 const check = vi.fn()
 
@@ -42,6 +43,7 @@ beforeEach(() => {
   check.mockClear()
   policies = []
   version = '0.5.0'
+  staged = null
   usePendingUpdate.setState({ pending: null })
   try {
     window.localStorage.clear()
@@ -58,6 +60,7 @@ beforeEach(() => {
       onNoChannel: sub('noChannel'),
       onInstalling: sub('installing'),
       getVersion: () => Promise.resolve(version),
+      getStaged: () => Promise.resolve(staged),
       getPolicy: vi.fn(() => {
         const next = policies.shift() ?? { minSupported: null, mandatory: false }
         return next instanceof Error ? Promise.reject(next) : Promise.resolve(next)
@@ -225,5 +228,22 @@ describe('updated to vX', () => {
     await flush()
     expect(text()).toBe('')
     expect(window.localStorage.getItem(LAST_SEEN_VERSION_KEY)).toBe('0.5.0')
+  })
+})
+
+describe('a renderer that loads after the one-time announcement', () => {
+  it('asks main for the staged update and shows the ready card (⌘R / recreated window)', async () => {
+    staged = { version: '0.6.0', notes: '- Faster restarts' }
+    mount()
+    await flush()
+    expect(text()).toContain('Update ready')
+    expect(text()).toContain('Faster restarts')
+    expect(usePendingUpdate.getState().pending).toEqual({ kind: 'downloaded', version: '0.6.0' })
+  })
+
+  it('nothing staged: stays silent', async () => {
+    mount()
+    await flush()
+    expect(text()).toBe('')
   })
 })

@@ -2895,6 +2895,11 @@ export interface UpdateApi {
   onNoChannel(listener: () => void): () => void
   /** Restart-to-update was accepted and is preparing / restarting. Returns unsubscribe. */
   onInstalling(listener: (s: UpdateInstalling) => void): () => void
+  /**
+   * The update main already staged this run (announced once), or null. A renderer that loads after
+   * that one-time `onDownloaded` — ⌘R, a window recreated after a crash — asks on mount.
+   */
+  getStaged(): Promise<{ version: string; notes: string } | null>
   /** Trigger a manual update check. */
   check(): void
   /** The running app version. */

@@ -12,7 +12,7 @@ import { readFile, readdir as fsReaddir, realpath as fsRealpath, lstat as fsLsta
 import { existsSync, statSync, openSync, fstatSync, readFileSync, closeSync } from 'fs'
 import { homedir, hostname } from 'os'
 import { randomUUID } from 'crypto'
-import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, Notification, powerMonitor, safeStorage, screen, shell, systemPreferences, webContents } from 'electron'
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, Notification, powerMonitor, safeStorage, screen, shell, systemPreferences, webContents } from 'electron'
 import { IPC } from '../shared/ipc'
 
 // Debug log ring (issue #78): capture the process console from the first line — a packaged app
@@ -263,6 +263,17 @@ import { PUSH_WEBHOOK_DEFAULT_API_BASE } from '../shared/push-webhook'
 import { initRemoteStatusPush } from './remote-ssh/remote-status-push'
 import { initCanvasSync } from '../core/canvas-sync'
 import { retainUntilDismissed } from './notifications'
+import { appUserModelIdFor, notificationSettingsTarget } from './app-identity'
+import {
+  resolveBackgroundOnClose,
+  shouldShowBackgroundHint,
+  BACKGROUND_HINT,
+  BACKGROUND_HINT_MARKER,
+  claimOnceMarker
+} from './background-mode'
+import { createBackgroundTray, type BackgroundTray } from './tray'
+import { normalizeUnread, trayIconPath, type TrayState } from './tray-model'
+import { planBadge, rasterizeBadge } from './taskbar-badge'
 import { createSubagentTail } from '../core/subagent-tail'
 import { ClaudeSubagentLifecycle } from '../core/claude-subagent-lifecycle'
 import { claudeSubagentTranscriptPath, isClaudeAgentId } from '../shared/agents/claude-subagents'
@@ -791,14 +802,91 @@ function confirmQuit(parentWin: BrowserWindow | null): Promise<boolean> {
     message: 'Quit nodeterm?',
     detail: 'Terminal sessions keep running in the background and will still be here next time you open nodeterm.'
   }
-  const p =
-    parentWin && !parentWin.isDestroyed() ? dialog.showMessageBox(parentWin, opts) : dialog.showMessageBox(opts)
+  // Off macOS a background-mode window may be HIDDEN (tray Quit): a dialog parented to it would be
+  // modal to an invisible window, so it is shown unparented there. macOS keeps its sheet as before.
+  const parentUsable =
+    !!parentWin && !parentWin.isDestroyed() && (process.platform === 'darwin' || parentWin.isVisible())
+  const p = parentUsable && parentWin ? dialog.showMessageBox(parentWin, opts) : dialog.showMessageBox(opts)
   return p.then(({ response }) => {
     quitConfirmationPending = false
     const confirmed = response === 1
     if (confirmed) quitConfirmed = true
     return confirmed
   })
+}
+
+// Windows/Linux background mode (src/main/background-mode.ts): with it on, closing the window hides
+// it to a notification-area tray instead of quitting, so the phone relay host, hook server,
+// notifications and updater keep running — what the Dock does for macOS. The tray exists exactly
+// while the mode resolves on (`syncBackgroundTray`, on boot + every settings change) and is torn
+// down in before-quit. Its state is fed from facts main already holds — the unread count the
+// renderer sends for the badge, and the phone-access setting — never from the hook-event stream.
+let backgroundTray: BackgroundTray | undefined
+const trayState: TrayState = { unread: 0, phoneAccess: false }
+
+/** Hide-on-close is in force off macOS only while the tray actually exists: a tray that failed to
+ *  construct must not turn the window's × into a hide with no way back. */
+function backgroundOnCloseActive(): boolean {
+  return process.platform !== 'darwin' && !!backgroundTray
+}
+
+function showMainWindowFromBackground(): void {
+  const w = getMainWindow()
+  if (w) {
+    if (w.isMinimized()) w.restore()
+    w.show()
+    w.focus()
+  } else if (BrowserWindow.getAllWindows().length === 0) {
+    createWindow()
+  }
+}
+
+function syncBackgroundTray(): void {
+  const s = settingsStore.get()
+  trayState.phoneAccess = !!s.phoneAccessEnabled
+  const want = !quitting && resolveBackgroundOnClose(s.runInBackgroundOnClose, process.platform)
+  if (!want) {
+    backgroundTray?.destroy()
+    backgroundTray = undefined
+    return
+  }
+  if (backgroundTray) {
+    backgroundTray.update({ ...trayState })
+    return
+  }
+  try {
+    backgroundTray = createBackgroundTray({
+      iconPath: trayIconPath({
+        isPackaged: app.isPackaged,
+        resourcesPath: process.resourcesPath,
+        devBuildDir: join(__dirname, '../../build'),
+        join
+      }),
+      initial: { ...trayState },
+      // Quit is the ordinary app.quit(): before-quit (and its confirm dialog) runs exactly as for
+      // Ctrl+Q. `quitting` is NOT set here — a cancelled confirm must leave the × hiding again.
+      onAction: (action) => (action === 'open' ? showMainWindowFromBackground() : app.quit())
+    })
+  } catch (e) {
+    console.warn('[tray] could not create the notification-area icon; window close will quit', e)
+    backgroundTray = undefined
+  }
+}
+
+/** The window was just hidden into the tray: tell the user once per install that the app is still
+ *  running (on Windows a vanished window otherwise reads as "it quit"). */
+function noteBackgroundHide(): void {
+  // Policy first (platform + background mode), then claim the marker with ONE exclusive create —
+  // no exists-check followed by a separate write (see claimOnceMarker).
+  if (!shouldShowBackgroundHint({ platform: process.platform, backgroundOnClose: backgroundOnCloseActive(), alreadyShown: false })) return
+  const claim = claimOnceMarker(join(app.getPath('userData'), BACKGROUND_HINT_MARKER), new Date().toISOString())
+  if (claim === 'already') return
+  if (claim === 'failed') console.warn('[tray] could not record the background hint marker')
+  if (!Notification.isSupported()) return
+  const n = new Notification({ title: BACKGROUND_HINT.title, body: BACKGROUND_HINT.body })
+  n.on('click', showMainWindowFromBackground)
+  retainUntilDismissed(n)
+  n.show()
 }
 
 // Keep-awake tracker (created in whenReady next to the notch HUD, disposed in before-quit).
@@ -816,6 +904,14 @@ const browserGuests = new Map<number, BrowserGuest>()
 // since the grok branch in the raw listener, grok's).
 const nodeContextSession = new Map<string, string>()
 const nodeSubagents = new Map<string, Set<string>>() // nodeId → active subagent tool_use_ids
+
+// Windows toast identity, BEFORE any Notification and before ready (src/main/app-identity.ts):
+// without it Electron's generated `electron.app.<name>` id matches no Start-menu shortcut and
+// toasts are dropped or mis-attributed — silently. Null (no call) on macOS/Linux.
+{
+  const aumid = appUserModelIdFor({ platform: process.platform, isPackaged: app.isPackaged, execPath: process.execPath })
+  if (aumid) app.setAppUserModelId(aumid)
+}
 
 // Enforce a single instance. A second instance would re-attach every node's tmux session
 // (`new-session -A -D`), whose `-D` detaches the first instance's clients — leaving
@@ -1262,6 +1358,8 @@ function createWindow(): BrowserWindow {
   // The main window is a regular app window; establishing its Dock presence explicitly means the
   // later focusable:false Notch HUD panel can never leave the app looking like an accessory.
   win.on('show', () => assertRegularDockPresence())
+  // Windows: the taskbar flash raised by an unread rise (appSetBadge) ends when the user comes back.
+  if (process.platform === 'win32') win.on('focus', () => win.flashFrame(false))
 
   // macOS: closing the window hides it instead of destroying it. The app deliberately
   // outlives its window (tmux sessions, hook server, updater); destroying the window
@@ -1273,10 +1371,12 @@ function createWindow(): BrowserWindow {
   // keeps a second ⌘W during the transition from stacking another listener.
   let leavingFullScreen = false
   win.on('close', (e) => {
-    const action = closeAction(process.platform, quitting, win.isFullScreen())
+    const action = closeAction(process.platform, quitting, win.isFullScreen(), backgroundOnCloseActive())
     if (action === 'hide') {
       e.preventDefault()
       win.hide()
+      // Off macOS this is a background-mode hide (nothing is quitting, so no confirm gate either).
+      if (process.platform !== 'darwin') noteBackgroundHide()
       return
     }
     if (action === 'leave-fullscreen-then-hide') {
@@ -1744,10 +1844,29 @@ app.whenReady().then(async () => {
     })
   )
 
-  // Dock badge: number of Claude nodes with unread output (macOS only). '' clears it.
+  // Unread badge: number of agent nodes with unread output. macOS → the Dock badge ('' clears);
+  // Windows → a taskbar overlay icon + a flash when the count rises in the background; Linux →
+  // nothing. The decision is the pure `planBadge` (taskbar-badge.ts). The same count feeds the
+  // background-mode tray's tooltip/menu (de-duplicated there, so a resend rebuilds nothing).
+  let lastBadgeCount: number | null = null // null until the first report: that one is a baseline
   ipcMain.on(IPC.appSetBadge, (_e, count: number) => {
-    if (process.platform !== 'darwin' || !app.dock) return
-    app.dock.setBadge(count > 0 ? String(count) : '')
+    const n = normalizeUnread(count)
+    const win = getMainWindow() as unknown as BrowserWindow | null
+    const plan = planBadge(process.platform, n, lastBadgeCount, !!win?.isFocused())
+    lastBadgeCount = n
+    trayState.unread = n
+    backgroundTray?.update({ ...trayState })
+    if (plan.dock !== undefined && app.dock) app.dock.setBadge(plan.dock)
+    if (plan.overlay !== undefined && win && !win.isDestroyed()) {
+      if (plan.overlay === null) {
+        win.setOverlayIcon(null, '')
+      } else {
+        const img = nativeImage.createFromBitmap(rasterizeBadge(plan.overlay.label, 16), { width: 16, height: 16 })
+        img.addRepresentation({ scaleFactor: 2, width: 32, height: 32, buffer: rasterizeBadge(plan.overlay.label, 32) })
+        win.setOverlayIcon(img, plan.overlay.description)
+      }
+    }
+    if (plan.flash && win && !win.isDestroyed()) win.flashFrame(true)
   })
 
   // Show an OS notification — but only when the window is in the background. Clicking it
@@ -1799,8 +1918,8 @@ app.whenReady().then(async () => {
   // main-side constant — deliberately NOT routed through shellOpenExternal's
   // http(s)-only allowlist, which must stay closed to renderer-supplied strings.
   ipcMain.handle(IPC.appOpenNotificationSettings, () => {
-    if (process.platform !== 'darwin') return
-    void shell.openExternal('x-apple.systempreferences:com.apple.Notifications-Settings.extension')
+    const target = notificationSettingsTarget(process.platform)
+    if (target) void shell.openExternal(target)
   })
 
   ipcMain.handle(IPC.announcementsFetch, async () => (await fetchCheck()).messages)
@@ -2226,6 +2345,10 @@ app.whenReady().then(async () => {
     return undefined
   })
   const win = createWindow()
+  // Windows/Linux background-mode tray — created now if the mode resolves on, and re-synced on
+  // every settings change (the Behavior toggle, and the phone-access row it shows).
+  syncBackgroundTray()
+  settingsStore.onChange(() => syncBackgroundTray())
   if (hookStartupWarning) {
     console.error('[agent-hooks]', hookStartupWarning)
     void dialog.showMessageBox(win, { type: 'warning', title: 'Agent hooks unavailable', message: hookStartupWarning })
@@ -5132,6 +5255,9 @@ app.whenReady().then(async () => {
 app.on('window-all-closed', () => {
   // On macOS the app stays alive, so the async final snapshots inside killAll can complete
   // in the background; on other platforms quitting goes through before-quit below.
+  // Background mode (Windows/Linux) hides rather than closes, so reaching here with it on means
+  // the window was destroyed some other way — the tray stays, and its Open recreates the window.
+  if (process.platform !== 'darwin' && !quitting && backgroundOnCloseActive()) return
   if (process.platform !== 'darwin') {
     app.quit()
   } else {
@@ -5164,6 +5290,8 @@ app.on('before-quit', (e) => {
   }
   quitting = true // from here on, window close-events must NOT be turned into hide
   destroyNotchHud()
+  backgroundTray?.destroy()
+  backgroundTray = undefined
   // Electron releases power assertions at exit anyway; disposing keeps the hold/release log
   // honest. Clearing the ref too keeps a hook edge that lands during the quit flush (the pty
   // teardown window below) from re-holding an assertion nothing will ever release.

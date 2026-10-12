@@ -737,6 +737,18 @@ Lifecycle, by intent:
   `'off'` drops GPU rendering entirely.
 - **Window close / app quit** → clients detach (`PtyManager.killAll()`); the tmux session keeps
   running. `killAll()` deliberately does NOT kill sessions.
+- **Window close off macOS = background mode** (`settings.runInBackgroundOnClose`, `'auto'` = on for
+  Windows, off for Linux; `resolveBackgroundOnClose` in `main/background-mode.ts`): the × HIDES the
+  window into a notification-area tray (`main/tray.ts`, pure model `tray-model.ts`: Open / unread /
+  phone-access status / Quit) so the phone relay host, hook server, notifications and updater keep
+  running — the Dock analogue. A hide is not a quit, so no confirm dialog; tray **Quit** is plain
+  `app.quit()` (before-quit + confirm run as for the menu Quit — File → Exit on Windows, where
+  Electron's quit role has NO Ctrl+Q accelerator; never set `quitting` before it, a cancelled
+  confirm must leave the × hiding). Hide only while the tray actually EXISTS
+  (`backgroundOnCloseActive`), so a failed tray never turns × into a hide with no way back. The
+  updater/update-prep quits keep flipping `quitting` first, or a hidden window would block them.
+  First hide posts a one-time toast (userData marker file, not a settings key — the renderer's
+  full-snapshot saves would overwrite a main-side settings write).
 - **Node reopen / app relaunch** (nothing parked) → a new PTY attaches to the same
   `nt-<nodeId>` session and tmux redraws current state.
 - **User clicks ×** → `destroy(persistKey)` runs `tmux kill-session`, permanently ending it. For a
@@ -3334,6 +3346,12 @@ command-bearing opens; this does not add a human-confirm dialog or change mobile
   Settings (`notifyOnClaudeDone`). Selecting, focusing, dwelling into, or opening a session card
   clears `unread` and ACKs the finish across phone/notch surfaces — existing read-on-view behavior.
   This NEVER changes the workflow bucket: read state is independent from agent state.
+  The unread COUNT is the macOS Dock badge, and on **Windows** a taskbar overlay icon (pure
+  `planBadge` + BGRA rasterizer `rasterizeBadge`, "9+" above nine, `main/taskbar-badge.ts`) plus a
+  `flashFrame` when the count RISES while unfocused (cleared on focus); Linux shows nothing. Windows
+  toasts need `app.setAppUserModelId` set before ready to the package.json `build.appId` the NSIS
+  shortcut carries (`main/app-identity.ts`, pinned by test; `execPath` in dev) — without it toasts
+  are dropped or mis-attributed silently (Windows never emits Notification `failed`).
 - **Sound alerts + custom sounds** (issue #289) — the `done` / `needsYou` alert (`SfxKind`) is a
   synthesized WebAudio chime (`renderer/lib/sfx.ts`, fired from Canvas's `alert` closure, gated by
   `soundEffects`, 5 s/node cooldown). Settings → Notifications lets the user replace either with their

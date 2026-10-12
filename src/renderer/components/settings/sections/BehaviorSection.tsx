@@ -9,6 +9,9 @@ import { SegmentedPill } from '@renderer/ui/SegmentedPill'
 import { Input } from '@renderer/ui/Input'
 import { hintLabel, isMacPlatform, isWindowsPlatform } from '@shared/platform-utils'
 import { trackpadRoutingSupported } from '@renderer/canvas/wheel-gesture'
+import { isBrowserRuntime } from '@renderer/bridge/runtime'
+import { backgroundCloseDescription, backgroundCloseRowVisible } from '@renderer/lib/backgroundClose'
+import type { BackgroundOnCloseSetting } from '@shared/types'
 import { clampWheelZoomSpeed } from '@renderer/canvas/wheel-zoom'
 import { DEFAULT_WORKTREE_PATH_TEMPLATE } from '@shared/worktree'
 
@@ -93,9 +96,16 @@ const ROWS = {
   confirmQuit: {
     title: 'Confirm before quitting',
     keywords: ['quit', 'exit', 'close', 'confirm', 'dialog', 'ask']
+  },
+  backgroundClose: {
+    title: 'Keep running when the window closes',
+    keywords: ['tray', 'background', 'close', 'minimize', 'notification area', 'system tray', 'quit', 'phone']
   }
 }
-const ENTRIES = Object.values(ROWS)
+// The background-close row only exists for a desktop window off macOS, so search must not offer
+// it anywhere else. Decided once: neither the platform nor the runtime changes under a live page.
+const SHOW_BACKGROUND_CLOSE = backgroundCloseRowVisible(isMacPlatform(), isBrowserRuntime())
+const ENTRIES = Object.values(ROWS).filter((r) => SHOW_BACKGROUND_CLOSE || r !== ROWS.backgroundClose)
 
 export function BehaviorSection({ isActive }: { isActive: boolean }): React.JSX.Element {
   const settings = useSettings((s) => s.settings)
@@ -470,6 +480,25 @@ export function BehaviorSection({ isActive }: { isActive: boolean }): React.JSX.
           }
         />
       </SearchableRow>
+      {SHOW_BACKGROUND_CLOSE && (
+        <SearchableRow {...ROWS.backgroundClose}>
+          <FieldRow
+            label="Keep running when the window closes"
+            description={backgroundCloseDescription(isWindowsPlatform())}
+            control={
+              <Select
+                aria-label="Keep running when the window closes"
+                value={settings.runInBackgroundOnClose}
+                onChange={(e) => update({ runInBackgroundOnClose: e.target.value as BackgroundOnCloseSetting })}
+              >
+                <option value="auto">Automatic</option>
+                <option value="on">Always</option>
+                <option value="off">Never (closing quits)</option>
+              </Select>
+            }
+          />
+        </SearchableRow>
+      )}
     </SettingsSection>
   )
 }

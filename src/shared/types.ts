@@ -4392,6 +4392,12 @@ export interface NodeTerminalApi {
    *  need only be idempotent, not cheap. Returns unsubscribe. Server Edition: never fires (the
    *  pressure levers run host-side there; a browser tab's memory belongs to the browser). */
   onMemoryPressure(listener: (severity: 'warning' | 'critical') => void): () => void
+  /** Fires when the main window is put away (`'hidden'`: close-to-tray, macOS hide-on-close,
+   *  minimize) or brought back (`'shown'`). The renderer answers by treating every terminal as
+   *  offscreen while hidden (renderer/terminal/window-backgrounded.ts). Returns unsubscribe.
+   *  Server Edition: never fires — a browser tab being hidden is a routine tab switch, not the app
+   *  being put away, so the levers stay on their viewport-only behaviour there. */
+  onWindowVisibility(listener: (state: 'hidden' | 'shown') => void): () => void
   /** Fires when THIS MACHINE's pty-device pressure band changes (core/pty-pressure.ts): the
    *  renderer raises/lowers the banner that warns before `kern.tty.ptmx_max` stops every new
    *  terminal from opening. Band changes only, re-sent for a held band at most once every five

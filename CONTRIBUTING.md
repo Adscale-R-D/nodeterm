@@ -71,6 +71,12 @@ its terminals and refuses the extension; never restart it automatically or fall 
 Message dispatch publishes pending canvas edits before main resolves scope, without overwriting
 an unresolved file conflict. See `docs/windows-session-host.md`.
 
+**Windows pane probes:** never start a `powershell.exe` per probe. Pane-command and console-owner
+reads go through the per-process probe worker (`session-host/windows-probe-worker.ts`), which falls
+back to the one-shot script (absolute `powershellExe()` path) only when it cannot answer. Coalesce
+concurrent table reads, but do not add a time-based cache: the restart exit poll needs two real
+consecutive observations before it trusts a changed pane.
+
 **Windows agent launches:** a new agent launch site that types a prompt-bearing line must go
 through the launch writer (`createLaunchWriter`) so a Windows-native pane can execute the node's
 `data.launchIntent` instead (`pty:execute-launch`). If you add a launch input the core planner does

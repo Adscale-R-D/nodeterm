@@ -92,6 +92,9 @@ export function mergeLocalLegs(a: SessionMemoryReport, b: SessionMemoryReport): 
   if (unmeasured !== 0) out.unmeasured = unmeasured
   const backend = answered.find((r) => r.unmeasuredBackend)?.unmeasuredBackend
   if (backend && unmeasured !== 0) out.unmeasuredBackend = backend
+  // Only the session-host leg ever carries it; a failed leg's is never adopted.
+  const host = answered.find((r) => r.host)?.host
+  if (host) out.host = host
   return out
 }
 

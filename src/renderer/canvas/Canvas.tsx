@@ -13,6 +13,7 @@ import { arrangeArgsRefusal, isTopLevelGroupArg, TOP_ARRANGE_LAYOUTS } from '@sh
 import { createControlOpenBatch } from '../lib/controlOpenBatch'
 import { commitOwnedLaunchAttempt, registerLaunchCommit } from '../terminal/launch-attempt'
 import { hasLaunchWriter, launchCommand } from '../terminal/launch-command'
+import { useCoreIsWindows } from '../terminal/use-core-platform'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useContextLinkSync } from './useContextLinkSync'
 import { useMirrorIdentitySeed } from './useMirrorIdentitySeed'
@@ -2080,6 +2081,8 @@ export function Canvas() {
   /** The active project runs on a remote host → every worktree affordance is off (see
    *  WORKTREE_SSH_HINT). Reactive, so the menus rebuild when the user switches projects. */
   const isSshProject = !!activeSshServer
+  // Run configurations launch a POSIX `sh` script on the core — gated off on a Windows core.
+  const isWindowsCore = useCoreIsWindows()
   /** The active SSH project's host, once it is CONNECTED — the host the consent banner asks about
    *  (nothing is installed there until it is answered). */
   const activeSshHostKey = useSshConn((c) => {
@@ -10773,9 +10776,10 @@ export function Canvas() {
     () => ({
       hasCwd: !!(useProjects.getState().getProject(activeProjectId)?.ssh?.remoteCwd ??
         useProjects.getState().getProject(activeProjectId)?.cwd),
-      isSshProject
+      isSshProject,
+      isWindowsCore
     }),
-    [activeProjectId, isSshProject]
+    [activeProjectId, isSshProject, isWindowsCore]
   )
   const addHandlers = useMemo<AddHandlers>(
     () => ({
@@ -17940,7 +17944,7 @@ export function Canvas() {
             }
           ]
         : []),
-      ...(isSshProject
+      ...(isSshProject || isWindowsCore
         ? []
         : [{ id: 'new-run', label: 'New run configuration', icon: <IconPlay />, run: () => void addRun() }]),
       { id: 'new-dino', label: 'New dino game', icon: <IconDino />, run: () => addDino() },
@@ -18257,6 +18261,7 @@ export function Canvas() {
     openFileDialog,
     openWorktreeDialog,
     isSshProject,
+    isWindowsCore,
     newProjectFile,
     addProject,
     fitView,

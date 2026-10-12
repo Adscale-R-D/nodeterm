@@ -217,7 +217,12 @@ import {
   sessionHostSupported,
   sessionHostTerminateOwner,
   sessionHostWriteDetached,
-  SessionHostProtocolCompatibilityError
+  SessionHostProtocolCompatibilityError,
+  watchExistingSessionHostPty,
+  sessionHostSupportsWatch,
+  sessionHostWatchKnown,
+  sessionHostCaptureVisible,
+  sessionHostPaneCwd
 } from './session-host-backend'
 import type { SessionHostPty } from './session-host-pty'
 import type { SessionHostReaperBackend, SessionInfo } from './session-budget'
@@ -748,6 +753,17 @@ const WATCHER_CLIENT: unique symbol = Symbol('nodeterm.watcherClient')
 type WatcherCreateOptions = PtyCreateOptions & { readonly [WATCHER_CLIENT]?: true }
 function isWatcherCreate(options: PtyCreateOptions): boolean {
   return (options as WatcherCreateOptions)[WATCHER_CLIENT] === true
+}
+/**
+ * Marks a join-only create that `spawnNew` PROVED has a live session-host generation to watch (the
+ * host advertised `watch-attach` and answered `hasSession` strictly). Same symbol discipline as
+ * `WATCHER_CLIENT`: set only inside this process, never from a wire payload. `spawnSession` turns it
+ * into a read-only `watchExistingSessionHostPty` — no spawn plan, no size claim, no pause ticket.
+ */
+const SESSION_HOST_WATCH: unique symbol = Symbol('nodeterm.sessionHostWatch')
+type SessionHostWatchOptions = PtyCreateOptions & { readonly [SESSION_HOST_WATCH]?: true }
+function isSessionHostWatch(options: PtyCreateOptions): boolean {
+  return (options as SessionHostWatchOptions)[SESSION_HOST_WATCH] === true
 }
 
 interface Session {
@@ -2115,16 +2131,7 @@ export class PtyManager {
       installCommand: hint?.command ?? null,
       installLabel: hint?.label ?? null,
       platform: this.runtimePlatform,
-      persistence: {
-        enabled: this.getSettings().tmuxEnabled,
-        backend:
-          // Zellij when it is selected AND found: that is where a new local terminal goes.
-          this.zellijSelected() && this.zellijBin() && this.zellijSocketFitsFor(TYPICAL_SESSION_NAME)
-            ? 'zellij'
-            : this.runtimePlatform !== 'win32' && available
-              ? 'tmux'
-              : sessionHostSupported() ? 'session-host' : null
-      },
+      persistence: this.persistenceStatus(available),
       ...(this.runtimePlatform !== 'win32'
         ? {
             zellij: {
@@ -2134,6 +2141,24 @@ export class PtyManager {
             }
           }
         : {})
+    }
+  }
+
+  /** `tmuxStatus().persistence`: where a new local terminal goes, and what a viewer can join there. */
+  private persistenceStatus(available: boolean): NonNullable<TmuxStatus['persistence']> {
+    const backend =
+      // Zellij when it is selected AND found: that is where a new local terminal goes.
+      this.zellijSelected() && this.zellijBin() && this.zellijSocketFitsFor(TYPICAL_SESSION_NAME)
+        ? 'zellij'
+        : this.runtimePlatform !== 'win32' && available
+          ? 'tmux'
+          : sessionHostSupported() ? 'session-host' : null
+    return {
+      enabled: this.getSettings().tmuxEnabled,
+      backend,
+      // Live links can join a session-host node nobody holds open (`watch-attach`). Only a
+      // CONNECTED host's negotiated answer counts; unknown stays absent (the conservative note).
+      ...(backend === 'session-host' && sessionHostWatchKnown() === true ? { watchJoin: true } : {})
     }
   }
 
@@ -2647,9 +2672,31 @@ export class PtyManager {
       options.joinOnly && !options.sshRemote && !warmWindowsBackend && tmuxBacked
         ? await this.strictTmuxVerdict(options.persistKey as string)
         : undefined
+    // The same strict question for a node whose terminals live in the SESSION HOST (Windows, or no
+    // tmux): a viewer may join only a generation the host CONFIRMED (`hasSession`, never the folded
+    // `.catch(() => true)` the reaper's probe uses — an unanswered probe refuses), and only through
+    // a read-only `watch-attach` attachment, which a host from an older build does not have (refused
+    // too: its only attach would cast the viewer's size vote). Never a spawn either way.
+    if (
+      options.joinOnly &&
+      !options.sshRemote &&
+      !warmWindowsBackend &&
+      !tmuxBacked &&
+      options.persistKey &&
+      this.hostBackendEligible()
+    ) {
+      const live = await sessionHostHasSession(sessionName(options.persistKey)).catch(() => false)
+      // Not proven ⇒ NO early return: fall through to the existing join-only decision, where the
+      // session-host placeholder `fresh = true` still refuses. On Windows that is the same refusal;
+      // on a POSIX machine without tmux it keeps the Zellij branch below reachable, so a viewer of a
+      // node that lives in a LIVE Zellij session is not refused just because the host lacks it.
+      if (live && (await sessionHostSupportsWatch().catch(() => false)))
+        options = { ...options, [SESSION_HOST_WATCH]: true } as SessionHostWatchOptions
+    }
+    const sessionHostWatch = isSessionHostWatch(options)
     let fresh = options.sshRemote
       ? remoteVerdict === 'absent'
-      : warmWindowsBackend
+      : warmWindowsBackend || sessionHostWatch
         ? false
         : tmuxBacked
         ? joinOnlyLocalVerdict
@@ -2670,6 +2717,7 @@ export class PtyManager {
       !options.sshRemote &&
       options.persistKey &&
       !warmWindowsBackend &&
+      !sessionHostWatch &&
       this.runtimePlatform !== 'win32' &&
       this.getSettings().tmuxEnabled &&
       !(tmuxBacked && !fresh)
@@ -2693,11 +2741,19 @@ export class PtyManager {
     // `join` above); it just gets no keyframe (`visibleCaptureRoute`).
     if (isWatcherCreate(options) && zellijChoice?.use)
       return { sessionId: '', fresh: false, unavailable: 'join-only' }
+    // A session-host watch needs neither of the tmux watcher gates below: there is no tmux client to
+    // flag, and the attachment takes the pty's size from the host's own answer (`geometry`) rather
+    // than spawning at a read one. `create` (and its in-flight barrier) still runs as for tmux.
     // A watcher's own LOCAL client needs client flags (tmux >= 3.2). Without them it would either fail
     // to attach or — worse, spelled without the flags — resize the owner's window. Refused the same
     // way as a session that cannot be confirmed. Over SSH the host's version is unknown here: the
     // flags are passed and an old remote tmux rejects them (see `remoteTmuxWatcherArgs`).
-    if (isWatcherCreate(options) && !options.sshRemote && !(await this.localTmuxSupportsWatcherClient()))
+    if (
+      isWatcherCreate(options) &&
+      !sessionHostWatch &&
+      !options.sshRemote &&
+      !(await this.localTmuxSupportsWatcherClient())
+    )
       return { sessionId: '', fresh: false, unavailable: 'join-only' }
     // A watcher's own client is spawned at the window's CURRENT size, read here, just before the spawn
     // — never at a guessed one (the caller's, a remembered size, a default). `ignore-size` only holds
@@ -2708,7 +2764,7 @@ export class PtyManager {
     // waits for this client and then shares it, instead of spawning another. The cost, accepted: an
     // owner opening the same node in that instant waits for the read too — bounded by the probe and
     // process timeouts (`runAsync`) — and then spawns its own client as usual.
-    if (isWatcherCreate(options)) {
+    if (isWatcherCreate(options) && !sessionHostWatch) {
       const windowSize = await this.readWindowSize(options.persistKey as string, options.sshRemote)
       if (!windowSize) return { sessionId: '', fresh: false, unavailable: 'join-only' }
       options = { ...options, cols: windowSize.cols, rows: windowSize.rows }
@@ -4048,6 +4104,7 @@ export class PtyManager {
     // remote/ssh node must never fall into it, and neither may a node with no persistKey at all).
     let useSessionHost = false
     let attachExistingHost = false
+    let watchHost = false
     // Unlike the installed-binary probe, this records the backend selected for THIS generation.
     // A Windows profile may coexist with an MSYS/Cygwin tmux on PATH and must not inherit it.
     let useLocalTmux = false
@@ -4234,6 +4291,12 @@ export class PtyManager {
         options.sshRemote.tmuxConfPath,
         remoteSessionEnv
       )
+    } else if (isSessionHostWatch(options)) {
+      // A proven session-host generation, joined read-only (see `SESSION_HOST_WATCH`).
+      useSessionHost = true
+      watchHost = true
+      file = ''
+      args = []
     } else if (warmWindowsBackend === 'session-host') {
       useSessionHost = true
       attachExistingHost = true
@@ -4389,7 +4452,9 @@ export class PtyManager {
       //
       // The non-session-host branch above already resolves this correctly. Sharing that logic is
       // the fix; two places deciding "which shell" is what let them disagree.
-      proc = (attachExistingHost
+      proc = (watchHost
+        ? watchExistingSessionHostPty(sessionName(options.persistKey as string))
+        : attachExistingHost
         ? attachExistingSessionHostPty(sessionName(options.persistKey as string))
         : createSessionHostPty(
             sessionName(options.persistKey as string),
@@ -4479,7 +4544,12 @@ export class PtyManager {
       // The spawn's claim went to the backend unbounded (a renderer view adapts to any size).
       appliedBounding: false,
       nodeId: options.persistKey,
-      indexKey: options.persistKey && !sinks && !isWatcherCreate(options) ? options.persistKey : undefined,
+      // A read-only session-host attachment is never the node's session either: an owner opening the
+      // node must spawn its own (typing, size-voting) attachment rather than join this one.
+      indexKey:
+        options.persistKey && !sinks && !isWatcherCreate(options) && !watchHost
+          ? options.persistKey
+          : undefined,
       onData: sinks?.onData,
       onExit: sinks?.onExit,
       onSinkSize: sinks?.onSize,
@@ -4501,7 +4571,7 @@ export class PtyManager {
       pausedBy: new Set<string>(),
       accountFallback,
       sessionHost: useSessionHost,
-      ...(isWatcherCreate(options) ? { watcherClient: true } : {}),
+      ...(isWatcherCreate(options) || watchHost ? { watcherClient: true } : {}),
       ...(useLocalZellij ? { zellij: true } : {})
     }
     // Both shared timers are armed by the first session that needs them: the scrollback snapshots
@@ -5269,6 +5339,14 @@ export class PtyManager {
     const route = visibleCaptureRoute(session, !!this.tmuxPath)
     const target = sessionName(key)
     try {
+      if (route === 'sessionHost') {
+        // The host's own emulator answers (a negotiated `captureVisible`); an older host, a gone
+        // session or any failure is null ⇒ no keyframe. Never the scrollback `capture` in its place.
+        // `altScreen` comes from the emulator's ACTIVE buffer: no tmux client sits between the pane
+        // and the stream here, so the pane's own buffer IS the stream's.
+        const cap = await sessionHostCaptureVisible(target)
+        return cap ? { screen: cap.screen, cursor: cap.cursor, altScreen: cap.altScreen } : unavailableCapture()
+      }
       if (route === 'ssh' && session.sshRemote) {
         // A remote node is captured on its HOST or not at all: never falls through to local tmux.
         const ssh = findSsh()
@@ -5308,6 +5386,11 @@ export class PtyManager {
     if (!s) return 'none'
     if (s.zellij) return 'none' // session-wide key bindings: refused
     if (s.sshRemote) return s.tmuxBacked ? 'ssh' : 'none'
+    // A read-only session-host attachment (`watch-attach`, the node not held here) has no typing
+    // path: the host refuses writes from it, and its keys must not be retyped as a framed paste.
+    // Control typing reaches a session-host node only for a viewer that joined while the node was
+    // open in this app (the route is read once, at join: this viewer is not upgraded later).
+    if (s.sessionHost && s.watcherClient) return 'none'
     if (s.sessionHost || s.nativeWindowsPane) return 'write'
     if (s.tmuxBacked) return this.tmuxPath ? 'tmux' : 'none'
     // A watcher's own client is read-only and always tmux-backed; were one ever not, writing into it
@@ -5552,6 +5635,9 @@ export class PtyManager {
     try {
       const session = this.sessions.get(sessionId)
       if (!session?.watcherClient || !session.persistKey) return false
+      // A session-host watch attachment has no window to read: the host pushes the pty's size
+      // itself (`geometry`), and `applyBackendSize` already forwards it to the viewers.
+      if (session.sessionHost) return true
       const size = await this.readWindowSize(session.persistKey, session.sshRemote)
       if (!size || this.sessions.get(sessionId) !== session) return false
       if (session.appliedSize?.cols !== size.cols || session.appliedSize?.rows !== size.rows) {
@@ -6085,6 +6171,10 @@ export class PtyManager {
         return null
       }
     }
+    // The session host answers from the cwd the pane last REPORTED (OSC 7 / 9;9 / 633), null when it
+    // never reported one or the host predates the `paneCwd` feature. A released or never-attached
+    // node asks the backend that owns it (`sessionHostOwns`), exactly as messaging does.
+    if (this.sessionHostOwns(persistKey, live)) return sessionHostPaneCwd(target).catch(() => null)
     if (live?.sessionHost || !this.tmuxPath) return null
     try {
       const { stdout } = await runAsync(this.tmuxPath, [

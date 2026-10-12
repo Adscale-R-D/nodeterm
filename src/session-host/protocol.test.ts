@@ -62,6 +62,8 @@ describe('agent-operation verbs', () => {
     // (The listed features come from other extensions; these two verbs must never join them.)
     expect(SESSION_HOST_FEATURES).not.toContain('terminateOwnerV1')
     expect(SESSION_HOST_FEATURES).not.toContain('writeDetachedV1')
-    expect(SESSION_HOST_FEATURES).toEqual(['geometry', 'shutdown', 'sessionDetails'])
+    expect(SESSION_HOST_FEATURES).toEqual([
+      'geometry', 'shutdown', 'sessionDetails', 'watch-attach', 'captureVisible', 'paneCwd'
+    ])
   })
 })

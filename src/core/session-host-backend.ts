@@ -173,8 +173,8 @@ export async function sessionHostPaneCommand(name: string): Promise<string | nul
 
 /** `capture-pane` equivalent. `full`  mirrors `captureSession`'s own `full` parameter: false asks
  *  for the recent ~200 lines only (AI naming / palette search), true asks for everything the
- *  emulator is holding (bounded by `settings.tmuxScrollback`, exactly like tmux's own
- *  `history-limit`). Includes full SGR/mode restoration — see `TerminalEmulator.serialize`. */
+ *  emulator is holding (bounded by `xtermScrollback(settings.tmuxScrollback)` — at most 10k
+ *  lines, the renderer's own cap, NOT tmux's `history-limit`; see shared/scrollback). Includes full SGR/mode restoration — see `TerminalEmulator.serialize`. */
 export async function sessionHostCapture(name: string, full: boolean): Promise<string> {
   return getClient().capture(name, full)
 }

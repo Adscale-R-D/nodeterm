@@ -346,6 +346,12 @@ export const IPC = {
   appUpdatePrepInspect: 'app:update-prep-inspect',
   appUpdatePrepShutdown: 'app:update-prep-shutdown',
   appUpdatePrepQuit: 'app:update-prep-quit',
+  /** main → renderer: restart-to-update was accepted; `{phase:'preparing'|'restarting', version}`. */
+  appUpdateInstalling: 'app:update-installing',
+  /** main → renderer: write any pending canvas edits now (payload: request id). Quit / restart. */
+  appFlushRequest: 'app:flush-request',
+  /** renderer → main: the flush for that request id settled. */
+  appFlushDone: 'app:flush-done',
   licenseActivate: 'license:activate',
   licenseDeactivate: 'license:deactivate',
   licenseStatus: 'license:status',

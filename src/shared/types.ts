@@ -1458,6 +1458,13 @@ export interface WorkspaceApi {
   /** Fired when THIS core wrote the project itself (Server Edition headless canvas control: an agent
    *  opened, renamed, moved, closed…). Not an outside edit — the renderer merges it, never asks. */
   onServerChange(cb: (project: Project) => void): () => void
+  /**
+   * Main asks for pending canvas edits to be written NOW — before a quit or a restart-to-update
+   * (`src/main/renderer-flush.ts`). The callback's settling is the answer; main waits at most ~1 s
+   * either way. Desktop only: the Server Edition has no main process to quit, so its bridge never
+   * fires it. Returns unsubscribe.
+   */
+  onFlushRequest(cb: () => Promise<unknown> | void): () => void
 }
 
 export interface ProjectSettingsApi {
@@ -2848,6 +2855,17 @@ export interface UpdatePolicy {
   minSupported: string | null
   /** True when the running version is below the minimum supported version. */
   mandatory: boolean
+  /** Optional release highlights (markdown) the feed carries for `latestVersion`. */
+  notes?: string
+  /** The version `notes` describe. Notes are shown only on a card for this exact version. */
+  latestVersion?: string
+}
+
+/** Restart-to-update was accepted: `preparing` = waiting for the OS updater to stage it (macOS),
+ *  `restarting` = the install is starting now. */
+export interface UpdateInstalling {
+  phase: 'preparing' | 'restarting'
+  version: string | null
 }
 
 export interface UpdateProgress {
@@ -2875,6 +2893,8 @@ export interface UpdateApi {
    * and "we cannot look" are different facts with different remedies. Returns unsubscribe.
    */
   onNoChannel(listener: () => void): () => void
+  /** Restart-to-update was accepted and is preparing / restarting. Returns unsubscribe. */
+  onInstalling(listener: (s: UpdateInstalling) => void): () => void
   /** Trigger a manual update check. */
   check(): void
   /** The running app version. */

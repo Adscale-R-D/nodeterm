@@ -164,6 +164,7 @@ import {
   generateTerminalName
 } from '../core/commit-message'
 import { initUpdater } from './updater'
+import { requestRendererFlush } from './renderer-flush'
 import { fetchCheck } from '../core/check'
 import {
   hookServer,
@@ -5347,7 +5348,15 @@ app.on('before-quit', (e) => {
   // Pending throttled .nodeterm mirror writes must land BEFORE the ControlMasters die — killing
   // a master mid-write used to leave a truncated project.json on the server. The masters are
   // therefore kept up through the raced flush and dropped on the second before-quit pass.
-  const flush = Promise.allSettled([remoteWorkspaceIO.flush(), ptyManager.killAll(), watchLinksStopped])
+  // The renderer's debounced canvas save rides the same race (src/main/renderer-flush.ts, capped
+  // at 1 s and never throwing): ⌘Q / tray Quit used to drop the last ~800 ms of canvas edits. A
+  // restart-to-update flushes earlier, in the updater — on macOS its windows are gone by now.
+  const flush = Promise.allSettled([
+    requestRendererFlush(getMainWindow()?.webContents, ipcMain),
+    remoteWorkspaceIO.flush(),
+    ptyManager.killAll(),
+    watchLinksStopped
+  ])
   void Promise.race([flush, new Promise((r) => setTimeout(r, 1500))])
     // Then let whisper go. A dictation still transcribing when Electron tears down the main
     // process's node env aborts the WHOLE app from inside the native addon (SIGABRT in

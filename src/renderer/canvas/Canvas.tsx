@@ -206,6 +206,7 @@ import { describeOs, REPO_URL } from '../lib/bugReport'
 import { shouldReleasePaneFocus } from '../lib/paneFocus'
 import {
   autosaveDelay,
+  shouldFlushOnQuit,
   nextSaveDelivery,
   type SaveDelivery
 } from '../lib/savePersistence'
@@ -4087,6 +4088,17 @@ export function Canvas() {
       void ensureProjectLaunchInfo(projectId)
     })
   }, [])
+
+  // Quit / restart-to-update: main asks for the pending edits the debounce above still holds
+  // (src/main/renderer-flush.ts). Without this, the last ~800 ms of node moves / renames / camera
+  // changes were lost on every ⌘Q and every update restart. Same conflict rule as the autosave.
+  useEffect(
+    () =>
+      window.nodeTerminal.workspace.onFlushRequest(async () => {
+        if (shouldFlushOnQuit(dirtyRef.current, !!conflictRef.current)) await persist()
+      }),
+    [persist]
+  )
 
   // Debounced auto-save for canvas edits. Suppressed while a conflict bar is up: the bar only ever
   // appears WHILE dirty, so without this gate the 800ms timer would fire and silently "keep mine"

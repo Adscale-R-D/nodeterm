@@ -1,3 +1,4 @@
+import path from 'path'
 import { describe, it, expect } from 'vitest'
 import { defaultHostFromQuery, parseSshG, resolveForwardAgent } from './ssh-config'
 
@@ -38,7 +39,10 @@ describe('resolveForwardAgent', () => {
     ['no', undefined],
     ['yes', '/auth/agent'],
     ['/tmp/x.sock', '/tmp/x.sock'],
-    ['~/agent.sock', '/home/dev/agent.sock'],
+    // ForwardAgent names a LOCAL agent socket (the agent on THIS machine that gets forwarded), so
+    // `~` expands against the local home with the local path rules: forward slashes on POSIX,
+    // backslashes on Windows (`\\home\\dev\\agent.sock` for this POSIX-shaped fixture home).
+    ['~/agent.sock', path.join('/home/dev', 'agent.sock')],
     ['$MY_AGENT', '/run/agent.sock'],
     ['${MY_AGENT}', '/run/agent.sock'],
     ['$UNSET_VAR', undefined],

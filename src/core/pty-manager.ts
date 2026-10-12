@@ -4406,6 +4406,13 @@ export class PtyManager {
     const settings = this.getSettings()
     let file: string
     let args: string[]
+    // The argv a NATIVE ssh pty channel parses — set ONLY by the two remote-ssh branches below, from
+    // the remote-tmux builders, and never by a local branch. `args` is shared by every branch (the
+    // local tmux `-e PATH=…` list, the zellij client's shell, the session-host's), and handing the
+    // shared variable to NativeSshPty let static analysis (CodeQL js/indirect-command-line-injection)
+    // trace local, environment-derived argv into the REMOTE command a channel executes. A dedicated
+    // variable states the real invariant: only a remote-tmux argv ever reaches the native transport.
+    let nativeSshArgv: string[] | null = null
     // Set true only by the session-host branch below. Decides which of the two `proc =` paths
     // runs further down — see there for why this can't just be "no local tmux was found" (a
     // remote/ssh node must never fall into it, and neither may a node with no persistKey at all).
@@ -4464,11 +4471,12 @@ export class PtyManager {
       // env, the session-env file, `markPresent` — belongs to a client that creates nothing.
       file = remoteSsh
       if (process.env.NODETERM_APP_AGENT_SOCK) env.SSH_AUTH_SOCK = process.env.NODETERM_APP_AGENT_SOCK
-      args = remoteTmuxWatcherArgs(
+      nativeSshArgv = remoteTmuxWatcherArgs(
         options.sshRemote.conn,
         options.sshRemote.controlPath,
         sessionName(options.persistKey)
       )
+      args = nativeSshArgv
     } else if (options.sshRemote && options.persistKey && remoteSsh) {
       file = remoteSsh
       // The remote twin of the local `ensureNodeToken` above: materialise THIS node's token on the
@@ -4581,7 +4589,7 @@ export class PtyManager {
       // look inside the index's cache window (a respawn, a co-attach) cannot be told it is cold —
       // which is what makes the renderer replay a snapshot and type a resume line into a live pane.
       this.remoteSessions.markPresent(options.sshRemote.controlPath, sessionName(options.persistKey))
-      args = remoteTmuxPtyArgs(
+      nativeSshArgv = remoteTmuxPtyArgs(
         options.sshRemote.conn,
         options.sshRemote.controlPath,
         sessionName(options.persistKey),
@@ -4598,6 +4606,7 @@ export class PtyManager {
         options.sshRemote.tmuxConfPath,
         remoteSessionEnv
       )
+      args = nativeSshArgv
     } else if (isSessionHostWatch(options)) {
       // A proven session-host generation, joined read-only (see `SESSION_HOST_WATCH`).
       useSessionHost = true
@@ -4785,10 +4794,12 @@ export class PtyManager {
     } else {
       try {
         proc =
-          !!(options.sshRemote && options.persistKey && remoteSsh) && useNativeSsh()
+          nativeSshArgv && useNativeSsh()
             ? // The remote terminal as a pty CHANNEL on the project's one native connection: no ssh
               // process (it could not multiplex on Windows). See remote-ssh/native/native-pty.ts.
-              (new NativeSshPty(nativeMux(), args, {
+              // `nativeSshArgv` is non-null exactly when one of the two remote-ssh branches ran
+              // (sshRemote && persistKey && a resolved ssh) — the condition this used to spell out.
+              (new NativeSshPty(nativeMux(), nativeSshArgv, {
                 cols: options.cols,
                 rows: options.rows,
                 name: 'xterm-256color'

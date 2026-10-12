@@ -9420,14 +9420,36 @@ claim to the user and to review — unicast LAN access needs the usage descripti
 what makes the denial grantable; it is not itself proof anyone's access came back. Guarded as an
 allowlist-with-reasons by `src/main/info-plist.test.ts`, the sibling of the entitlements guard.
 
-Auto-update uses **electron-updater** (`src/main/updater.ts`, `initUpdater(onBeforeRestart?)` from `index.ts`):
+Auto-update uses **electron-updater** (`src/main/updater.ts`, `initUpdater(hooks)` from `index.ts`):
 runs **only when `app.isPackaged`** (dev = no-op), checks on launch + every 6h, auto-downloads,
 forwards the lifecycle (`update-available` / `download-progress` / `update-downloaded` / errors)
 to the renderer over IPC. `components/UpdateCard.tsx` shows the strip + **Restart to update** →
-`updates.restart()` → `autoUpdater.quitAndInstall()`; on `update-downloaded` an OS notification
-also fires when the window is unfocused. Exposed via `window.nodeTerminal.updates` (`UpdateApi`).
-macOS *silent* self-install requires a signed+notarized build; unsigned builds still surface
-the card for a manual download.
+`updates.restart()` → the guarded `restartToUpdate()` (also the background-mode tray's "Restart to
+update vX" item); on `update-downloaded` an OS notification also fires when the window is
+unfocused. Exposed via `window.nodeTerminal.updates` (`UpdateApi`). macOS *silent* self-install
+requires a signed+notarized build; unsigned builds still surface the card for a manual download.
+Rules a refactor must not undo (pure + tested: `shared/update-gate.ts`, `renderer/lib/updateCardState.ts`):
+- **electron-updater keeps re-announcing a STAGED update** (the running binary is still old, so every
+  6h check emits `update-available` → cached `update-downloaded` again, and on macOS re-stages the zip
+  through Squirrel). The gate forwards and notifies **once per version**; once staged, `autoDownload`
+  goes off and only a strictly newer release is downloaded (`downloadUpdate()` on purpose). The card
+  never downgrades `downloaded`/`required`, never un-minimizes on a repeat, respects a dismissed version.
+- **macOS `update-downloaded` fires BEFORE Squirrel.Mac has the update** (MacUpdater dispatches, then
+  asks the native updater to fetch + verify the zip). Until Electron's own `autoUpdater` emits
+  `update-downloaded`, `quitAndInstall()` only queues a listener. So a click there sends
+  `app:update-installing {phase:'preparing'}` and waits; only when ready does it send `restarting`,
+  flush the renderer's canvas save (`main/renderer-flush.ts` — must happen HERE: quitAndInstall closes
+  the windows before `before-quit`), and only THEN run `onBeforeRestart` (the `quitting` /
+  `skipQuitConfirmation` flags). A native/install error calls `onRestartAborted` to put them back.
+- **One error owner, and background failures are not cards**: the `'error'` listener classifies by
+  origin (`classifyUpdaterError`) — an automatic check or background download failing (offline, captive
+  portal, feed 5xx) only logs; a background download retries at 15/30/60/120 min. User-initiated
+  checks (every button goes through `checkForUpdatesNow`, which is how the card knows) get a plain
+  sentence (`friendlyUpdateErrorMessage`). Automatic checks are silent until `downloaded`.
+- The mandatory policy is re-read every 6 h (one 60 s retry after an empty/failed first read); release
+  highlights come from the feed's `releaseNotes` or `/v1/check` `update.notes` + `latestVersion`.
+Server Edition: no updater (stubs; `onInstalling`/`onFlushRequest` are documented no-ops). Mobile: N/A.
+The "auto-download off" setting is NOT here — that is PR #956's.
 
 **Backend check feed** (`src/core/check.ts`, successor to the static `announcements.json`): the
 **main process** calls `GET https://api.nodeterm.dev/v1/check?version=&os=&channel=stable` (so the

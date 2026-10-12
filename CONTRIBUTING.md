@@ -95,6 +95,10 @@ and uploads `latest.yml`, so the app shows a passive "new version — Download" 
 downloads or installs, and main refuses restart-to-update for any non-self-installing build.
 Keep local `dist:win` on `disabled`, and never upload Windows `*.blockmap`s until signing lands.
 
+Updater UX: an update-check button must call `checkForUpdatesNow()` (`state/pendingUpdate.ts`) —
+the card treats every other check as automatic and silent. Never flip quitting flags before
+the install can start (macOS waits for Squirrel.Mac); see CLAUDE.md "Packaging & auto-update".
+
 Windows installer safety (#829): `build/installer.nsh` overrides NSIS's process-killing check.
 A running app or session host blocks install/uninstall, and a failed process query blocks too.
 Never restore automatic host termination: quitting the app preserves those live sessions.

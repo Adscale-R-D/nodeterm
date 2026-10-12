@@ -5904,6 +5904,14 @@ about which machine they describe. Reading + parsing is `core/session-memory.ts`
   fence back out — and do not replace the classifier with a blunt "any error ⇒ ok:false" either: on
   a host with no tmux server at all EVERY socket fails, and there "there are no sessions" is the
   honest answer.
+- **On Windows the session host's own cost is a separate, measured line** (`SessionMemoryReport.host`,
+  `hostOverhead`): the host process plus its non-shell children (ConPTY's conhost/OpenConsole is the
+  host's child, the shell's sibling, so no row reaches it). Never folded into a session row, never a
+  fake `0` — an unknown host pid or an undescribed session (whose shell would be misbooked) means no
+  line. Windows pane probes run through ONE long-lived PowerShell per process
+  (`session-host/windows-probe-worker.ts`, one-shot fallback), and the table read is coalesced in
+  flight but **never time-cached**: the exit poll's two-consecutive-readings rule must see two real
+  observations. Details + device checklist: docs/windows-session-host.md.
 - **`readMemInfo` has exactly one home** (`core/session-memory.ts`); `session-budget.ts` imports and
   re-exports it. The reaper's watermark and the pill must never disagree about how much RAM is free,
   and a second copy is exactly the drift this file warns about elsewhere. `null` = could not read,

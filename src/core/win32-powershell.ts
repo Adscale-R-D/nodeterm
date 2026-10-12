@@ -11,8 +11,25 @@
  * `session-host-runtime.ts`'s process query and pty-manager's shell fallback.
  */
 export function powershellExe(env: NodeJS.ProcessEnv = process.env): string {
-  const systemRoot = env.SystemRoot || env.WINDIR || 'C:\\Windows'
-  return `${systemRoot}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`
+  return `${windowsSystemDrive(env)}:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`
+}
+
+/** Drive letters, as constants: the environment may SELECT one, never supply the string. */
+const DRIVE_LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('')
+
+/**
+ * The Windows system drive letter, for building a FIXED absolute path to a system executable
+ * (PowerShell above, cmd.exe for a ProxyCommand). `SystemRoot`/`WINDIR` only SELECT a letter from a
+ * constant table, and only when the value is exactly `<letter>:\Windows` (every supported Windows
+ * install); anything else is `C`. No environment text reaches the executable path: an inherited
+ * variable is not a trusted place to choose a program from — whoever can set it for the app would
+ * pick what every probe runs (CodeQL js/indirect-command-line-injection).
+ */
+export function windowsSystemDrive(env: NodeJS.ProcessEnv = process.env): string {
+  const root = env.SystemRoot || env.WINDIR || ''
+  const m = /^([A-Za-z]):\\Windows\\?$/i.exec(root)
+  const letter = m ? m[1].toUpperCase() : 'C'
+  return DRIVE_LETTERS.find((d) => d === letter) ?? 'C'
 }
 
 /**

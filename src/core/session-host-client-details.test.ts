@@ -125,6 +125,8 @@ describe('SessionHostClient.listSessionsDetailed', () => {
     expect(listing).toEqual({
       running: true,
       names: ['nt-a', 'nt-b'],
+      // The pid the state file published: the memory panel's handle on the host's own cost.
+      hostPid: expect.any(Number),
       sessions: [
         { name: 'nt-a', pid: 11, subscribers: 0, lastOutputMs: 1000, createdMs: 900, generation: GEN_A },
         { name: 'nt-b', pid: 12, subscribers: 2, lastOutputMs: 2000, createdMs: 900, generation: GEN_B }
@@ -141,6 +143,7 @@ describe('SessionHostClient.listSessionsDetailed', () => {
     await expect(client.listSessionsDetailed()).resolves.toEqual({
       running: true,
       names: ['nt-a', 'nt-b'],
+      hostPid: expect.any(Number),
       sessions: null
     })
   })

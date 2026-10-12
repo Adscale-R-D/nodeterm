@@ -12,6 +12,7 @@
 
 import { execFile, spawn as nodeSpawn, type ChildProcess } from 'child_process'
 import { Duplex } from 'stream'
+import { windowsSystemDrive } from '../../win32-powershell'
 
 /** The values OpenSSH substitutes into a ProxyCommand (sshconnect.c `expand_proxy_command`). */
 export interface ProxyTokens {
@@ -64,9 +65,6 @@ export function expandProxyTokens(cmd: string, t: ProxyTokens): string {
   })
 }
 
-/** Drive letters, as constants: the environment may SELECT one, never supply the string. */
-const DRIVE_LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('')
-
 /**
  * The Windows command processor that runs a ProxyCommand: `<drive>:\Windows\System32\cmd.exe`.
  *
@@ -79,11 +77,7 @@ const DRIVE_LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('')
  * path. Anything else falls back to `C:`. POSIX is untouched: `/bin/sh` was always a fixed path.
  */
 export function windowsCmdExePath(env: NodeJS.ProcessEnv = process.env): string {
-  const root = env.SystemRoot || env.WINDIR || ''
-  const m = /^([A-Za-z]):\\Windows\\?$/i.exec(root)
-  const letter = m ? m[1].toUpperCase() : 'C'
-  const drive = DRIVE_LETTERS.find((d) => d === letter) ?? 'C'
-  return `${drive}:\\Windows\\System32\\cmd.exe`
+  return `${windowsSystemDrive(env)}:\\Windows\\System32\\cmd.exe`
 }
 
 /** argv for a ProxyCommand on this platform: POSIX `sh -c 'exec …'` (OpenSSH's own form);

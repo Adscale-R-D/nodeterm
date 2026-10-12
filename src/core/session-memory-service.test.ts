@@ -383,4 +383,10 @@ describe('mergeLocalLegs', () => {
     expect(mergeLocalLegs(r(true, [], { unmeasured: null }), r(true, [], { unmeasured: 1 })).unmeasured).toBeNull()
     expect(mergeLocalLegs(r(true, []), r(true, []))).not.toHaveProperty('unmeasured')
   })
+  it("the session host's own cost survives the merge, but never from a leg that failed", () => {
+    const host = { pid: 9, selfMb: 60, consoleMb: 8, consoleCount: 1, totalMb: 68 }
+    expect(mergeLocalLegs(r(true, [1]), r(true, [], { host })).host).toEqual(host)
+    expect(mergeLocalLegs(r(true, [1]), r(false, [], { host }))).not.toHaveProperty('host')
+    expect(mergeLocalLegs(r(true, []), r(true, []))).not.toHaveProperty('host')
+  })
 })

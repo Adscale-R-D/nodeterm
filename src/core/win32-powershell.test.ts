@@ -3,11 +3,19 @@ import { cimRows, powershellExe } from './win32-powershell'
 
 describe('powershellExe', () => {
   it('is an ABSOLUTE System32 path — never a bare name Windows would resolve against the cwd first', () => {
-    expect(powershellExe({ SystemRoot: 'D:\\Win' })).toBe(
-      'D:\\Win\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'
+    expect(powershellExe({ SystemRoot: 'D:\\Windows' })).toBe(
+      'D:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'
     )
-    expect(powershellExe({ WINDIR: 'E:\\W' })).toBe('E:\\W\\System32\\WindowsPowerShell\\v1.0\\powershell.exe')
+    expect(powershellExe({ WINDIR: 'e:\\Windows\\' })).toBe(
+      'E:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'
+    )
     expect(powershellExe({})).toBe('C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe')
+  })
+
+  it('lets the environment SELECT a drive letter, never supply the path text', () => {
+    for (const root of ['D:\\Win', 'C:\\evil\\..\\x', '\\\\server\\share\\Windows', 'D:\\Windows\\x']) {
+      expect(powershellExe({ SystemRoot: root })).toBe('C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe')
+    }
   })
 })
 

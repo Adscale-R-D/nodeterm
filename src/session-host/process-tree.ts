@@ -1,5 +1,7 @@
 import { execFile } from 'child_process'
 import { isShellCommand } from '../shared/agents/pane'
+import { powershellArgs, powershellExe } from '../core/win32-powershell'
+import { getWindowsProbeWorker, type WindowsProbeWorker } from './windows-probe-worker'
 
 /**
  * The `#{pane_current_command}` equivalent for a backend with no tmux underneath it. tmux tracks
@@ -40,38 +42,67 @@ function indexRows(rows: readonly ProcRow[]): {
   return { table, kids }
 }
 
-function readWin32(): Promise<ProcRow[]> {
+/** `Win32_Process` rows (`ProcessId`/`ParentProcessId`/`Name`) as ProcRows; malformed rows dropped. */
+export function win32ProcRows(parsed: unknown): ProcRow[] {
+  const arr = Array.isArray(parsed) ? parsed : parsed && typeof parsed === 'object' ? [parsed] : []
+  return arr
+    .map((r) => {
+      const o = (r ?? {}) as { ProcessId?: unknown; ParentProcessId?: unknown; Name?: unknown }
+      return { pid: Number(o.ProcessId), ppid: Number(o.ParentProcessId), name: String(o.Name ?? '') }
+    })
+    .filter((r) => Number.isFinite(r.pid) && Number.isFinite(r.ppid))
+}
+
+export const WIN32_PANE_TABLE_SCRIPT =
+  'Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name | ConvertTo-Json -Compress'
+
+type ExecFileLike = (
+  file: string,
+  args: string[],
+  options: { timeout: number; maxBuffer: number; windowsHide: boolean },
+  callback: (err: Error | null, stdout: string) => void
+) => unknown
+
+/**
+ * One powershell.exe for one table read — the original path, now the fallback when the probe
+ * worker cannot answer. -NoProfile/-NonInteractive: this runs unattended and can be polled every
+ * ~250ms while a restart is in progress — sourcing a user PowerShell profile here would be exactly
+ * the "100-800ms per lookup" mistake exec-path.ts documents for the POSIX login-shell PATH probe.
+ * ABSOLUTE PowerShell path, never a bare `powershell.exe` resolved through the cwd and PATH (see
+ * core/win32-powershell.ts).
+ */
+export function readWin32OneShot(
+  run: ExecFileLike = execFile as unknown as ExecFileLike,
+  env: NodeJS.ProcessEnv = process.env
+): Promise<ProcRow[]> {
   return new Promise((resolve) => {
-    // -NoProfile/-NonInteractive: this runs unattended and can be polled every ~250ms while a
-    // restart is in progress — sourcing a user PowerShell profile here would be exactly the
-    // "100-800ms per lookup" mistake exec-path.ts documents for the POSIX login-shell PATH probe.
-    execFile(
-      'powershell.exe',
-      [
-        '-NoProfile',
-        '-NonInteractive',
-        '-Command',
-        'Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name | ConvertTo-Json -Compress'
-      ],
+    run(
+      powershellExe(env),
+      powershellArgs(WIN32_PANE_TABLE_SCRIPT),
       { timeout: 5000, maxBuffer: 16 * 1024 * 1024, windowsHide: true },
       (err, stdout) => {
         if (err || !stdout) return resolve([])
         try {
-          const parsed = JSON.parse(stdout) as unknown
-          const arr = Array.isArray(parsed) ? parsed : [parsed]
-          const rows = arr
-            .map((r) => {
-              const o = r as { ProcessId?: unknown; ParentProcessId?: unknown; Name?: unknown }
-              return { pid: Number(o.ProcessId), ppid: Number(o.ParentProcessId), name: String(o.Name ?? '') }
-            })
-            .filter((r) => Number.isFinite(r.pid) && Number.isFinite(r.ppid))
-          resolve(rows)
+          resolve(win32ProcRows(JSON.parse(stdout)))
         } catch {
           resolve([])
         }
       }
     )
   })
+}
+
+/** The Windows table: through this process's long-lived probe worker (no PowerShell startup and no
+ *  new process per read), else the one-shot read. A worker answer that is not a table is a failed
+ *  read ([]), never "no processes". */
+export async function readWin32(
+  worker: Pick<WindowsProbeWorker, 'request'> | null = getWindowsProbeWorker(),
+  oneShot: () => Promise<ProcRow[]> = readWin32OneShot
+): Promise<ProcRow[]> {
+  const answer = worker ? await worker.request({ op: 'table' }) : null
+  if (answer?.kind === 'ok') return win32ProcRows(answer.result)
+  if (answer?.kind === 'failed') return []
+  return oneShot()
 }
 
 function readPosix(): Promise<ProcRow[]> {
@@ -122,10 +153,37 @@ export function paneCommandFromRows(rows: readonly ProcRow[], rootPid: number): 
   return table.get(deepestNonShell ?? deepest)?.name || null
 }
 
+/**
+ * Concurrent reads share ONE in-flight table read. N agent nodes asking at once (liveness polls on
+ * mount, a bulk restart) cost one PowerShell round trip instead of N.
+ *
+ * Deliberately NO time-based cache of a settled read: the restart/Eco exit poll accepts a changed
+ * reading only when it repeats on two CONSECUTIVE polls (agent-restart.ts), and a cached snapshot
+ * answering both polls would "confirm" a momentary child of a still-running CLI from a single
+ * observation — typing the resume line into a live agent. A failed read is never shared beyond the
+ * callers already waiting on it.
+ */
+export function createProcessTableReader(read: () => Promise<ProcRow[]>): () => Promise<ProcRow[]> {
+  let inFlight: Promise<ProcRow[]> | null = null
+  return () => {
+    if (inFlight) return inFlight
+    const p = read()
+      .catch((): ProcRow[] => [])
+      .finally(() => {
+        if (inFlight === p) inFlight = null
+      })
+    inFlight = p
+    return p
+  }
+}
+
+let sharedReader: (() => Promise<ProcRow[]>) | null = null
+
 /** The pane-command answer for the pty's own child (`paneCommandFromRows`) — or null when the
  *  process table couldn't be read or `rootPid` is no longer in it (the session just exited). */
 export async function paneCommand(rootPid: number): Promise<string | null> {
-  const rows = process.platform === 'win32' ? await readWin32() : await readPosix()
+  sharedReader ??= createProcessTableReader(() => (process.platform === 'win32' ? readWin32() : readPosix()))
+  const rows = await sharedReader()
   if (rows.length === 0) return null
   return paneCommandFromRows(rows, rootPid)
 }

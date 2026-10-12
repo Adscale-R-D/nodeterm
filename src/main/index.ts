@@ -9,7 +9,7 @@ import { startSessionNameSweep, displayNodeTitle } from '../core/session-name-sw
 import { startTriggerService } from '../core/trigger-service'
 import { readAgentSessionName, type AgentSessionNameDeps } from '../core/agent-session-name'
 import { readFile, readdir as fsReaddir, realpath as fsRealpath, lstat as fsLstat, writeFile as fsWriteFile } from 'fs/promises'
-import { existsSync, statSync, openSync, fstatSync, readFileSync, closeSync, writeFileSync } from 'fs'
+import { existsSync, statSync, openSync, fstatSync, readFileSync, closeSync } from 'fs'
 import { homedir, hostname } from 'os'
 import { randomUUID } from 'crypto'
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, Notification, powerMonitor, safeStorage, screen, shell, systemPreferences, webContents } from 'electron'
@@ -268,7 +268,8 @@ import {
   resolveBackgroundOnClose,
   shouldShowBackgroundHint,
   BACKGROUND_HINT,
-  BACKGROUND_HINT_MARKER
+  BACKGROUND_HINT_MARKER,
+  claimOnceMarker
 } from './background-mode'
 import { createBackgroundTray, type BackgroundTray } from './tray'
 import { normalizeUnread, trayIconPath, type TrayState } from './tray-model'
@@ -875,19 +876,12 @@ function syncBackgroundTray(): void {
 /** The window was just hidden into the tray: tell the user once per install that the app is still
  *  running (on Windows a vanished window otherwise reads as "it quit"). */
 function noteBackgroundHide(): void {
-  const marker = join(app.getPath('userData'), BACKGROUND_HINT_MARKER)
-  let alreadyShown = true
-  try {
-    alreadyShown = existsSync(marker)
-  } catch {
-    /* unreadable userData: err on the side of silence */
-  }
-  if (!shouldShowBackgroundHint({ platform: process.platform, backgroundOnClose: backgroundOnCloseActive(), alreadyShown })) return
-  try {
-    writeFileSync(marker, new Date().toISOString())
-  } catch (e) {
-    console.warn('[tray] could not record the background hint marker', e)
-  }
+  // Policy first (platform + background mode), then claim the marker with ONE exclusive create —
+  // no exists-check followed by a separate write (see claimOnceMarker).
+  if (!shouldShowBackgroundHint({ platform: process.platform, backgroundOnClose: backgroundOnCloseActive(), alreadyShown: false })) return
+  const claim = claimOnceMarker(join(app.getPath('userData'), BACKGROUND_HINT_MARKER), new Date().toISOString())
+  if (claim === 'already') return
+  if (claim === 'failed') console.warn('[tray] could not record the background hint marker')
   if (!Notification.isSupported()) return
   const n = new Notification({ title: BACKGROUND_HINT.title, body: BACKGROUND_HINT.body })
   n.on('click', showMainWindowFromBackground)

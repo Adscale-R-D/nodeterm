@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import { readFileSync } from 'fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'fs'
+import os from 'os'
 import { join } from 'path'
-import { resolveBackgroundOnClose, shouldShowBackgroundHint } from './background-mode'
+import { claimOnceMarker, resolveBackgroundOnClose, shouldShowBackgroundHint } from './background-mode'
 
 describe('resolveBackgroundOnClose', () => {
   it("'auto' is on for Windows and off for Linux", () => {
@@ -46,5 +47,30 @@ describe('main/index.ts background-mode wiring (source guard)', () => {
   })
   it('tray Quit goes through app.quit() (before-quit + confirm), not app.exit()', () => {
     expect(src).toMatch(/onAction: \(action\) => \(action === 'open' \? showMainWindowFromBackground\(\) : app\.quit\(\)\)/)
+  })
+})
+
+describe('claimOnceMarker (exclusive create — no exists-then-write race)', () => {
+  it('claims once, then reports already; the first content is kept', () => {
+    const dir = mkdtempSync(join(os.tmpdir(), 'nt-bg-marker-'))
+    try {
+      const f = join(dir, 'marker')
+      expect(claimOnceMarker(f, 'first')).toBe('claimed')
+      expect(claimOnceMarker(f, 'second')).toBe('already')
+      expect(readFileSync(f, 'utf8')).toBe('first')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+  it('reports failed (not already) when the marker cannot be written', () => {
+    const dir = mkdtempSync(join(os.tmpdir(), 'nt-bg-marker-'))
+    try {
+      expect(claimOnceMarker(join(dir, 'missing-dir', 'marker'), 'x')).toBe('failed')
+      // A directory squatting on the name is an existing entry: the notice is not repeated.
+      mkdirSync(join(dir, 'squat'))
+      expect(claimOnceMarker(join(dir, 'squat'), 'x')).toBe('already')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })

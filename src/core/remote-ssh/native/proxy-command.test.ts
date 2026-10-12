@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import net, { type AddressInfo } from 'net'
 import { spawn } from 'child_process'
-import { expandProxyTokens, proxyCommandArgv, proxyCommandSocket, type ProxySpawn } from './proxy-command'
+import { expandProxyTokens, proxyCommandArgv, proxyCommandSocket, windowsCmdExePath, type ProxySpawn } from './proxy-command'
 
 const T = { hostname: '10.0.0.5', port: 2222, user: 'dev', originalHost: 'box', hostKeyAlias: undefined }
 
@@ -44,11 +44,28 @@ describe('proxyCommandArgv', () => {
     expect(proxyCommandArgv('nc a 22', 'linux')).toEqual({ file: '/bin/sh', args: ['-c', 'exec nc a 22'], verbatim: false })
   })
   it('Windows: cmd.exe /d /s /c with the line quoted verbatim', () => {
-    expect(proxyCommandArgv('ncat a 22', 'win32', { ComSpec: 'C:\\Windows\\system32\\cmd.exe' })).toEqual({
-      file: 'C:\\Windows\\system32\\cmd.exe',
+    expect(proxyCommandArgv('ncat a 22', 'win32', { SystemRoot: 'C:\\Windows' })).toEqual({
+      file: 'C:\\Windows\\System32\\cmd.exe',
       args: ['/d', '/s', '/c', '"ncat a 22"'],
       verbatim: true
     })
+  })
+  it('Windows: the interpreter never comes from ComSpec', () => {
+    const env = { ComSpec: 'C:\\Users\\x\\evil.exe', COMSPEC: '\\\\attacker\\share\\cmd.exe', SystemRoot: 'C:\\Windows' }
+    expect(proxyCommandArgv('ncat a 22', 'win32', env).file).toBe('C:\\Windows\\System32\\cmd.exe')
+  })
+})
+
+describe('windowsCmdExePath', () => {
+  it('takes only the system drive from SystemRoot / WINDIR', () => {
+    expect(windowsCmdExePath({ SystemRoot: 'D:\\WINDOWS' })).toBe('D:\\Windows\\System32\\cmd.exe')
+    expect(windowsCmdExePath({ WINDIR: 'e:\\windows\\' })).toBe('E:\\Windows\\System32\\cmd.exe')
+  })
+  it('falls back to C: for anything that is not exactly <letter>:\\Windows', () => {
+    for (const root of ['', 'C:\\Windows\\..\\Users\\x', '\\\\host\\share\\Windows', 'D:\\WINNT', 'Windows', 'C:\\Windows" & calc']) {
+      expect(windowsCmdExePath({ SystemRoot: root })).toBe('C:\\Windows\\System32\\cmd.exe')
+    }
+    expect(windowsCmdExePath({})).toBe('C:\\Windows\\System32\\cmd.exe')
   })
 })
 

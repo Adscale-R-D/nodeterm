@@ -1,5 +1,6 @@
 import { Terminal, type ITerminalAddon } from '@xterm/headless'
 import { SerializeAddon } from '@xterm/addon-serialize'
+import { clampEmulatorScrollback } from '../shared/scrollback'
 
 // @xterm/addon-serialize's published types are written against @xterm/xterm's (browser) Terminal,
 // which has a superset of DOM-specific members @xterm/headless's Terminal lacks. The addon only
@@ -33,7 +34,10 @@ export class TerminalEmulator {
   private readonly defaultScrollback: number
 
   constructor(opts: { cols: number; rows: number; scrollback: number }) {
-    this.defaultScrollback = Math.max(0, opts.scrollback)
+    // Capped at the renderer's own xterm cap (`XTERM_SCROLLBACK_MAX`): xterm allocates every
+    // buffered line at full width (cols × 12 B), and nothing past the renderer's cap is ever
+    // shown. Clamped HERE as well as in core, because an older client still sends 50,000.
+    this.defaultScrollback = clampEmulatorScrollback(opts.scrollback)
     this.term = new Terminal({
       cols: Math.max(1, opts.cols),
       rows: Math.max(1, opts.rows),

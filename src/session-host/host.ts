@@ -61,6 +61,7 @@ import { drainSessionHostTransport, writeSessionHostFrame } from './socket-flow'
 import { SessionHostSocketRequestQueue } from './socket-request-queue'
 import { trySessionHostHello } from './hello-probe'
 import { killHostSession } from './kill-session'
+import { clampEmulatorScrollback } from '../shared/scrollback'
 
 /** How long a session-less host lingers before exiting — mirrors tmux's own server lifetime rule
  *  ("the server exits when its last session dies"), plus a grace window so an app restart that
@@ -525,6 +526,9 @@ async function main(): Promise<void> {
     req: Extract<SessionHostRequest, { cmd: 'attach' }>,
     socket: net.Socket
   ): Promise<AttachResult> {
+    // Clamped ONCE at the request boundary, before both the replacement-replay fingerprint check
+    // and construction, so an older client's raw 50,000 still matches its own replay.
+    const scrollback = clampEmulatorScrollback(req.scrollback)
     return generationCoordinator.run<AttachResult>(req.name, async (existing) => {
       if (ending.has(req.name)) {
         throw new Error(`session '${req.name}' is ending and cannot be attached`)
@@ -536,7 +540,7 @@ async function main(): Promise<void> {
               `reserved replacement '${req.name}' cannot attach a different live generation`
             )
           }
-          if (!existing.matchesReplacementReplay(req.spawn, req.scrollback)) {
+          if (!existing.matchesReplacementReplay(req.spawn, scrollback)) {
             throw new Error(
               `reserved replacement '${req.name}' replay changed its trusted launch plan`
             )
@@ -598,7 +602,7 @@ async function main(): Promise<void> {
       if (reservation) replacementReservations.delete(req.name)
       let session: HostSession
       try {
-        session = new HostSession(req.name, req.spawn, req.scrollback, reservation?.token)
+        session = new HostSession(req.name, req.spawn, scrollback, reservation?.token)
       } catch (error) {
         scheduleGraceExitIfEmpty()
         log(`spawn failed name=${req.name} category=profile-start-failed detail=${String(error)}`)

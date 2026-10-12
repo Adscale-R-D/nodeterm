@@ -506,6 +506,11 @@ anything else. Board-level fields survive every transform — `pullLinks` is one
   sees the pane app's own bytes — see CLAUDE.md's "We have our own VT emulator" for the one place
   that reasoning is inverted.
 
+- **An xterm-shaped buffer never takes the raw `tmuxScrollback`.** tmux's `history-limit` stores
+  only used cells; an xterm buffer (the renderer, the Windows session host's headless emulator,
+  `NativeWindowsPane`) allocates every line at full width. Size them with `xtermScrollback` from
+  `src/shared/scrollback.ts` (≤ 10k), so the host never keeps history the renderer cannot show.
+
 - **A new session-host push frame must be negotiated at `hello`, never just sent.** An older
   `SessionHostClient` treats EVERY push frame whose `type` is not `data` as an exit, and a
   long-lived host routinely outlives the app that started it — so a frame the connection did not

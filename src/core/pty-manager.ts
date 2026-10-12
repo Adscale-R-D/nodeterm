@@ -10,6 +10,7 @@ import * as pty from 'node-pty'
 import { IPC } from '../shared/ipc'
 import { safeSessionProgram } from '../shared/node-exec'
 import { REF_MAX_LEN } from '../shared/presence'
+import { xtermScrollback } from '../shared/scrollback'
 import {
   DEFAULT_SETTINGS,
   type PaneCursor,
@@ -3895,8 +3896,8 @@ export class PtyManager {
   }
 
   /** The relay snapshot for a `scroll: 'local'` stream: everything the session host's emulator
-   *  holds (bounded by `tmuxScrollback`, like a desktop warm attach's seed), not just the visible
-   *  screen — the relay attach never gets the host's attach repaint, so without this the phone has
+   *  holds (bounded by `xtermScrollback(tmuxScrollback)`, at most 10k lines, like a desktop warm
+   *  attach's seed), not just the visible screen — the relay attach never gets the host's attach repaint, so without this the phone has
    *  no history at all. A plain shell has nothing to capture. */
   private async relayLocalSnapshot(persistKey: string): Promise<string> {
     const live = this.liveSessionForPersistKey(persistKey)
@@ -4789,7 +4790,9 @@ export class PtyManager {
               // or Git Bash/WSL spawn request is byte-identical to before.
               ...(hostLaunchDialect ? { launchDialect: hostLaunchDialect } : {})
             },
-            settings.tmuxScrollback
+            // NOT the raw tmux history-limit: the host's headless xterm holds every line at full
+            // width, and the renderer can never show more than its own cap. See shared/scrollback.
+            xtermScrollback(settings.tmuxScrollback)
           )) as unknown as pty.IPty
     } else {
       try {
@@ -4846,7 +4849,7 @@ export class PtyManager {
     const session: Session = {
       proc,
       nativeWindowsPane: process.platform === 'win32' && !persisted
-        ? new NativeWindowsPane(proc, { ...options, scrollback: settings.tmuxScrollback })
+        ? new NativeWindowsPane(proc, { ...options, scrollback: xtermScrollback(settings.tmuxScrollback) })
         : undefined,
       subscribers: spawnSub === null ? new Set<SubKey>() : new Set<SubKey>([spawnSub]),
       // A non-voting view (`sizeVote: false`) that got here — a hosted-relay viewer's warm tmux

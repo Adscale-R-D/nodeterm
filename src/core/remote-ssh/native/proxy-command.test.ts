@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest'
 import net, { type AddressInfo } from 'net'
-import { spawn } from 'child_process'
+import { spawn, type ChildProcess } from 'child_process'
+import { EventEmitter } from 'events'
+import { PassThrough } from 'stream'
 import { expandProxyTokens, proxyCommandArgv, proxyCommandSocket, windowsCmdExePath, type ProxySpawn } from './proxy-command'
 
 const T = { hostname: '10.0.0.5', port: 2222, user: 'dev', originalHost: 'box', hostKeyAlias: undefined }
@@ -184,5 +186,55 @@ describe('proxyCommandSocket', () => {
       sock.resume()
     })
     expect(got).toBe('hello')
+  })
+})
+
+/** A ChildProcess stand-in whose stdio pipes the test can fail at will (Windows reports a proxy
+ *  that already exited as `read ECONNRESET` on its pipes — reproducible on any OS this way). */
+function fakeChild(): ChildProcess & { stdin: PassThrough; stdout: PassThrough; stderr: PassThrough } {
+  const c = new EventEmitter() as ChildProcess & { stdin: PassThrough; stdout: PassThrough; stderr: PassThrough }
+  Object.assign(c, {
+    stdin: new PassThrough(),
+    stdout: new PassThrough(),
+    stderr: new PassThrough(),
+    pid: 4242,
+    exitCode: null,
+    signalCode: null,
+    kill: () => true
+  })
+  return c
+}
+
+const reset = (): NodeJS.ErrnoException => Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET', errno: -4077 })
+
+describe('proxyCommandSocket — stdio pipe errors (Windows ECONNRESET from an exited proxy)', () => {
+  it('a pipe error before the first byte is handled, and the exit still carries the stderr reason', async () => {
+    const c = fakeChild()
+    const sock = proxyCommandSocket('x', { timeoutMs: 5000, platform: 'linux', spawn: () => c })
+    const errs: Error[] = []
+    sock.on('error', (e) => errs.push(e))
+    c.stderr.write('ncat: Connection refused.\n')
+    await new Promise((r) => setImmediate(r))
+    // No listener would make each of these an unhandled 'error' event — a synchronous throw here.
+    for (const pipe of [c.stdin, c.stdout, c.stderr]) expect(() => pipe.emit('error', reset())).not.toThrow()
+    expect(sock.destroyed).toBe(false)
+    c.emit('close', 1, null)
+    await new Promise((r) => setImmediate(r))
+    expect(errs).toHaveLength(1)
+    expect(errs[0].message).toMatch(/ProxyCommand exited \(code 1\) before the connection was up: ncat: Connection refused\./)
+  })
+
+  it('a pipe error after the connection was up surfaces as the proxy failure', async () => {
+    const c = fakeChild()
+    const sock = proxyCommandSocket('x', { timeoutMs: 5000, platform: 'linux', spawn: () => c })
+    const err = new Promise<Error>((r) => sock.on('error', r))
+    sock.on('data', () => {})
+    c.stdout.write('SSH-2.0-x\r\n')
+    await new Promise((r) => setImmediate(r))
+    expect(() => c.stdout.emit('error', reset())).not.toThrow()
+    expect((await err).message).toMatch(/ProxyCommand connection failed \(read ECONNRESET\)/)
+    // Later errors on the other pipes (the stream is already destroyed) stay handled too.
+    expect(() => c.stdin.emit('error', reset())).not.toThrow()
+    expect(() => c.stderr.emit('error', reset())).not.toThrow()
   })
 })

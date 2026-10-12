@@ -184,7 +184,22 @@ export function proxyCommandSocket(
   c.stderr?.on('data', (d: Buffer) => {
     stderr = (stderr + d.toString('utf8')).slice(-STDERR_KEEP)
   })
-  c.stdin?.on('error', () => {})
+  // EVERY stdio pipe gets an 'error' listener: a pipe failure is an async EVENT, and an unhandled
+  // one is an uncaught exception that takes down the whole process. On Windows a proxy that has
+  // already exited (the ordinary "Connection refused" case) surfaces as `read ECONNRESET` on its
+  // stdout/stderr pipes and `EPIPE`/`ECONNRESET` on stdin. Before the first byte that error says
+  // nothing the exit does not say better — the 'close' handler below reports the exit code and the
+  // proxy's own stderr — so it is left to that. After the connection was up, a broken pipe IS the
+  // connection failing: surface it as the proxy failure instead of hanging on an 'end' that a reset
+  // pipe never emits. (A stdin error also reaches the pending write's callback.)
+  const onStdioError = (e: Error): void => {
+    if (stream.destroyed || !gotData) return
+    clearTimeout(timer)
+    stream.destroy(why(`connection failed (${e.message})`))
+  }
+  c.stdin?.on('error', onStdioError)
+  c.stdout?.on('error', onStdioError)
+  c.stderr?.on('error', onStdioError)
   c.stdout?.on('data', (d: Buffer) => {
     if (!gotData) {
       gotData = true

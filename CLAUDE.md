@@ -9339,13 +9339,16 @@ beside the installer + zip. The app checks the feed and shows the same "vX is av
 Download" card a Linux .deb gets; it never downloads, never installs on quit, and main refuses
 `appRestartToUpdate` for any build that is not `self-install`/`dev` (`mayQuitAndInstall`), so
 `quitAndInstall` cannot run on the unsigned beta whatever the renderer sends. A failed
-AUTOMATIC check on that marker build is logged, not carded (offline, or a mirror that does not
-serve `latest.yml` yet, must not raise an error card on every launch); a user-initiated check
-still reports its failure. Local `dist:win`
+AUTOMATIC check on that marker build is not carded (offline, or a mirror that does not
+serve `latest.yml` yet, must not raise an error card on every launch) but is recorded
+(`lastUpdateCheck`) and logged as one warning that names a 404 on `latest*.yml` as the mirror
+missing the file (`describeCheckFailure`); a user-initiated check still reports its failure. Local `dist:win`
 keeps `disabled` (never polls). Do not add `*.blockmap` (or a broad `*.yml`) to that job's
 upload globs — differential downloads are the self-install leg, and it waits on signing; guarded
 by `src/main/release-win-workflow.test.ts`. The nodeterm.dev/updates mirror serving `latest.yml`
-lives outside this repo. `bootstrap-windows.bat` (repo root) takes a fresh Windows
+lives outside this repo; `release.yml`'s `verify-feed` job (after the promote, never a gate) curls
+each `latest*.yml` there and compares `version:` to the tag — mac/linux are errors, `latest.yml` a
+warning until the mirror is confirmed to serve it. `bootstrap-windows.bat` (repo root) takes a fresh Windows
 machine to a built checkout: it verifies Node ≥ 20 / VS Build Tools C++ / Python 3 with exact
 winget hints (it never installs machine-wide tools itself, and the full bootstrap refuses to run
 elevated) and runs `npm ci`. Its `--check-vs-build-tools` mode is the narrow exception used by
@@ -9367,6 +9370,12 @@ Update preparation must keep saved canvas nodes: exit programs normally, quit, t
 verify and stop any remaining host. Never recommend **End session** (it deletes nodes). Cold agent
 resume depends on supported, saved conversation history; it does not preserve running tasks.
 See `docs/windows-session-host.md` for the user-controlled preparation/recovery steps and limits.
+**Unattended runs wait** (silent or `--updated`, the app's own handoff, which starts while
+nodeterm.exe is still exiting): on preflight exit 10 they poll up to ~30 s; exit 20 stays fatal at
+once, nothing is ever killed, and the machine-wide name match stays (old uninstallers kill by
+name). A timed-out `--updated` install writes `%LOCALAPPDATA%\nodeterm\update-failed.json` and
+relaunches the installed build before quitting; the updater reads + deletes that note on start
+(`main/update-install-marker.ts`). This is the prerequisite for any future Windows self-install.
 
 **Prepare for update (#829 step 2).** The in-app answer to the refusal above, Windows only.
 Rules a refactor must not undo:
@@ -9393,6 +9402,12 @@ Rules a refactor must not undo:
 - The confirm is a danger `ConfirmDialog` with `enterConfirms={false}` (Cancel focused) and says
   plainly that shells and their unsaved work stop and that nodes are kept. Never route anything
   through End session / node deletion.
+- **A staged host only needs a quit** (U3): the host publishes `exe` (its `process.execPath`) in
+  its state file (optional, additive); `classifyHostImage` / `resolveHostStaging`
+  (`core/session-host-runtime.ts`) answer `staged | install | unknown`, falling back to a process
+  query by pid for 0.4.1–0.4.3 hosts. Only `staged` sets `UpdatePrepInspection.staged`, and only
+  then does the dialog lead with "Quit nodeterm (sessions keep running)" (`prepareEntry`), with
+  stopping sessions as the secondary path. `unknown` is never staged — fail closed to the stop flow.
 - IPC (`app:update-prep-*`) is raw `ipcMain`, main-window senders only, and in
   `HOST_ONLY_CHANNELS`. Server Edition: the bridge stub answers `unsupported` (Linux tmux, no
   installer; a browser must never end every session on the server). Mobile: N/A — a phone cannot

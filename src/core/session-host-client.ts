@@ -36,6 +36,7 @@ import {
   type CaptureVisibleResult,
   type PaneCwdResult,
   type SessionHostFeature,
+  type PaneModesResult,
   type KillSessionResult,
   type ExecuteLaunchResult,
   type ListSessionsResult,
@@ -1880,6 +1881,19 @@ export class SessionHostClient {
       return true
     } catch {
       return false
+    }
+  }
+
+  /** The pane app's mouse-tracking protocol, or null when unknown: no such session, or an older
+   *  live host that predates `paneModesV1` (never replaced to learn it). Callers treat null as
+   *  "the app did not ask for the mouse". */
+  async mouseTrackingMode(name: string): Promise<PaneModesResult['mouseTracking'] | null> {
+    try {
+      const r = await this.request<PaneModesResult | null>({ cmd: 'paneModesV1', name })
+      const m = r?.mouseTracking
+      return m === 'none' || m === 'x10' || m === 'vt200' || m === 'drag' || m === 'any' ? m : null
+    } catch {
+      return null
     }
   }
 

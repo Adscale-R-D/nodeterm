@@ -32,6 +32,7 @@ import {
   type TerminateOwnerResult,
   type CaptureVisibleResult,
   type PaneCwdResult,
+  type PaneModesResult,
   type KillSessionResult,
   type ListSessionsResult,
   type SessionHostSessionDetail,
@@ -1033,6 +1034,13 @@ async function main(): Promise<void> {
         if (typeof req.data !== 'string' || !req.data) return { ok: false, error: 'nothing to write' }
         s.proc.write(req.data)
         return { ok: true }
+      }
+      case 'paneModesV1': {
+        const s = sessions.get(req.name)
+        if (!s || s.exited) return { ok: true, result: null }
+        const mouseTracking = await s.mouseTrackingMode()
+        if (s.exited || sessions.get(req.name) !== s) return { ok: true, result: null }
+        return { ok: true, result: { mouseTracking } satisfies PaneModesResult }
       }
       case 'capture': {
         const s = sessions.get(req.name)

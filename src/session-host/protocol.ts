@@ -118,6 +118,9 @@ export type SessionHostRequest =
   /** `paneCwd` feature only: the last cwd the pane REPORTED (OSC 7 / 9;9 / 633), never the spawn
    *  cwd. */
   | { id: number; cmd: 'paneCwd'; name: string }
+  /** Additive (the `messageOwnerV1` idiom): an older live host answers `unknown command`, which the
+   *  client reads as "unknown", never as a reason to replace the host. Result: `PaneModesResult`. */
+  | { id: number; cmd: 'paneModesV1'; name: string }
   | {
       id: number
       cmd: 'executeLaunch'
@@ -272,6 +275,10 @@ export interface PaneCommandResult {
 }
 export interface TerminateOwnerResult {
   terminated: boolean
+}
+/** `result` of `paneModesV1`; `null` result = no such live session. */
+export interface PaneModesResult {
+  mouseTracking: 'none' | 'x10' | 'vt200' | 'drag' | 'any'
 }
 export interface CaptureResult {
   text: string

@@ -17,7 +17,11 @@ import {
   type SessionHostListing
 } from './session-host-client'
 import { SessionHostPty } from './session-host-pty'
-import { ensureStagedHostRuntime } from './session-host-runtime'
+import {
+  ensureStagedHostRuntime,
+  resolveHostStaging,
+  stagedRuntimeRoot
+} from './session-host-runtime'
 import type {
   CaptureVisibleResult,
   ExecuteLaunchResult,
@@ -88,6 +92,21 @@ function getClient(): SessionHostClient {
                     )
                     .catch(() => undefined)
                 }
+              })
+          : undefined,
+      // Prepare-for-update (U3): a host running from its staged copy does not block the
+      // installer, so the dialog can offer a plain quit. Install dir = where this app's own
+      // executable lives; a host older than the state file's `exe` falls back to a process query.
+      hostStaging:
+        process.platform === 'win32'
+          ? (host) =>
+              resolveHostStaging({
+                exe: host.exe,
+                pid: host.pid,
+                installDir: path.dirname(process.execPath),
+                stagedRoot: process.env.LOCALAPPDATA
+                  ? stagedRuntimeRoot(process.env.LOCALAPPDATA)
+                  : null
               })
           : undefined
     })

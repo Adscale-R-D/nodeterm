@@ -1362,7 +1362,8 @@ async function main(): Promise<void> {
       endpoint: paths.endpoint,
       tokenPath: paths.tokenPath,
       startedAt: Date.now(),
-      protocolVersion: currentProtocolVersion()
+      protocolVersion: currentProtocolVersion(),
+      exe: process.execPath
     }
     // Replace the empty startup-lock file atomically from a temp owned by THIS process. A fixed
     // `.tmp` lets racing/stale-reclaim hosts publish or remove one another's bytes; a bare rename

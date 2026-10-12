@@ -51,6 +51,7 @@ export const STAGED_RUNTIME_WAIT_MS = 45_000
 import { latestClaimSize, type SizeClaim } from './pty-size'
 import { isTerminalReport } from './terminal-reports'
 import type { PreparedAgentLaunch } from './agent-launch'
+import type { HostImageStaging } from './session-host-runtime'
 
 export interface SessionSubscriber {
   onData(data: string): void
@@ -80,7 +81,14 @@ export const TERMINATE_OWNER_REQUEST_TIMEOUT_MS =
 
 export type HostUpdateInspection =
   | { running: false }
-  | { running: true; sessions: string[]; shutdown: boolean }
+  | {
+      running: true
+      sessions: string[]
+      shutdown: boolean
+      /** Where the running host's executable lives (`classifyHostImage`). Only `staged` means a
+       *  plain quit lets the installer run; `unknown` is never read as staged. */
+      staging: HostImageStaging
+    }
 
 /**
  * What the running host holds, for the observability surfaces (session reaper, session-memory
@@ -424,6 +432,9 @@ export class SessionHostClient {
       repoRoot?: string | null
       /** Stage (or reuse) a host runtime outside the install directory. Absent = legacy launch. */
       stageRuntime?: (script: string) => Promise<{ exe: string; script: string } | null>
+      /** Classify the running host's image for prepare-for-update (`resolveHostStaging`). Absent
+       *  (every non-Windows or unpackaged client) ⇒ `unknown`. */
+      hostStaging?: (host: { exe?: string; pid: number | null }) => Promise<HostImageStaging>
     }
   ) {}
 
@@ -2222,7 +2233,25 @@ export class SessionHostClient {
     if (identity.kind === 'absent') return { running: false }
     await this.ensureConnected()
     const result = await this.request<ListSessionsResult>({ cmd: 'listSessions' })
-    return { running: true, sessions: result.names, shutdown: this.hostShutdownFeature }
+    return {
+      running: true,
+      sessions: result.names,
+      shutdown: this.hostShutdownFeature,
+      staging: await this.hostStagingFor(identity.state)
+    }
+  }
+
+  /** The published state names a pid and (newer hosts) an image. Classified only when that pid is
+   *  the host this client is connected to: a host replaced between the read and the connect is
+   *  `unknown`, never someone else's answer. Any failure is `unknown`. */
+  private async hostStagingFor(state: { pid: number; exe?: string }): Promise<HostImageStaging> {
+    const classify = this.deps.hostStaging
+    if (!classify || this.hostPid === null || state.pid !== this.hostPid) return 'unknown'
+    try {
+      return await classify({ exe: state.exe, pid: this.hostPid })
+    } catch {
+      return 'unknown'
+    }
   }
 
   /**

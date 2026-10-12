@@ -260,9 +260,27 @@ export async function executeLaunchIntent(
   }
 }
 
-/** Default prompt-file reader: a regular file, size-checked before it is read. */
+/** Default prompt-file reader: a regular file, size-checked before it is read.
+ *  The check and the read go through ONE file descriptor (open → fstat → read via the handle), not
+ *  a stat-then-read on the path, which a swap in between could defeat (CodeQL js/file-system-race).
+ *  The path is the user's own choice, so a symlink is followed as before; O_NONBLOCK keeps a FIFO
+ *  from hanging the open, and the fstat then refuses it. At most one byte past the cap is read from
+ *  the same handle, so a file that grew after the fstat is still refused rather than slurped. */
 export async function readPromptFileBounded(file: string, maxBytes: number): Promise<string> {
-  const stat = await fs.promises.stat(file)
-  if (!stat.isFile() || stat.size > maxBytes) throw new Error('prompt file is not readable')
-  return fs.promises.readFile(file, 'utf8')
+  const fh = await fs.promises.open(file, fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK ?? 0))
+  try {
+    const stat = await fh.stat()
+    if (!stat.isFile() || stat.size > maxBytes) throw new Error('prompt file is not readable')
+    const buf = Buffer.alloc(maxBytes + 1)
+    let total = 0
+    while (total < buf.length) {
+      const { bytesRead } = await fh.read(buf, total, buf.length - total, total)
+      if (bytesRead === 0) break
+      total += bytesRead
+    }
+    if (total > maxBytes) throw new Error('prompt file is not readable')
+    return buf.subarray(0, total).toString('utf8')
+  } finally {
+    await fh.close().catch(() => {})
+  }
 }

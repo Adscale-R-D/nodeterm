@@ -4111,10 +4111,10 @@ export function Canvas() {
   // changes were lost on every ⌘Q and every update restart. Same conflict rule as the autosave.
   useEffect(
     () =>
-      window.nodeTerminal.workspace.onFlushRequest(async () => {
+      api.workspace.onFlushRequest(async () => {
         if (shouldFlushOnQuit(dirtyRef.current, !!conflictRef.current)) await persist()
       }),
-    [persist]
+    [api, persist]
   )
 
   // Debounced auto-save for canvas edits. Suppressed while a conflict bar is up: the bar only ever

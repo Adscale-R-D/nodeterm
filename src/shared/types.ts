@@ -1,4 +1,9 @@
-import type { TextDeliveryResult } from './text-delivery'
+import type { ChatPromptResult, TextDeliveryResult } from './text-delivery'
+import type { PushWebhookMinted, PushWebhookResult, PushWebhookTokenInfo } from './push-webhook'
+import type { IdentitySeedEntry } from './agent-identity-seed'
+import type { PrWaitHold } from './pr-wait'
+import type { SessionBackend } from './session-backend'
+import type { AgentIntegrationsSettings } from './agent-integrations'
 // Types shared across the main, preload, and renderer processes.
 
 import { TABBAR_HEIGHT_PX } from './window-chrome-metrics'
@@ -12,16 +17,21 @@ import type { HostChatQuery, HostChatReply } from './mobile-chat'
 import type { AgentId, AgentPermissionMode, BuiltinAgentId, PromptInjectionMode } from './agents/config'
 import type { ControlConfirmWaivers } from './control-confirm'
 import type { AgentMessageDeliverRequest, AgentMessageReply } from './agents/agent-messaging'
+import type { BoardCommentDeliverRequest } from './board-comment'
 import type { ChatTranscriptPageRequest } from './chat-page'
 import type { BrowserLeasePush } from './browser-indicator'
 import type { GroupWorktree } from './worktree'
 import type { ClientId, DinoSnapshot, PeerDiff, PeerIdentity, PeerState } from './presence'
 import type { WhisperModelInfo } from './speech'
 import type { ProjectKanbanGitHub } from './github-issues'
+import type { KanbanPullAutoMove, KanbanPullLinks } from './kanban-pull-links'
+import type { BoardDispatch } from './board-dispatch'
 import type { CodexAccount } from './codex-account'
 import type { NotchAlign } from './notch-hud'
 import type { ProjectIcon, ProjectIconPickResult } from './project-icon'
+import type { AlertSoundKind, AlertSoundSaveResult, CustomAlertSounds } from './alert-sound'
 import type { CanvasLayout, LayoutViewports } from './canvas-layout'
+import type { ShareTeamApi } from './share-team'
 import type {
   ModelDiscoveryResult,
   ModelGatewayCredentialStatus,
@@ -106,6 +116,30 @@ export type LaunchIntentExecutionResult =
   | { ok: true }
   | { ok: false; reason: LaunchIntentFailureReason; message: string }
 
+/**
+ * `pty:execute-launch` request (`PtyApi.executeLaunch`). `launchId` is a fresh UUID v4 per
+ * delivery attempt — the session host's exactly-once ledger key. `promptFile` is the
+ * canvas-control `--prompt-file` path: the core reads it (the file is on the core's machine) and
+ * fills `intent.prompt`, so no shell ever has to expand `$(cat …)`. Only legal on a `start`
+ * intent that carries no `prompt` of its own.
+ */
+export interface LaunchIntentRequest {
+  launchId: string
+  intent: AgentLaunchIntent
+  promptFile?: string
+}
+
+/**
+ * A semantic launch held beside a terminal node's legacy typed line (`data.launchIntent`). Bound
+ * to the EXACT `command` it was assembled with: a writer delivering any other line (a manual Run
+ * now of an edited command, a resume) never uses it. Live node data only — never serialized.
+ */
+export interface HeldLaunchIntent {
+  command: string
+  intent: AgentLaunchIntent
+  promptFile?: string
+}
+
 export interface PtyCreateOptions {
   shell?: string
   /** Arguments for `shell` when it is run as the session program (e.g. ssh args). */
@@ -126,6 +160,14 @@ export interface PtyCreateOptions {
    * pane is left unproven and messaging to it fails closed (never derived from the file id).
    */
   ownerProjectId?: string
+  /**
+   * Whether the node was on screen when the renderer asked for this session. Used ONLY to order
+   * the per-ControlMaster remote spawn queue (`remote-ssh/pty-spawn-gate.ts`): a project switch
+   * mounts every node in one tick, and without it the terminals the user is looking at queued
+   * behind the ones they are not. `false` = queue behind on-screen spawns; absent (older clients,
+   * relay, headless) = on-screen, i.e. the previous plain FIFO.
+   */
+  onScreen?: boolean
   /**
    * Which agent runs in this session (claude/codex/gemini/custom). Drives the hook env
    * injected at spawn. Defaults to 'claude' for backward compat; the renderer passes a
@@ -170,6 +212,17 @@ export interface PtyCreateOptions {
    * "not connected" overlay and re-spawns when the master is back.
    */
   requireRemote?: boolean
+  /**
+   * Hosted-relay VIEWERS may watch a terminal but never start one: refuse a create that would spawn
+   * a NEW session (`unavailable: 'join-only'`), while a co-attach join or a warm tmux reattach still
+   * proceeds. Set only by the relay access policy (src/core/relay/access-policy.ts).
+   */
+  joinOnly?: boolean
+  /**
+   * `false`: this view never constrains the shared pty's size (a viewer's small window must not
+   * shrink everyone's terminal). It is still a subscriber and is told the authoritative size.
+   */
+  sizeVote?: false
 }
 
 /** A tmux pane's cursor, as tmux reports it: 0-based column/row within the pane, plus whether the
@@ -270,7 +323,9 @@ export interface PtyCreateResult {
    * is set. Since our tmux is always `mouse on` (local and remote), enabling these unconditionally
    * on a tmux-backed join matches tmux's own invariant client state; the enable is idempotent.
    * Set on BOTH join branches (screen-painted and resized) — the resize does not deliver them.
-   * Absent for a plain-shell join (no tmux ⇒ no tmux mouse) and for the solo spawn path.
+   * Absent for a plain-shell join (no tmux ⇒ no tmux mouse), for a session-host (Windows) join —
+   * same gate as `coAttachAltScreen`: no tmux runs `mouse on` there, and enabled tracking would
+   * hand the wheel and drags to the shell — and for the solo spawn path.
    */
   coAttachMouse?: boolean
   /**
@@ -348,8 +403,12 @@ export interface PtyCreateResult {
    * managed account whose home is missing refuses rather than spawning against the system login
    * (§5 property 4). Remote managed Codex accounts refuse unknown/unsafe ids or unresolved/unsafe homes.
    * System SSH Codex may attach before remote home discovery. Nothing spawned on refusal.
+   *
+   * `'join-only'`: `PtyCreateOptions.joinOnly` was set (a hosted-relay viewer) and no running
+   * session could be confirmed to join or reattach to — either it is gone, or its existence could
+   * not be checked — so nothing was started. Not a lost connection.
    */
-  unavailable?: 'ssh' | 'codex-account'
+  unavailable?: 'ssh' | 'codex-account' | 'join-only'
 }
 
 /** Payload of `pty:recycled` — see IPC.ptyRecycled and `recycleAction` in the renderer. */
@@ -392,9 +451,10 @@ export interface PendingLaunch {
   /**
    * Which core process owns delivery. Absent is the historical renderer-owned path. Server
    * Edition headless opens stamp `server`, so a connected browser can render the armed state and
-   * dependency edges without racing the server to type the command into the same pane.
+   * dependency edges without racing the server to type the command into the same pane. The
+   * desktop's headless start (#925) stamps `core` on its manualOnly write-ahead claim.
    */
-  executor?: 'server'
+  executor?: 'server' | 'core'
   /**
    * Server-owned dependencies whose first real turn has not been observed yet. A freshly spawned
    * agent can briefly report `done` while its argv prompt is still booting; that idle blip must not
@@ -413,6 +473,29 @@ export interface PendingLaunch {
    * outlives the run's event stream — an app restart — releases rather than strands the node.
    */
   awaitSetupGroup?: string
+  /**
+   * Also wait on GitHub pull requests of the project's board repository (`--after-pr`, see
+   * @shared/pr-wait). ANDed with `after` and the setup gate. Validated at both serializer seams
+   * (`normalizePendingLaunch`): a malformed value becomes a hold that never fires on its own.
+   * A build older than this one does not know the field and releases the node on `after` alone.
+   */
+  afterPr?: PrWaitHold
+  /**
+   * Also wait for these stations to REPORT SUCCESS (`--after-success`, see @shared/station-outcome):
+   * each id is in `after` too, so this adds "and it said it succeeded" to "its turn is over". ANDed
+   * with every other gate. Validated at both serializer seams (`normalizePendingLaunch`): a malformed
+   * value becomes a hold that never fires on its own. A build older than this one does not know the
+   * field and releases the node on the turn ending alone.
+   */
+  afterSuccess?: import('./station-outcome').SuccessWaitHold
+  /**
+   * The file `command` reads its prompt from (`"$(cat '<path>')"`): a `--prompt-file`, or a long
+   * `--prompt` spilled to a file (#706). A held launch may be delivered weeks after it was armed, so
+   * the delivery loop checks this file still exists before it types the command, and holds the node
+   * for ▶ with the reason when it does not — an agent started with no brief is the failure the
+   * open-time existence check exists to catch. Absent for a prompt that rides the command inline.
+   */
+  promptFile?: string
 }
 
 export interface CanvasNodeState {
@@ -445,12 +528,35 @@ export interface CanvasNodeState {
   /** Parent group node id, if this node belongs to a group frame. */
   parentId?: string
   // terminal-only
+  /** This terminal's own font size (issue #915), set with ⌘+ / ⌘− when
+   *  `settings.terminalFontZoomKeys` is on; absent = follow the global `fontSize`. Hand-editable,
+   *  so every reader goes through `normalizeTerminalFontSize` (renderer/terminal/terminal-font-zoom). */
+  terminalFontSize?: number
   shell?: string
   cwd?: string
   /** Which agent runs in this terminal node (claude/codex/gemini/custom). */
   agentId?: AgentId
   /** Model selected for this agent node through the shared model gateway. */
   agentModel?: string
+  /**
+   * Agent nodes started on a GitHub issue ("Start with agent" on an issue card, or
+   * `open-agent --issue`): WHICH issue this session works on. It drives the binding chips (the
+   * issue card's run chips, the node header's `#N`) and the issue card's run history — never a
+   * launch line: the launch prompt was composed once, at creation, from a validated reference.
+   * Git-shared, so hostile input: `normalizeIssueRef` runs at both serializer seams. See
+   * @shared/github-issue-ref.
+   */
+  issueRef?: import('./github-issue-ref').IssueRef
+  /**
+   * The node id of the agent that OPENED this node through a canvas-control open verb
+   * (`open-agent`/`open-claude`/`open-terminal`, `spawn-team`, `verify`) — recorded where that verb
+   * draws its lineage rope. It is what lets the app tell the right agent when this station stops
+   * (@shared/station-notice): a rope alone cannot, because an `--after` station is roped to the
+   * stations it waited on as well, with the same id shape. Git-shared, so hostile input: validated
+   * with `isSafeNodeId` at both serializer seams, and honoured only while the opener's rope to this
+   * node still exists and the opener is a canvas-capable agent node in the same project.
+   */
+  openedBy?: string
   /**
    * One-shot "Restart on subscription" flag: when set, the next `transport.create` strips gateway +
    * inherited provider env (per `vanillaEnvStripPattern`) so the agent resumes against its own
@@ -480,6 +586,12 @@ export interface CanvasNodeState {
   sshRemoteTmux?: boolean
   /** editor-only: when true (SSH-project editors), reads/writes go to the project's remote fs via `sshFs`. */
   sshFs?: boolean
+  /**
+   * Run nodes only (a terminal node that runs a `.vscode/launch.json` configuration): folder,
+   * configuration, device, reload-on-save. Git-shared and hand-editable — read through
+   * `normalizeRunConfig` (@shared/run-config) on every load AND save.
+   */
+  runConfig?: import('./run-config').RunNodeConfig
   // sticky-only
   text?: string
   /**
@@ -585,7 +697,9 @@ export interface CanvasState {
 }
 
 /**
- * A minimal change to a canvas node list: replace-or-append a node by id, or drop one by id.
+ * A minimal change to a canvas: replace-or-append a node by id, or drop one by id — and, on the team
+ * canvas-sync path, the same for one persisted edge (`edge-*`) or one board item (`kb-*`, see
+ * `KanbanOp` below and @shared/kanban-ops).
  * Used for the client's optimistic edits and host-side diffing (see `applyMutation`/`diffToMutations`).
  *
  * `src` and `seq` exist ONLY on the team canvas-sync path (`canvas:mut`), and they are what makes
@@ -595,11 +709,94 @@ export interface CanvasState {
  *    that echo is the ACK that tells the sender where its edit landed in the total order).
  *  - `seq` is stamped by the reflector (src/core/canvas-sync.ts) and is the TOTAL ORDER. It is
  *    server-authoritative: a client-supplied `seq` is overwritten at ingest, never trusted.
- * The relay's host↔client mirror (src/main/remote) uses the same vocabulary and simply omits both.
+ *  - `seen` is the sender's CAUSAL stamp: the highest `seq` it had applied at the moment it cast.
+ *    It answers the one question `seq` alone cannot — "did this client already know about the
+ *    delete?" — which is what lets a delete beat a concurrent drag frame instead of being
+ *    resurrected by it (canvas-order's rule 4). Client-supplied; the reflector clamps it below the
+ *    order it is being given, which is hygiene and changes no verdict (see `stampMutation`). A
+ *    mutation without it is judged exactly as before, so an unstamped peer degrades rather than
+ *    breaks.
+ *  - `origin: 'core'` is ALSO reflector-authoritative: a client-supplied one is deleted at ingest.
+ *    The core adds it only on a copy that came from an OWNER client (or the core itself) and goes to
+ *    an owner client, and it is the ONE thing that lets a receiver take the node's machine-local
+ *    `pendingLaunch` as sent (@shared/node-exec `mutationTrustsLaunch`). It means something only on
+ *    a node `upsert`; every other op may carry it (the reflector vouches per recipient, not per op)
+ *    and ignores it.
+ * The legacy relay host's canvas mirror (`canvas:state` / `canvas:mutate`: src/main/remote/
+ * host-service.ts and canvas-sync.ts, which stayed there when the relay transport moved to
+ * src/core/relay) uses the same vocabulary and simply omits these stamps.
  */
 export type CanvasMutation =
-  | { op: 'upsert'; node: CanvasNodeState; src?: string; seq?: number }
-  | { op: 'remove'; id: string; src?: string; seq?: number }
+  | { op: 'upsert'; node: CanvasNodeState; src?: string; seq?: number; seen?: number; origin?: 'core' }
+  | { op: 'remove'; id: string; src?: string; seq?: number; seen?: number; origin?: 'core' }
+  | {
+      op: 'edge-upsert'
+      kind: CanvasEdgeKind
+      edge: BridgeLink
+      src?: string
+      seq?: number
+      seen?: number
+      origin?: 'core'
+    }
+  | {
+      op: 'edge-remove'
+      kind: CanvasEdgeKind
+      id: string
+      src?: string
+      seq?: number
+      seen?: number
+      origin?: 'core'
+    }
+  | (KanbanOp & MutationStamp)
+
+/** The node and edge half of `CanvasMutation` — all a canvas SCENE diff (`diffToMutations`) ever
+ *  produces. Their order keys are project-independent (node and edge ids are globally unique), so
+ *  the ordering API accepts them without a project id; any value that MAY be a board op must name
+ *  its project (see `mutationKey`). */
+export type SceneMutation = Exclude<CanvasMutation, { op: `kb-${string}` }>
+
+/** Stamp fields every canvas mutation may carry (see canvas-order): the sender tag, the reflector's
+ *  total order, the sender's causal position, and the core's per-recipient vouching (`origin`).
+ *  Documented on `CanvasMutation` above. */
+export interface MutationStamp {
+  src?: string
+  seq?: number
+  seen?: number
+  origin?: 'core'
+}
+
+/**
+ * The board half of the `canvas:mut` vocabulary (@shared/kanban-ops): one op per board ITEM, so two
+ * people editing one board converge item by item instead of last-writer-wins on the whole `kanban`
+ * block. Keys live in one `k:` space (`kanbanOpKey`); only a column / label / view REMOVAL is a
+ * rule-4 deletion — `kb-card-remove` and `kb-meta-remove` set a card's placement / metadata to
+ * "none", an ordinary last-writer-wins value (`isKanbanDeletion`). `github` and `pullLinks` are
+ * outside the vocabulary and never cast.
+ */
+export type KanbanOp =
+  | { op: 'kb-column'; column: KanbanColumn }
+  | { op: 'kb-column-remove'; id: string }
+  | { op: 'kb-column-order'; ids: string[] }
+  | { op: 'kb-card'; assignment: KanbanAssignment }
+  | { op: 'kb-card-remove'; nodeId: string }
+  | { op: 'kb-meta'; meta: KanbanCardMeta }
+  | { op: 'kb-meta-remove'; nodeId: string }
+  | { op: 'kb-label'; label: KanbanLabel }
+  | { op: 'kb-label-remove'; id: string }
+  | { op: 'kb-label-order'; ids: string[] }
+  | { op: 'kb-view'; view: KanbanSavedView }
+  | { op: 'kb-view-remove'; id: string }
+
+/**
+ * Which persisted edge list a mutation addresses — `bridges` (context links, which an agent can
+ * actually READ through) or `ropes` (display-only "spawned by" lineage). They are two arrays on
+ * the project with two different meanings, so the kind travels with the mutation; the ORDER,
+ * however, is keyed on the edge id alone (canvas-order's `e:<id>`), because one id is one edge and
+ * two clients must never end up holding it as both a bridge and a rope. The apply agrees
+ * (`applyEdgeMutationToScene`: an upsert takes the id out of the other list, a remove drops it from
+ * both), and so does the diff (an id that moved lists casts its upsert and no remove).
+ */
+export type CanvasEdgeKind = 'bridge' | 'rope'
 
 /** Canvas pan/zoom state. */
 export interface Viewport {
@@ -613,13 +810,27 @@ export interface BridgeLink {
   id: string
   source: string
   target: string
+  /**
+   * Context links only (issue #852): the ONE endpoint allowed to read the other. Absent = both
+   * read each other, which is every link persisted before the field existed. A value naming
+   * neither endpoint authorizes nobody (fail closed) — see `linkReadPairs` in canvas-link.ts.
+   */
+  reader?: string
 }
+
+/** Where a column sits in a card's lifecycle (see @shared/kanban-category). A closed set; an
+ *  unknown value read from a hand-edited or newer file reads as ABSENT (`columnCategory`), and is
+ *  left in the file untouched so a newer build's value survives an older build's save. */
+export type KanbanColumnCategory = 'unstarted' | 'started' | 'done' | 'closed'
 
 /** One kanban board column. Column order = array order in ProjectKanban.columns. */
 export interface KanbanColumn {
   id: string
   title: string
   color: string
+  /** Optional lifecycle category. Absent = uncategorized (the pre-category board, and any column
+   *  the user never categorized). Read it through `columnCategory`, never directly. */
+  category?: KanbanColumnCategory
   /** `'agent'` = created by canvas control (`assign --create yes`), so it is removed automatically
    *  once the cards filed into it are gone (`sweepEmptiedAgentColumns`). Absent = made by a person,
    *  and never removed automatically, empty or not. A surface that drops unknown fields on write
@@ -628,11 +839,15 @@ export interface KanbanColumn {
 }
 
 /** Assignment of one session node to a board column. A session with no assignment sits
- *  in the virtual Ungrouped column (never persisted). Order within a column = relative
- *  order in ProjectKanban.assignments. */
+ *  in the virtual Ungrouped column (never persisted). Order within a column = `rank` (a
+ *  fractional-index string, @shared/kanban-rank), and for an entry without a valid one, its
+ *  position in ProjectKanban.assignments (@shared/kanban-order `columnOrder`). Every write keeps
+ *  the ARRAY in rank order too, so a build that ignores `rank` shows the same column. */
 export interface KanbanAssignment {
   nodeId: string
   columnId: string
+  /** Optional position key within the column. Absent / invalid ⇒ derived from array order. */
+  rank?: string
 }
 
 /** Per-project kanban board (docs/superpowers/specs/2026-07-18-kanban-view-design.md).
@@ -678,9 +893,32 @@ export interface KanbanLabel {
   color: KanbanLabelColor
 }
 
+/** A saved board view's filters (@shared/kanban-views). SHARED content: a view is how a team
+ *  looks at its board. Deliberately NOT here: the live-state status chips (never persisted
+ *  anywhere) and display preferences like showing closed columns (per user, localStorage). */
+export interface KanbanViewQuery {
+  /** The source filter; absent = all. */
+  source?: 'all' | 'github' | 'pulls' | 'sessions'
+  /** Label filter keys (`local:<labelId>` | `github:<folded name>`); OR within the list. */
+  labels?: string[]
+  /** Assignee names (the presence identity's name); a card needs one of them. */
+  assignees?: string[]
+  /** Column ids to SHOW (`ungrouped` names the virtual column); absent/empty = every column. */
+  columns?: string[]
+}
+
+export interface KanbanSavedView {
+  id: string
+  name: string
+  query: KanbanViewQuery
+}
+
 export interface ProjectKanban {
   columns: KanbanColumn[]
   assignments: KanbanAssignment[]
+  /** Saved views — named filter sets shared with everyone on the board. Tolerated as absent or
+   *  malformed (sanitizeViews); the ACTIVE view is per user (localStorage), never here. */
+  views?: KanbanSavedView[]
   /** Optional card metadata; tolerated as absent/malformed by every reader (lib normalizes). */
   meta?: KanbanCardMeta[]
   /** Board-level label palette (Notion-style). Cards reference these by id in `meta[].labels`;
@@ -688,6 +926,9 @@ export interface ProjectKanban {
   labels?: KanbanLabel[]
   /** Shared, non-secret GitHub issue label mapping. Local approval and credentials live elsewhere. */
   github?: ProjectKanbanGitHub
+  /** Card ↔ pull request link tombstones and per-card auto-move opt-outs (@shared/kanban-pull-links).
+   *  Hostile input: read only through `readPullLinks`. */
+  pullLinks?: KanbanPullLinks
 }
 
 /** Who produced a board-log entry (a teammate on a shared board, or this user). */
@@ -721,10 +962,41 @@ export interface BoardLogEvent {
      *  agent node so it files under that agent's card. Written BEFORE the read (fail-closed): a cookie
      *  read that happened but was not recorded is the one outcome this trace exists to prevent. */
     | 'agent-read-cookies'
+    /** An agent session was started on a GitHub issue. Filed under the issue CARD's board-log
+     *  identity (`issueLogId`), not the node's, so the issue keeps its run history after the
+     *  session's node is gone. `run` names the session; `title` is the node title at the time. */
+    | 'run-started'
+    /** That session's node was closed. `run.end` is the last agent state observed at that
+     *  moment — a turn ending (`done`) is NOT a run ending, which is why this is written only when
+     *  the node goes. */
+    | 'run-ended'
+    /** A station an agent opened stopped, and that agent was told (src/core/agents/
+     *  station-notice.ts). Filed under the RECIPIENT's card — the orchestrator's — because that is
+     *  who has to act on it. `from` = the station's node id, `to` = the reason (a
+     *  `StationFailureReason`, @shared/station-notice), `title` = the station's title as the notice
+     *  carried it (one line, capped). Never any station output. */
+    | 'station-failed'
+    /** A station reported its TASK outcome (`report-outcome`, @shared/station-outcome). Filed under
+     *  the STATION's own card. `from` = the station's node id, `to` = the outcome (`succeeded` /
+     *  `failed`), `title` = its note (one line, capped). Written by the app, never a gate: the
+     *  outcome a `--after-success` wait reads lives in core's transient store, not in this file. */
+    | 'station-reported'
   from?: string
   to?: string
-  /** Column title for column-added/deleted; card title for card-created; outcome for agent-message. */
+  /** Column title for column-added/deleted; card title for card-created; outcome for agent-message;
+   *  for card-moved, the reason when the board moved the card itself ("PR #12 merged"). */
   title?: string
+  /** agent-message only: the `notPermitted` reason when that is the outcome. From a shared file like
+   *  every field here, so a reader treats it as an untrusted string. */
+  reason?: string
+  /** run-started / run-ended only. No cost or token figure: nodeterm has no cumulative number for
+   *  a session, and a context-window reading is not one. */
+  run?: {
+    nodeId: string
+    agentId?: string
+    sessionId?: string
+    end?: 'done' | 'working' | 'waiting' | 'blocked' | 'errored' | 'dropped' | 'unknown'
+  }
 }
 
 /** One line of the append-only board history (`.nodeterm/board-log.jsonl`). A `comment`
@@ -802,6 +1074,12 @@ export interface NavStop {
   at: number
   note: string
 }
+
+/** MACHINE-LOCAL: this SSH project was handed over to a hosted team on its host ("Share with
+ *  team"). From that moment the server core is the only writer of its project.json, so this
+ *  desktop never mirrors, reconciles or polls it again. `hostId` absent = the handover started
+ *  and did not finish (the same guard applies until the user reopens it). */
+export interface HandedOffTo { hostId?: string; projectId?: string; at: number }
 
 /** A project is one canvas/page: its own nodes, viewport, and default working dir. */
 export interface Project {
@@ -890,6 +1168,8 @@ export interface Project {
    *  shared project file, same rule as `closed` itself. Absent on a project closed before this
    *  field existed; such entries sort last. */
   closedAt?: number
+  /** See `HandedOffTo`. Index-only; never written to the shared project.json. */
+  handedOffTo?: HandedOffTo
   /**
    * Sessions (terminal/agent/sticky/…) deleted from this project, most-recent-first, capped at
    * 20. MACHINE-LOCAL, same rule as `closedAt`/`breadcrumbs` — see `IndexEntryV3.closedSessions`,
@@ -914,6 +1194,12 @@ export interface Project {
    * peer's disk, so it must never land in this client's workspace.json.
    */
   remote?: boolean
+  /**
+   * Relay tabs only: the host's SSH endpoint as DISPLAY strings (the tab's `SSH user@host` chip).
+   * A relay tab never carries `ssh` — it would make this machine dial the host's server with this
+   * machine's credentials (see renderer/session/relay-ssh.ts). Runtime-only like `remote`.
+   */
+  relaySsh?: { user: string; host: string; remoteCwd: string }
 }
 
 /** The full workspace written to / read from disk. */
@@ -946,7 +1232,20 @@ export interface TmuxStatus {
   /** tmux discovery only; retained for older callers and install polling. */
   available: boolean
   /** Absent on older peers; null when discovery could not be read. */
-  persistence?: { enabled: boolean; backend: 'tmux' | 'session-host' | null } | null
+  persistence?: {
+    enabled: boolean
+    backend: 'tmux' | 'zellij' | 'session-host' | null
+    /** Session host only: the CONNECTED host speaks `watch-attach`, so a live link viewer can join a
+     *  node nobody holds open. Absent = no / not known yet. */
+    watchJoin?: boolean
+  } | null
+  /**
+   * The optional Zellij backend (@shared/session-backend): whether a `zellij` binary was found and
+   * whether this machine's setting selects it for NEW local terminals. Absent on older peers and on
+   * Windows (no Zellij backend there). `selected && !available` means new terminals fall back to
+   * tmux — the Settings row says so rather than letting the choice look applied.
+   */
+  zellij?: { available: boolean; selected: boolean; socketTooLong?: boolean }
   /** One-shot install command for a terminal node; null = no known installer (text-only banner). */
   installCommand: string | null
   /** Button caption for installCommand (e.g. "Install Homebrew + tmux" when brew must come first). */
@@ -1014,8 +1313,10 @@ export interface PtyApi {
    *  worktree"). Same tmux kill as `destroy`, opposite intent: the node stays on the canvas, so
    *  co-viewers get `onRecycled` (restart + re-attach), never the permanent closed state. */
   recycle(persistKey: string): void
-  /** Suggest a terminal title from its recent output via the configured AI agent. */
-  generateName(persistKey: string, cwd: string): Promise<GitResult>
+  /** Suggest a terminal title from its recent output via the configured AI agent. `accountId` is
+   *  the node's managed Claude account (trailing + optional: absent = system `~/.claude`), so the
+   *  naming request runs under the same login the node itself does. */
+  generateName(persistKey: string, cwd: string, accountId?: string): Promise<GitResult>
   /** Suggest a group title from its member terminals' recent output via the configured AI agent. */
   generateGroupName(memberKeys: string[], cwd: string): Promise<GitResult>
   /** Capture a terminal session's output as text. `full` grabs the entire scrollback. */
@@ -1053,6 +1354,10 @@ export interface PtyApi {
    *  false if unavailable; `pasted-not-submitted` means input was accepted but Enter was not
    *  confirmed written. Surface it without automatically resending. True is not an app receipt. */
   sendText(persistKey: string, text: string, opts?: { enter?: boolean }): Promise<TextDeliveryResult>
+  /** Submit a prompt from the ⌘M chat view. For an agent whose screen can be read
+   *  (`readsScreenDialogs`), refused BEFORE anything is written when the agent's own dialog owns the
+   *  keyboard (`ChatPromptBlocked`) — such dialogs fire no hook. Otherwise the `sendText` contract. */
+  sendChatPrompt(persistKey: string, text: string, agentId: string): Promise<ChatPromptResult>
   /** Is tmux available on this host (else the silent plain-shell fallback), plus a suggested
    *  install command for the "tmux not found" banner. */
   tmuxStatus(): Promise<TmuxStatus>
@@ -1060,16 +1365,40 @@ export interface PtyApi {
    *  node persistKey. null when it is unknown — no session, no tmux, or the query failed — which
    *  callers must read as "not observed", never as evidence of a particular command. */
   paneCommand(persistKey: string): Promise<string | null>
+  /** The live working directory of a node's pane (`#{pane_current_path}`). null when unknown —
+   *  no session, no tmux, the session-host backend, a failed query, or a surface that does not
+   *  serve it (relay tabs) — and never a rejection. Used as the second cwd for file links. */
+  paneCwd(persistKey: string): Promise<string | null>
+  /**
+   * Desktop only (#925). Spawn-or-attach a node's session with no viewer and deliver `command`
+   * through the echo-verified writer, then release the synthetic client (the tmux session keeps
+   * running). Refused as `not-persistent` without tmux or the session-host. The Server Edition
+   * starts nodes through its own factory, so the browser build rejects with E_UNSUPPORTED.
+   */
+  launchHeadless(req: {
+    ptyOptions: PtyCreateOptions
+    command: string
+  }): Promise<import('./headless-launch').HeadlessLaunchResult>
   /** Kernel truth about a node's pane — its root pid, tty, tmux pane id and the full argv of its
    *  foreground process group — so a caller can ask WHO owns the pane rather than what tmux calls
    *  it. `null` is "could not read", never evidence that the pane is free (see `isAgentPane`'s
    *  three-valued verdict, which is what consumers should decide on). */
   paneOwner(persistKey: string): Promise<PaneOwner | null>
+  /**
+   * Execute a semantic agent launch in a node's live LOCAL Windows session-host pane: the core
+   * encodes it for the pane's own shell (pwsh / Windows PowerShell / cmd) and the host types it
+   * exactly once. Every other session (tmux, SSH, Zellij, plain shell, POSIX core, Git Bash/WSL)
+   * answers `unsupported-shell`, and the caller keeps its legacy typed line. Optional: surfaces
+   * that cannot serve it (relay tabs, test fakes) simply omit it — the caller's answer is the same.
+   */
+  executeLaunch?(persistKey: string, request: LaunchIntentRequest): Promise<LaunchIntentExecutionResult>
   /** Terminate the foreground process group in a node's pane. Returns false when the pane/process
    *  cannot be safely identified; it never kills the pane's login shell. When `expectedAgentId` is
    *  given, the kill happens only if that harness actually owns the foreground group (argv-verified)
-   *  — so a stale menu can never SIGTERM vim or a build the user started in the pane. */
-  terminateForeground(persistKey: string, expectedAgentId?: string): Promise<boolean>
+   *  — so a stale menu can never SIGTERM vim or a build the user started in the pane. On Windows
+   *  (session host / direct ConPTY) the identity gate is mandatory and the kill is the proven agent's
+   *  process tree, never the shell; `'unsupported'` = the running session host predates that verb. */
+  terminateForeground(persistKey: string, expectedAgentId?: string): Promise<boolean | 'unsupported'>
   /** The agent session's display name (`/rename` name, else auto name) read from the agent's own
    *  session store, resolved strictly by sessionId; null if unknown. Keeps a node title in sync with
    *  the `/resume` name (e.g. after resume) without cross-contaminating same-folder sessions.
@@ -1134,6 +1463,13 @@ export interface WorkspaceApi {
   /** Fired when THIS core wrote the project itself (Server Edition headless canvas control: an agent
    *  opened, renamed, moved, closed…). Not an outside edit — the renderer merges it, never asks. */
   onServerChange(cb: (project: Project) => void): () => void
+  /**
+   * Main asks for pending canvas edits to be written NOW — before a quit or a restart-to-update
+   * (`src/main/renderer-flush.ts`). The callback's settling is the answer; main waits at most ~1 s
+   * either way. Desktop only: the Server Edition has no main process to quit, so its bridge never
+   * fires it. Returns unsubscribe.
+   */
+  onFlushRequest(cb: () => Promise<unknown> | void): () => void
 }
 
 export interface ProjectSettingsApi {
@@ -1216,8 +1552,18 @@ export interface DialogApi {
   selectFile(): Promise<string | null>
 }
 
+export interface ClipboardWriteOptions {
+  /**
+   * Never raise a failure toast. For writes the user did not explicitly ask for as a copy — today
+   * only copy-on-select (issue #759), which writes on every completed drag, where a toast per drag
+   * would be unusable. The write still tries every route; only the banner is withheld. The desktop
+   * preload's write is fire-and-forget IPC with no failure surface at all, so it ignores this.
+   */
+  quiet?: boolean
+}
+
 export interface ClipboardApi {
-  writeText(text: string): void
+  writeText(text: string, opts?: ClipboardWriteOptions): void
   /** Copy local files so Finder and other file-aware macOS apps can paste them. */
   writeFiles(paths: string[]): Promise<boolean>
 }
@@ -1282,6 +1628,17 @@ export interface FilesApi {
    * Resolves null when it could not be written; callers drop that file like a failed drop.
    */
   saveCanvasImage(projectId: string, name: string, dataBase64: string): Promise<string | null>
+  /**
+   * Store a custom sound for an agent alert (issue #289). The core validates kind, extension,
+   * size and magic bytes, then writes a FIXED per-kind file under its own data dir — the picked
+   * file's path is never sent, only its bytes and base name. Resolves `{ ok: false, error }` for a
+   * refusal; never rejects on a bad file.
+   */
+  saveAlertSound(kind: AlertSoundKind, name: string, dataBase64: string): Promise<AlertSoundSaveResult>
+  /** The stored custom sound for `kind` as base64, or null when there is none (or it is unreadable). */
+  readAlertSound(kind: AlertSoundKind): Promise<string | null>
+  /** Delete the custom sound for `kind` (Reset to default). */
+  clearAlertSound(kind: AlertSoundKind): Promise<boolean>
 }
 
 export interface MediaApi {
@@ -1438,6 +1795,17 @@ export interface SpeechSettings {
 export type TerminalCursorStyle = 'block' | 'bar' | 'underline'
 export type TerminalCursorInactiveStyle = TerminalCursorStyle | 'outline' | 'none'
 
+/** The primary modifiers of a forwarded desktop ⌘/Ctrl+0 (issue #915): the renderer applies the
+ *  per-platform terminal-font-reset predicate to them. Optional on the listener because the Server
+ *  Edition stub never fires and an absent value must read as "not a font reset". */
+export interface ZoomActualSizeModifiers {
+  meta: boolean
+  control: boolean
+}
+
+/** `settings.runInBackgroundOnClose` — see the field's doc. */
+export type BackgroundOnCloseSetting = 'auto' | 'on' | 'off'
+
 /** User-configurable application settings (settings.json). */
 export interface Settings {
   fontSize: number
@@ -1554,6 +1922,13 @@ export interface Settings {
   worktreePathTemplate: string
   /** ms to dwell over a terminal before it takes pointer focus (pan-across guard). */
   panHoverDelay: number
+  /** Issue #757. Whether a terminal node's keyboard focus follows the POINTER (the long-standing
+   *  behaviour and the default): a `panHoverDelay` dwell takes it and leaving the node gives it
+   *  back. Off = click to focus (the Mac model): the pointer decides nothing, a click or a "go to
+   *  node" takes the keyboard, and the terminal keeps it until focus really moves elsewhere
+   *  (another node, the empty canvas, a field). Machine-local, Settings → Behavior. Decisions live
+   *  in `renderer/lib/terminalFocusMode.ts`. */
+  terminalFocusFollowsPointer: boolean
   doubleClickFocus: boolean
   /** "Go to node" (sessions sidebar, notification click, ⌘K jump, breadcrumb steps, presence
    *  travel) fits the node in view. Off: the camera keeps the CURRENT zoom and only pans, which is
@@ -1561,6 +1936,12 @@ export interface Settings {
    *  costs them the sense of where they were. Either way the node is centred and kept clear of the
    *  floating chrome (renderer/lib/nodeFocus). */
   focusZoomToNode: boolean
+  /** Closing the LAST session (terminal/agent) node of a project with its × offers to close the
+   *  project too (issue #848). Opt-in — default OFF, because not everyone closes their last
+   *  session when they are done with a project. Only the user's × click asks; a restart, an exit,
+   *  a hibernated agent (still a node) or a bulk/programmatic close never does
+   *  (renderer/lib/lastSessionClose). Declining keeps the project open. */
+  offerCloseProjectOnLastSession: boolean
   /** Whether the bottom-left canvas lock survives a restart. OFF by default, and deliberately so:
    *  the lock was transient by design, because a canvas that will not pan on the next launch reads
    *  as "the app is frozen" to whoever opens it, and the lit button is a small thing to spot. Users
@@ -1600,6 +1981,37 @@ export interface Settings {
    * click drops whatever was last selected anywhere on the machine into a live agent prompt.
    */
   terminalMiddleClickPaste: boolean
+  /**
+   * Copy a completed MOUSE selection that the terminal emulator (xterm) owns to the system
+   * clipboard (issue #759). OFF by default: it preserves the explicit-copy behaviour, and silently
+   * changing what is on the clipboard is a surprise worth opting into.
+   *
+   * Scope, stated honestly: it covers only selections xterm makes itself — a drag, double/triple
+   * click, or a FORCED selection (Option-drag on macOS, Shift-drag elsewhere) inside an app that
+   * tracks the mouse. It cannot copy a selection an app draws itself, and OSC 52 copies (tmux
+   * copy-mode, vim `"+y`) reach the clipboard whether this is on or off. Programmatic selections
+   * (find-bar hits) never copy. Read live, so a toggle applies to the next drag on every open
+   * terminal. Logic: `renderer/terminal/copy-on-select.ts`.
+   */
+  copyOnSelect: boolean
+  /** ⌘+ / ⌘− / ⌘0 (Ctrl off-mac) change the FOCUSED terminal's own font size instead of doing
+   *  nothing / zooming the canvas (issue #915). The size is stored per node
+   *  (`CanvasNodeState.terminalFontSize`); ⌘0 clears it back to `fontSize`. OFF by default: off-mac
+   *  the chord is Ctrl+−, which a focused terminal passes to the shell today (readline undo). With
+   *  it off, and whenever no terminal has focus, the keys behave exactly as before. See
+   *  renderer/terminal/terminal-font-zoom.ts. */
+  terminalFontZoomKeys: boolean
+  /**
+   * Windows SSH projects: after a key is unlocked with its passphrase, also load it into the
+   * Windows OpenSSH agent service, so later connections (and the user's own `ssh`) do not prompt
+   * again. OFF by default because that agent STORES the key — DPAPI-encrypted in
+   * `HKCU\Software\OpenSSH\Agent\Keys`, surviving service restarts — until it is removed
+   * (`ssh-add -d` / `-D`), and it refuses a lifetime constraint (measured on windows-latest,
+   * OpenSSH_for_Windows_9.5p2), so there is no "for this session only". A host whose own
+   * `~/.ssh/config` says `AddKeysToAgent yes` gets the add without this switch: that user already
+   * asked OpenSSH for exactly this. Logic: `core/remote-ssh/native/agent-add.ts`.
+   */
+  windowsSshAgentAddKeys: boolean
   /** Plain mouse wheel zooms the canvas (no Cmd/Ctrl needed). On macOS a two-finger trackpad
    *  scroll keeps panning independently (see canvas/wheel-gesture.ts), so mouse and trackpad
    *  coexist; elsewhere this still trades away scroll-to-pan, so it stays opt-in. */
@@ -1631,6 +2043,13 @@ export interface Settings {
   browserMemorySaver: boolean
   accent: string
   tmuxEnabled: boolean
+  /**
+   * Which multiplexer creates a NEW local terminal's persistent session on POSIX: `tmux` (default)
+   * or `zellij`. Hand-editable, so every reader goes through `normalizeSessionBackend`
+   * (@shared/session-backend) — anything unknown reads as tmux. A node whose session already
+   * lives in one backend keeps reattaching there; Windows and SSH projects ignore it.
+   */
+  sessionBackend: SessionBackend
   /**
    * Reach a released tmux session with a control-mode (`tmux -C`) client instead of respawning its
    * terminal — the shadow clients in pty-manager.ts (`shadowAttach`) and the shared background-write
@@ -1704,6 +2123,11 @@ export interface Settings {
   soundEffects: boolean
   /** Sound-effect volume, 0..1. */
   soundVolume: number
+  /** User-picked replacements for the built-in chimes, per alert kind (issue #289). Holds only a
+   *  display name + a stamp — the FILE lives in the core's data dir (`<userData>/sounds/`), never
+   *  at the user's original path. Read through `customAlertSoundFor` (hand-editable JSON); an
+   *  absent/malformed entry, or a file that is gone or will not decode, plays the built-in chime. */
+  customAlertSounds: CustomAlertSounds
   /** User-defined agents (BYO CLI) appended to the Add menus. */
   customAgents: CustomAgent[]
   /** One gateway root + non-secret credential reference used by model-switch-capable harnesses. */
@@ -1824,9 +2248,12 @@ export interface Settings {
   /** Push when an agent finishes a turn (the `done` kind). Default on. Sub-gate under
    *  `mobilePushEnabled` (the master switch). Toggle in Settings → Notifications. */
   mobilePushDone: boolean
-  /** Stream Live Activity updates (Lock Screen / Dynamic Island) to paired phones as a session's
-   *  state + activity + context% change (spec: interactive-push-live-activities). Default on.
-   *  Sub-gate under `mobilePushEnabled` (the master switch). Toggle in Settings → Notifications. */
+  /** Stream live status updates to paired phones as a session's state + activity + context%
+   *  change — an iOS Live Activity (Lock Screen / Dynamic Island) or an Android ongoing
+   *  notification (spec: interactive-push-live-activities). Default on. The KEY keeps its
+   *  iOS-era name because it is persisted in settings.json; the UI calls it "Live updates on
+   *  phone". Sub-gate under `mobilePushEnabled` (the master switch). Toggle in Settings →
+   *  Notifications. */
   mobileLiveActivities: boolean
   /** Hold phone ALERTS while you're actively at this computer, releasing them when you go idle or
    *  lock the screen (spec: presence-aware-push). Default on. Desktop-only (the Server Edition is
@@ -1852,6 +2279,14 @@ export interface Settings {
    *  The auto-update "Restart to update" flow never asks — that decision was already made.
    *  Settings → Behavior. */
   confirmBeforeQuit: boolean
+  /** Windows/Linux "background mode": closing the window hides it to the notification-area tray
+   *  instead of quitting, so the phone relay host, hook server, notifications and updater keep
+   *  running — the analogue of macOS keeping the app in the Dock. `'auto'` (default) = on for
+   *  Windows, off for Linux (whose tray support depends on the desktop environment). Resolved by
+   *  `resolveBackgroundOnClose` (src/main/background-mode.ts); ignored on macOS (always hides) and
+   *  on the Server Edition (no window). Hand-editable: an unknown value reads as `'auto'`.
+   *  Settings → Behavior (Windows/Linux only). */
+  runInBackgroundOnClose: BackgroundOnCloseSetting
   /** macOS Notch HUD (docs/notch-hud.md): a transparent always-on-top strip by the notch showing
    *  walking agent mascots while agents work, expanding into a mini session panel. Default on;
    *  macOS + desktop only (ignored on other platforms / Server Edition). */
@@ -1895,6 +2330,11 @@ export interface Settings {
    *  strands a live session gets their canvas back without downgrading the app. Neither value ever
    *  admits a forged token. */
   hookIdentityStrict?: boolean
+  /** Agent-integration consent (issue #744, `@shared/agent-integrations`): which agents nodeterm
+   *  may integrate with by writing into their user-owned global config (status hooks, skills),
+   *  here and per SSH host. Optional and absent from DEFAULT_SETTINGS: absent = a new install that
+   *  has not been asked, which writes NOTHING. Hand-editable, so every reader sanitizes. */
+  agentIntegrations?: AgentIntegrationsSettings
   /** Machine-local waivers for the canvas-control destructive confirm dialog
    *  (@shared/control-confirm). Absent — and absent from DEFAULT_SETTINGS — means "always ask",
    *  which is the pre-feature behavior bit for bit.
@@ -1904,6 +2344,17 @@ export interface Settings {
    *  be turned off for a user by a repository they cloned. A waiver is a statement about this
    *  machine's trust in its own agents, so it lives here and NEVER in a project file. */
   controlConfirmWaivers?: ControlConfirmWaivers
+  /** Machine-local: move a session card to a column once every pull request linked to it has
+   *  merged (@shared/kanban-pull-links — why this is here and never in the project file). Absent —
+   *  and absent from DEFAULT_SETTINGS — means off everywhere. Read through
+   *  `sanitizeKanbanPullAutoMove`: settings.json is hand-editable. */
+  kanbanPullAutoMove?: KanbanPullAutoMove
+  /** Machine-local board dispatch: which projects start an agent run when this person moves a
+   *  GitHub issue card into a chosen column, with which agent and how many at once, plus the kill
+   *  switch (@shared/board-dispatch — why this is here and never in the project file). Absent —
+   *  and absent from DEFAULT_SETTINGS — means off everywhere. Read through
+   *  `sanitizeBoardDispatch`: settings.json is hand-editable. */
+  boardDispatch?: BoardDispatch
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -1946,12 +2397,17 @@ export const DEFAULT_SETTINGS: Settings = {
   omniKanbanAsDefault: false,
   worktreePathTemplate: DEFAULT_WORKTREE_PATH_TEMPLATE,
   panHoverDelay: 600,
+  terminalFocusFollowsPointer: true,
   doubleClickFocus: true,
   focusZoomToNode: true,
+  offerCloseProjectOnLastSession: false,
   rememberCanvasLock: false,
   openMarkdownPreview: true,
   openMarkdownPreviewMigrated: true,
   terminalMiddleClickPaste: false,
+  copyOnSelect: false,
+  terminalFontZoomKeys: false,
+  windowsSshAgentAddKeys: false,
   wheelZoom: false,
   wheelZoomSpeed: 1,
   trackpadPan: true,
@@ -1959,6 +2415,7 @@ export const DEFAULT_SETTINGS: Settings = {
   browserMemorySaver: true,
   accent: '#0a84ff',
   tmuxEnabled: true,
+  sessionBackend: 'tmux',
   ptyShadowClients: true,
   terminalGpuRendering: 'auto',
   tmuxScrollback: 50000,
@@ -1979,6 +2436,7 @@ export const DEFAULT_SETTINGS: Settings = {
   notifyConsentAsked: false,
   soundEffects: true,
   soundVolume: 0.5,
+  customAlertSounds: {},
   customAgents: [],
   modelGateway: { baseUrl: '', apiKey: '' },
   // No default gateway model until the user picks one in Settings → Model gateway. Absent ⇒
@@ -2041,6 +2499,8 @@ export const DEFAULT_SETTINGS: Settings = {
   // Confirm-before-quit default ON: sessions survive a quit anyway, but an accidental ⌘Q
   // tears down every window at once; the toggle is one switch away for who finds it noisy.
   confirmBeforeQuit: true,
+  // Background mode 'auto' = on for Windows (the tray is always there), off for Linux.
+  runInBackgroundOnClose: 'auto',
   // macOS Notch HUD default ON (guarded to darwin at runtime; a no-op elsewhere).
   notchHud: true,
   notchWidth: 168,
@@ -2058,6 +2518,12 @@ export const DEFAULT_SETTINGS: Settings = {
 export interface SettingsApi {
   load(): Promise<Settings>
   save(settings: Settings): Promise<void>
+}
+
+/** Agent-integration consent status (issue #744). The CHOICE rides `settings.agentIntegrations`;
+ *  this only reports what the host's last reconcile did. */
+export interface IntegrationsApi {
+  status(): Promise<import('./agent-integrations').AgentIntegrationsStatus>
 }
 
 /** A downloadable whisper model plus its on-disk status, as returned by `speech.models()`. */
@@ -2082,6 +2548,11 @@ export interface SpeechApi {
   /** Ask for microphone permission. Electron: OS-level (macOS TCC prompt); browser: always
    *  resolves true — the browser's own getUserMedia prompt is not ours to gate. */
   micConsent(): Promise<boolean>
+  /** Open the OS microphone-privacy page (Windows `ms-settings:privacy-microphone`, macOS System
+   *  Settings). Desktop only — ABSENT in the browser bridge (a browser's mic permission lives in
+   *  its own site settings), and the overlay hides its button when absent. Resolves false where
+   *  the OS has no such page. */
+  openMicSettings?(): Promise<boolean>
 }
 
 export interface SshApi {
@@ -2130,6 +2601,17 @@ export interface SshProjectStatusEvent {
    *  `claudeAutoPermissionMode`. `null` = the probe ran but found no claude (distinguishable from
    *  "old CLI" in the tab-menu hint); absent = nothing new. */
   remoteClaudeVersion?: string | null
+  /** Does THIS HOST's `codex` accept `--no-daemon` (probed after connect, `codex --help` through
+   *  the login shell)? Keyed by `sshHostKey` because it is a fact about the host's binary, not the
+   *  project. Only `supported: true` puts the flag on a remote Codex launch — see
+   *  shared/agents/codex-daemon.ts. Absent = nothing new. */
+  remoteCodexNoDaemon?: RemoteCodexNoDaemon
+}
+
+/** A host's answer to "does its `codex` accept `--no-daemon`?" — see `SshProjectStatusEvent`. */
+export interface RemoteCodexNoDaemon {
+  hostKey: string
+  supported: boolean
 }
 
 /** main → renderer: this SSH identity file needs its passphrase (the ssh-agent doesn't hold the
@@ -2160,6 +2642,8 @@ export interface SshProjectApi {
     claudeAutoPermissionMode?: boolean
     /** The probed remote `claude --version` output (`null` = probe failed; only on reused conns). */
     remoteClaudeVersion?: string | null
+    /** The host's `--no-daemon` answer, when a probe already ran on this connection (reused conns). */
+    remoteCodexNoDaemon?: RemoteCodexNoDaemon
   }>
   /** Tear down the master (remote tmux is unaffected). */
   disconnect(projectId: string): Promise<void>
@@ -2376,6 +2860,17 @@ export interface UpdatePolicy {
   minSupported: string | null
   /** True when the running version is below the minimum supported version. */
   mandatory: boolean
+  /** Optional release highlights (markdown) the feed carries for `latestVersion`. */
+  notes?: string
+  /** The version `notes` describe. Notes are shown only on a card for this exact version. */
+  latestVersion?: string
+}
+
+/** Restart-to-update was accepted: `preparing` = waiting for the OS updater to stage it (macOS),
+ *  `restarting` = the install is starting now. */
+export interface UpdateInstalling {
+  phase: 'preparing' | 'restarting'
+  version: string | null
 }
 
 export interface UpdateProgress {
@@ -2403,6 +2898,13 @@ export interface UpdateApi {
    * and "we cannot look" are different facts with different remedies. Returns unsubscribe.
    */
   onNoChannel(listener: () => void): () => void
+  /** Restart-to-update was accepted and is preparing / restarting. Returns unsubscribe. */
+  onInstalling(listener: (s: UpdateInstalling) => void): () => void
+  /**
+   * The update main already staged this run (announced once), or null. A renderer that loads after
+   * that one-time `onDownloaded` — ⌘R, a window recreated after a crash — asks on mount.
+   */
+  getStaged(): Promise<{ version: string; notes: string } | null>
   /** Trigger a manual update check. */
   check(): void
   /** The running app version. */
@@ -2411,6 +2913,13 @@ export interface UpdateApi {
   getPolicy(): Promise<UpdatePolicy>
   /** Quit and install the staged update. */
   restart(): void
+  /** Prepare-for-update (Windows session host, issue #829): what the running host holds. Never
+   *  launches a host. Answers `unsupported` off Windows and in the Server Edition. */
+  prepareInspect(): Promise<import('./update-prep').UpdatePrepInspection>
+  /** Prepare-for-update: ask the host to end every session and exit, and confirm it did. */
+  prepareShutdownHost(): Promise<import('./update-prep').UpdatePrepShutdown>
+  /** Prepare-for-update: quit the app (no quit confirmation) once the host is gone. */
+  prepareQuit(): void
 }
 
 /** A single news/announcement item, fetched from the remote announcements feed. */
@@ -2467,8 +2976,10 @@ export type ContextLinkMap = Record<string, ContextLinkInfo[]>
 export interface ContextLinkApi {
   /** Push the current link map to main; main rewrites the per-node link files. */
   setLinks(map: ContextLinkMap): Promise<void>
-  /** Static facts the renderer needs to compose link messages: the CLI shim's absolute path. */
-  info(): Promise<{ shimPath: string }>
+  /** Static facts the renderer needs to compose link messages: the CLI shim's absolute path, and
+   *  the `process.platform` of the core that wrote it (absent from an older core ⇒ treat as POSIX).
+   *  On `win32` a non-claude agent is told to run the `.cmd` launcher beside the shim. */
+  info(): Promise<{ shimPath: string; platform?: string }>
 }
 
 /** One usage window (5h session or 7d weekly) as shown in the indicator. */
@@ -2610,6 +3121,37 @@ export interface SessionMemoryReport {
   ok: boolean
   rows: SessionMemoryRow[]
   mem: MemInfo | null
+  /**
+   * Live nodeterm sessions on this machine that the sweep could NOT measure — today, Zellij-backed
+   * ones (the sweep reads tmux). Absent/0 = none. `null` = could not tell. Local scope only. The
+   * panel must never say "no sessions are running" while this is non-zero or unknown.
+   */
+  unmeasured?: number | null
+  /** Which backend the `unmeasured` sessions belong to, for the panel's sentence. Absent = Zellij
+   *  (the original and, off Windows, only case); `'session-host'` = a running session host older
+   *  than this app, which names its sessions but cannot describe their processes. */
+  unmeasuredBackend?: 'session-host'
+  /**
+   * The Windows session host's OWN cost, which belongs to no session row (CLAUDE.md, Session
+   * memory): its process (every session's headless emulator, node-pty's per-session conout worker
+   * thread) and its non-shell children (one conhost/OpenConsole per ConPTY — they are the host's
+   * children, siblings of the shell, so no row's tree reaches them). Absent = no session host, or it
+   * could not be measured: never a fake zero. The tmux leg never sets it.
+   */
+  host?: SessionHostOverhead
+}
+
+/** See `SessionMemoryReport.host`. All MB figures are MEASURED working sets, not estimates. */
+export interface SessionHostOverhead {
+  pid: number
+  /** The session-host process itself. */
+  selfMb: number
+  /** Its non-shell children (conhost / OpenConsole, plus anything under them — including the
+   *  pane-probe PowerShell worker while it is warm, which is the host's child and its cost). */
+  consoleMb: number
+  /** Direct children recognised as a console host — "N consoles" in the panel. */
+  consoleCount: number
+  totalMb: number
 }
 
 /**
@@ -2666,9 +3208,18 @@ export interface ClaudeUsage {
   updatedAt: number
   /**
    * 'unavailable' = no OAuth subscription token (API-key billing / logged out) → hide pill.
-   * 'fetching' = request in flight. 'ok' = windows present. 'error' = fetch failed.
+   * 'fetching' = request in flight. 'ok' = windows present. 'error' = fetch failed — and when
+   * `limits` is non-empty alongside it, those are the LAST GOOD numbers the service kept
+   * (`holdLastGood`), still stamped with their own `updatedAt`.
    */
   status: 'unavailable' | 'fetching' | 'ok' | 'error'
+  /**
+   * The latest read was refused with HTTP 429. The usage endpoint's request budget is also
+   * spent by every Claude CLI using the same login (the CLI reads this endpoint itself), so a
+   * host running dozens of sessions can exhaust it without us. Absent = not rate limited (or
+   * not known to be).
+   */
+  rateLimited?: boolean
 }
 
 /**
@@ -2794,6 +3345,24 @@ export interface CanvasApi {
   onMutation(listener: (projectId: string, mutation: CanvasMutation) => void): () => void
 }
 
+/**
+ * Which of this core's projects a canvas authority governs (the Server Edition hosting a team,
+ * docs/hosted-team-relay.md). The authority writes a governed project's content only from the ops it
+ * hears, so a client must publish its canvas ops for such a project even when nobody else is
+ * attached — the solo gate is overridden for it. The desktop runs no authority and governs nothing.
+ */
+export interface CanvasAuthorityApi {
+  /** true = this core may govern projects, and which ones is known only once `governed()` answers:
+   *  until then a client publishes for EVERY project on it (the Server Edition). false = known in
+   *  advance, so nothing is assumed (the desktop and a Team Access tab govern nothing; a hosted
+   *  relay tab answers from its own bindings). */
+  readonly assumeAllUntilAnswered: boolean
+  /** The governed project ids right now. Never rejects: "unknown" is the empty list. */
+  governed(): Promise<string[]>
+  /** Fires with the NEW governed set whenever it changes (a share or unshare). Returns unsubscribe. */
+  onChanged(listener: (ids: string[]) => void): () => void
+}
+
 /** One searchable line extracted from a Claude session transcript. */
 export interface TranscriptLine {
   role: 'user' | 'assistant' | 'tool'
@@ -2886,11 +3455,13 @@ export interface ChatTranscriptResult {
    */
   unmatchedResults?: ChatCarriedToolResult[]
   /**
-   * PAGED claude reads only: the newest assistant record's `message.model` in the returned window
-   * (`<synthetic>` error lines skipped). Absent when the window has none, and on the legacy read.
+   * PAGED reads only: the newest assistant record's model in the returned window — claude's
+   * `message.model` (`<synthetic>` error lines skipped), grok's `model_id`. Absent when the window
+   * has none, and on the legacy read.
    */
   model?: string
-  /** PAGED claude reads only: the newest assistant record's top-level `effort` in the window. */
+  /** PAGED reads only: that same record's effort — claude's top-level `effort`, grok's
+   *  `reasoning_effort`. Never carried forward from an older record. */
   effort?: string
   /** PAGED reads only, with `found: false`: the transcript could not be READ (a remote host that did
    *  not answer, a growth re-read that failed, a remote node with no reachable master) — as opposed
@@ -2952,6 +3523,16 @@ export interface ChatApi {
     accountId?: string,
     nodeId?: string
   ): Promise<TranscriptPresence>
+
+  /**
+   * The ⌘M composer's `/` catalog for a node: its agent's measured built-in slash commands, custom
+   * command files and skills (core/chat-catalog.ts). An SSH-project node's files are read on its
+   * HOST (`nodeId` — remoteness is the shell's own record, never this call's). A relay tab REJECTS
+   * (E_UNSUPPORTED — the peer's files are not this machine's to read, and the relay does not carry
+   * the channel); the composer then offers the shared built-in table alone, and every caller must
+   * treat any rejection the same way.
+   */
+  catalog(nodeId: string, agentId: string, accountId?: string, cwd?: string): Promise<import('./chat-catalog').ChatCatalog>
 }
 
 /** Optional SSH context for account ops. When `projectId` names a connected SSH project, the
@@ -3100,6 +3681,8 @@ export interface TranscriptHit {
   cwd: string
   projectLabel: string
   mtime: number
+  /** The managed/linked Claude account whose root holds this transcript; absent = system. */
+  accountId?: string
 }
 
 export interface TranscriptsApi {
@@ -3194,11 +3777,17 @@ export interface CodexCliCaps {
    *  "this CLI accepts nothing". Measured: 0.146.0–0.148.0 list `untrusted, on-request, never`;
    *  0.149.0+ list `on-request, never`. */
   approvalValues: string[] | null
+  /** Does this `codex` accept `--no-daemon`? `null` = unknown (not probed, no codex). Every
+   *  nodeterm-launched plain Codex TUI carries the flag when this is `true`: from 0.157.0 a plain
+   *  TUI otherwise runs inside ONE shared background app-server per CODEX_HOME that keeps the FIRST
+   *  pane's `NODETERM_*` environment, attributing every later node's hooks and tool shells to that
+   *  first node (see `codexNoDaemonFrom`). Optional so an older core's answer still type-checks. */
+  noDaemon?: boolean | null
 }
 
 /** The answer before the probe has run, and for any surface that cannot speak for the CLI that will
  *  actually run the session (a relay tab, an SSH host). */
-export const UNKNOWN_CODEX_CLI_CAPS: CodexCliCaps = { approvalValues: null }
+export const UNKNOWN_CODEX_CLI_CAPS: CodexCliCaps = { approvalValues: null, noDaemon: null }
 
 /** Whether a Codex node launched on this machine right now would get a managed shared identity.
  *  Fed by core/codex-identity-caps.ts; the unknown answer is `false`, i.e. plain `codex`. */
@@ -3217,6 +3806,10 @@ export interface CodexIdentityCaps {
    *  flag in its help and no such runtime, so it can never serve a shared identity. Unknown ⇒
    *  false ⇒ plain codex. */
   appServer: boolean
+  /** Why shared identity is off by DESIGN rather than by probe, when it is. `unsupported-platform`
+   *  = a Windows core (phase 1: not wired there yet; every node runs its own codex). Absent on
+   *  every other answer — an older core never sends it. */
+  unavailableReason?: 'unsupported-platform'
 }
 
 /** The answer before the probe has run, and the one the Server Edition gives on purpose. */
@@ -3324,12 +3917,13 @@ export interface LicenseStatus {
 
 /**
  * Where the entitlement behind this install came from. A verified entitlement's licenseId is NOT
- * always a keygen license id: an App Store purchase on a paired phone bridges Pro to the desktop
- * and mints `apple:<txn>`, and `free:` exists too. For those the server makes zero keygen calls
- * and answers `key: null, used: 0, seats: 0` — genuinely "device counting does not apply here",
- * which is a different fact from a failed read and from a keygen license with no devices yet.
+ * always a keygen license id: a store purchase on a paired phone bridges Pro to the desktop and
+ * mints `apple:<txn>` (App Store) or `google:<orderId>` (Google Play), and `free:` exists too. For
+ * those the server makes zero keygen calls and answers `key: null, used: 0, seats: 0` — genuinely
+ * "device counting does not apply here", which is a different fact from a failed read and from a
+ * keygen license with no devices yet.
  */
-export type LicenseSource = 'keygen' | 'apple' | 'free'
+export type LicenseSource = 'keygen' | 'apple' | 'google' | 'free'
 
 /** What Settings → License shows: the key to copy and how much of the device cap is in use.
  *  A failed read is an ERROR, never "0 devices" — the two are different facts. */
@@ -3505,10 +4099,75 @@ export interface RelayClientApi {
   send(connectionId: string, frame: string): void
   /** Listen for an inbound rpc frame (a JSON string) from the host. Returns an unsubscribe. */
   onFrame(connectionId: string, listener: (frame: string) => void): () => void
-  /** Fires when the connection's relay socket drops (host/relay gone). Returns unsubscribe. */
-  onClosed(connectionId: string, listener: () => void): () => void
+  /** Fires when the connection's relay socket drops (host/relay gone). `reason` is set only when
+   *  the host refused this device over the tunnel first (a hosted team: an owner declined, removed
+   *  it, or nobody answered in time). Returns unsubscribe. */
+  onClosed(connectionId: string, listener: (reason?: RelayClosedReason) => void): () => void
   /** Close a connection: end the relay socket and drop access to the host. */
   disconnect(connectionId: string): void
+}
+
+/** Why a host refused a relay client before closing it (the core relay's `TrustDeniedReason`). */
+export type RelayClosedReason = 'denied' | 'removed' | 'expired'
+
+/**
+ * The hosted teams this desktop has joined by `nodeterm://join` code. A join code is passed to
+ * `relayClient.connect` like a pairing offer; these are the bookmarks that connect leaves behind.
+ * Desktop-only: a browser cannot join a relay host, so the Server Edition answers an empty list.
+ */
+export interface RelayHostedApi {
+  /** The bookmarks, never their device tokens. `approved` = both humans approved this device on
+   *  that host, so a reconnect needs no SAS comparison on this side. */
+  bookmarks(): Promise<Array<{ hostId: string; label: string; approved: boolean; code: string }>>
+  /** Forget a bookmark (its device token and its approval). Rejects while a join for that team is
+   *  still minting or joining: that join would write the bookmark straight back. */
+  removeBookmark(hostId: string): Promise<void>
+}
+
+/** A hosted team member's role (the core team store's `TeamRole`). */
+export type HostedRole = 'owner' | 'editor' | 'commenter' | 'viewer'
+
+/** A device waiting for an owner to approve it (core hosted-service's `HostedPending`). */
+export interface HostedPending {
+  pendingId: string
+  /** The code both people compare out of band. */
+  sas: string
+  peerKeyB64: string
+  /** Host wall-clock ms the request arrived. */
+  since: number
+}
+
+/** Why a pending request stopped being pending. `approved` / `denied` may be ANOTHER owner's answer;
+ *  `replaced` = the same device asked again (its newer request arrives on its own). */
+export type HostedPendingClosedReason = 'approved' | 'denied' | 'expired' | 'replaced' | 'gone'
+
+/** What `relay:hosted:self` answers: this device's role, its label on the team, the host's label. */
+export interface HostedSelf {
+  role: HostedRole
+  label: string
+  hostLabel: string
+}
+
+/**
+ * The hosted team verbs of ONE relay session. Only a relay tab joined by a `nodeterm://join` code has
+ * it (`NodeTerminalApi.hosted`); a local session, a Server Edition browser and a Team Access relay
+ * tab (desktop to desktop) never do. The host answers every one of these itself and judges the
+ * caller's role: `self` is open to any member, the rest are owner-only.
+ */
+export interface HostedSessionApi {
+  self(): Promise<HostedSelf>
+  /** The requests still waiting (owner-only). Pulled once on open; the events below are deltas. */
+  pending(): Promise<HostedPending[]>
+  /** The team's join code, or null when the host has none to hand out. */
+  inviteCode(): Promise<string | null>
+  /** Admit a waiting device with `role`. False when it is gone or another owner answered first. */
+  approve(pendingId: string, role: HostedRole): Promise<boolean>
+  /** Refuse a waiting device. False when it is already gone. */
+  deny(pendingId: string): Promise<boolean>
+  onPeerPending(listener: (p: HostedPending) => void): () => void
+  onPendingClosed(listener: (p: { pendingId: string; reason: HostedPendingClosedReason }) => void): () => void
+  /** The team's shared projects changed (share or unshare on the host): their whole set. */
+  onSharedChanged(listener: (p: { projectIds: string[] }) => void): () => void
 }
 
 /** A paired device as exposed to the renderer — the bearer token is never included. */
@@ -3548,7 +4207,8 @@ export type DeviceRevokeServerOutcome = 'ok' | 'failed' | 'skipped'
  * as a clean one (the same discipline as remote/revocation.ts's persisted/killed).
  */
 export interface DeviceRevokeResult {
-  /** The agent.json entry + authorized_keys line were removed from this machine. */
+  /** The phone's relay trust (every phone relay pin + live relay session), its authorized_keys line
+   *  and its agent.json entry were all removed from this machine. */
   local: boolean
   /** Whether the phone's Pro entitlement was taken back on the relay backend. */
   server: DeviceRevokeServerOutcome
@@ -3594,6 +4254,14 @@ export interface PairingApi {
    * entitlement back on the relay backend. Never rejects for a leg that failed — read the result.
    */
   revokeDevice(id: string): Promise<DeviceRevokeResult>
+  /** Push webhook (shared/push-webhook.ts): what token is live for this machine — never its value. */
+  webhookStatus(): Promise<PushWebhookResult<PushWebhookTokenInfo | null>>
+  /** Mint (or rotate) the token. The value in the result is the only copy that will ever exist
+   *  outside the user's own storage: the backend keeps only its hash, and this app keeps nothing. */
+  webhookMint(): Promise<PushWebhookResult<PushWebhookMinted>>
+  webhookRevoke(): Promise<PushWebhookResult<true>>
+  /** The API base the examples should name (NODETERM_API_BASE or production). */
+  webhookEndpoint(): Promise<string>
 }
 
 /** Team presence (docs/team-presence.md). All of it is transient — nothing here is persisted. */
@@ -3670,6 +4338,7 @@ export interface NodeTerminalApi {
   worktree: WorktreeApi
   dialog: DialogApi
   settings: SettingsApi
+  integrations: IntegrationsApi
   speech: SpeechApi
   ssh: SshApi
   sshProject: SshProjectApi
@@ -3691,10 +4360,17 @@ export interface NodeTerminalApi {
   githubControl: import('./github-issues').GitHubControlApi
   usage: UsageApi
   sessionMemory: SessionMemoryApi
+  devPorts: import('./dev-ports').DevPortsApi
+  /** "Open recent" — the newest agent conversations in this machine's CLI histories. */
+  recentConversations: import('./recent-conversations').RecentConversationsApi
   wallpaper: import('./wallpaper').WallpaperApi
+  /** Run node host side (launch.json, devices, launcher, status, stop, signals, reload on save). */
+  runConfig: import('./run-config').RunConfigApi
   triggers: TriggersApi
   context: ContextApi
   canvas: CanvasApi
+  /** Which projects publish their canvas ops even when alone (see CanvasAuthorityApi). */
+  canvasAuthority: CanvasAuthorityApi
   codex: CodexApi
   claude: ClaudeApi
   grok: GrokApi
@@ -3707,6 +4383,13 @@ export interface NodeTerminalApi {
   remoteHost: RemoteHostApi
   relayHost: RelayHostApi
   relayClient: RelayClientApi
+  relayHosted: RelayHostedApi
+  /** "Share with team" for an SSH project. Desktop only (the Server Edition and relay tabs answer
+   *  `E_UNSUPPORTED`). */
+  shareTeam: ShareTeamApi
+  /** The hosted team verbs of THIS session's host — present only on a relay tab joined by a hosted
+   *  team's join code; absent everywhere else (local, Server Edition, Team Access relay tabs). */
+  hosted?: HostedSessionApi
   handoff: HandoffApi
   pairing: PairingApi
   presence: PresenceApi
@@ -3718,7 +4401,7 @@ export interface NodeTerminalApi {
   /** Fires when the user presses Cmd/Ctrl+0 (zoom the canvas back to 100%). Desktop only: the
    *  key is intercepted in main because Electron's default View menu owns the accelerator. In the
    *  Server Edition the renderer's own keydown handler sees the key and this is a no-op stub. */
-  onZoomActualSize(listener: () => void): () => void
+  onZoomActualSize(listener: (mods?: ZoomActualSizeModifiers) => void): () => void
   /** Native View menu → Snap to Grid toggle. Returns unsubscribe. */
   onToggleAutoAlign(listener: () => void): () => void
   /** Native View menu → Fit View. Returns unsubscribe. */
@@ -3760,6 +4443,12 @@ export interface NodeTerminalApi {
    *  need only be idempotent, not cheap. Returns unsubscribe. Server Edition: never fires (the
    *  pressure levers run host-side there; a browser tab's memory belongs to the browser). */
   onMemoryPressure(listener: (severity: 'warning' | 'critical') => void): () => void
+  /** Fires when the main window is put away (`'hidden'`: close-to-tray, macOS hide-on-close,
+   *  minimize) or brought back (`'shown'`). The renderer answers by treating every terminal as
+   *  offscreen while hidden (renderer/terminal/window-backgrounded.ts). Returns unsubscribe.
+   *  Server Edition: never fires — a browser tab being hidden is a routine tab switch, not the app
+   *  being put away, so the levers stay on their viewport-only behaviour there. */
+  onWindowVisibility(listener: (state: 'hidden' | 'shown') => void): () => void
   /** Fires when THIS MACHINE's pty-device pressure band changes (core/pty-pressure.ts): the
    *  renderer raises/lowers the banner that warns before `kern.tty.ptmx_max` stops every new
    *  terminal from opening. Band changes only, re-sent for a held band at most once every five
@@ -3808,6 +4497,11 @@ export interface NodeTerminalApi {
    *  mirrors it into the agent-status file so the phone can render SLEEPING). Fire-and-forget;
    *  called on every `setHibernated` change and replayed for the persisted set at boot. */
   reportHibernated(nodeId: string, on: boolean): void
+  /** Seed the core's agent-status mirror with node identities from this renderer's persisted
+   *  agentStatus store (see `@shared/agent-identity-seed`). Fire-and-forget and add-only: the core
+   *  fills only nodes it has no session for, and validates every field. A relay tab's api is a
+   *  deliberate no-op — its nodes belong to another core, whose own renderer seeds it. */
+  seedAgentIdentity(entries: IdentitySeedEntry[]): void
   /** Fires when the core asks this renderer to WAKE a hibernated node NOW (a phone viewer just
    *  attached to its session over the relay). A nudge with `wakeHibernatedNode`'s exact contract:
    *  re-read the flag, no-op when not hibernated or not mounted. Returns unsubscribe.
@@ -3880,5 +4574,46 @@ export interface NodeTerminalApi {
    *  already rendered as a control reply — Canvas forwards it verbatim. */
   agentMessage: {
     deliver(req: AgentMessageDeliverRequest): Promise<AgentMessageReply>
+    /** Deliver one mentioned session's copy of a board comment the local user just posted, through
+     *  the same gates. `result` carries the typed outcome the comment row renders. Desktop only: the
+     *  browser and relay bridges answer `notPermitted: unsupported-edition`. */
+    deliverBoardComment(req: BoardCommentDeliverRequest): Promise<AgentMessageReply>
   }
+  /** Board dispatch (#1051): the renderer REPORTS its in-memory dispatch map to core, replaced
+   *  whole on each change, so the read-only `issues` control verb can show it beside an issue
+   *  (@shared/board-dispatch-report). Display only. Desktop and Server Edition are real; a relay
+   *  tab's board is the host's, so there it is inert. */
+  boardDispatch: {
+    report(entries: import('./board-dispatch-report').BoardDispatchReportEntry[]): void
+  }
+  /** Station-failure notices (@shared/station-notice, src/core/agents/station-notice.ts): the
+   *  chips on an orchestrator whose stations stopped, and the renderer's DROPPED verdicts, which
+   *  are the one trigger fact core cannot measure. Desktop and Server Edition are real; a relay
+   *  tab's stations belong to the host's core, so there it is inert. */
+  stationNotice: {
+    list(): Promise<import('./station-notice').StationNoticeView[]>
+    onChanged(cb: (views: import('./station-notice').StationNoticeView[]) => void): () => void
+    reportDropped(nodeId: string, dropped: boolean): void
+  }
+  /** Station task outcomes (`report-outcome`, src/core/station-outcome-store.ts): what each station
+   *  reported about its own task (durable across a restart) — what a `--after-success` wait reads. Desktop and
+   *  Server Edition are real; a relay tab's stations belong to the host's core, so there it is inert
+   *  (and its launch delivery is refused anyway). */
+  stationOutcome: {
+    list(): Promise<import('./station-outcome').StationOutcomeRecord[]>
+    onChanged(cb: (records: import('./station-outcome').StationOutcomeRecord[]) => void): () => void
+  }
+  /** Stations with unfinished HANDED-OVER work (src/core/station-handover.ts) — what plain
+   *  `--after` reads so it never releases on a `done` from before that work arrived. Desktop and
+   *  Server Edition are real; a relay tab's stations belong to the host's core, so there it is
+   *  inert (and its launch delivery is refused anyway). */
+  stationHandover: {
+    list(): Promise<import('./station-handover').StationHandoverRecord[]>
+    onChanged(cb: (records: import('./station-handover').StationHandoverRecord[]) => void): () => void
+  }
+  /** Live links (src/core/watch-link/service.ts): a read-only, expiring browser link to one terminal,
+   *  hosted by THIS machine. Owner-only (`watchLink:*` is host-only). Desktop: real. Server Edition:
+   *  the real bridge, whose create answers `unsupported` until that edition has a license layer.
+   *  Relay tab: an inert stub (a peer's terminals are not this machine's to publish). */
+  watchLink: import('./watch-link-types').WatchLinkApi
 }

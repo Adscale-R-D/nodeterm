@@ -114,6 +114,30 @@ exports, and inbound canvas traffic. A shared file or peer can therefore neither
 select a local executable. See
 [`features/terminals/windows-shell-profiles.md`](features/terminals/windows-shell-profiles.md).
 
+### Agent launches in a Windows-native shell (`pty:execute-launch`)
+
+The renderer's agent launch line is POSIX source (`'it'\''s'`, `"$(cat '<file>')"`). PowerShell
+breaks on the apostrophe, Windows PowerShell 5.1 drops embedded double quotes before the CLI sees
+them, and cmd.exe splits a single-quoted prompt into separate arguments. So a prompt-bearing
+builtin agent node also carries a semantic `data.launchIntent` (`shared/agents/launch-intent.ts`),
+bound to its exact typed line and never serialized. When the launch writer is about to type that
+line into a **local session-host pane on a win32 core**, it calls `pty:execute-launch` instead
+(`renderer/terminal/launch-intent.ts` → `core/launch-intent-execute.ts`): the core resolves the
+agent executable against the session's spawn PATH (native image, then `.ps1`; a `.cmd`-only
+install is refused), reads a `--prompt-file` itself (whitespace flattened to one argument, exactly
+what `"$(cat …)"` yields in PowerShell), encodes argv for the dialect the HOST recorded for that
+generation (`launchDialect` on the attach result; set at spawn only for `pwsh`/`powershell`/`cmd`),
+and delivers through the host's exactly-once launch ledger.
+
+Rules that keep this safe:
+- Every other pane (tmux, SSH, Zellij, plain shell, Git Bash/WSL, any POSIX core) answers
+  `unsupported-shell` before anything is read, and the typed line is used, byte-identical.
+- A refusal made before the host is asked falls back to the typed line; `delivery-failed` (or a
+  lost reply) does NOT — the launch stays held for an explicit Run now, never typed twice.
+- Excluded from the intent (legacy line only): resumes, custom agents, launch-command overrides,
+  per-node models, SSH nodes. A resume line holds only flag words and a validated id.
+- `pty:execute-launch` is host-only for relay peers (`shared/host-control.ts`).
+
 ### The IPty-shim (why the integration is this small)
 
 `PtyManager`'s entire co-attach / flow-control / subscriber / park / reap machinery operates on
@@ -138,15 +162,26 @@ long-lived connection (no positional-FIFO fragility, unlike this app's tmux cont
 | `attach`                         | `new-session -A` / `attach-session`     | full, plus a screen the tmux path never needed (see below) |
 | `hasSession`                     | `has-session -t <name>`                 | full (implemented; not on the hot create path — see below) |
 | `write`                          | raw bytes on an attached client's stdin | full |
+| `writeDetachedV1`                | `send-keys -H` into a released session (no client) | full — additive; an older host answers `unknown command` and the write fails closed (never re-sent as `sendKeys`) |
+| `terminateOwnerV1`               | `kill -TERM -<foreground pgid>`         | Windows shape — `taskkill /T /F` on the re-proven agent pid, never the console root (see below) |
 | `resize`                         | ConPTY/pty resize + `refresh-client -C` | full; each view claims a size, the app's grid follows its most recently active view (issue #914) |
 | `pause` / `resume`               | node-pty `pause()`/`resume()`           | full; per-viewer in core and per-connection in the host (first pause / last resume) |
 | `sendKeys`                       | `send-keys -l -- <text>` (+ `Enter`)    | full — works with no attached client, exactly like tmux |
 | `paneCommand`                    | `display-message -p '#{pane_current_command}'` | approximated — see `process-tree.ts` |
 | `capture`                        | `capture-pane -p -e [-S -N]`            | full, and strictly more (mode restoration — tmux's plain-text capture carries none) |
+| `paneModesV1`                    | (none — tmux owns the mouse itself)     | additive: the pane app's mouse-tracking protocol, for relay scroll routing; an older host answers `unknown command` = "no mouse" |
 | `killSession`                    | `kill-session -t <name>`                | full |
 | `detach`                         | a client's own `tmux detach-client`     | full |
-| `listSessions`                   | `list-sessions -F '#{session_name}'`    | full |
+| `listSessions`                   | `list-sessions -F '#{session_name}'` — plus, with `sessionDetails`, `list-windows`/`list-panes` | full; see "Observability" below |
 | `ping`                           | (liveness probe used during the startup race) | full |
+| `attachExisting {watch: true}`   | `attach-session -E -f ignore-size,read-only` (a live link watcher's client) | feature `watch-attach`: subscribes with NO geometry claim and no pause ticket, refuses `write`/`resize` from that connection, never spawns; on an already-attached connection it withdraws the claim (its last voting subscriber left) |
+| `captureVisible`                 | `capture-pane -p -e` + `display-message '#{cursor_x} #{cursor_y}'` | feature `captureVisible`: visible rows of the ACTIVE buffer only (never history), viewport cursor, `altScreen` — a live link's keyframe |
+| `paneCwd`                        | `display-message -p '#{pane_current_path}'` | feature `paneCwd`: the cwd the pane last REPORTED (OSC 7 / 9;9 / 633, parsed by `cwd-report.ts`), null until one arrives — never the spawn cwd |
+
+The last three are **negotiated at hello** (`SESSION_HOST_FEATURES`) like `geometry`/`shutdown`: the
+client never sends one to a host that did not advertise it (an older, long-lived host keeps serving
+everything else and is never replaced for them). Without them: a live link viewer of a node this app
+does not hold is refused (`join-only`), there is no keyframe (R36), and `paneCwd` is null.
 
 **Not implemented — deliberately out of scope for this pass:**
 
@@ -163,7 +198,11 @@ long-lived connection (no positional-FIFO fragility, unlike this app's tmux cont
   tmux CLI command (a whole subprocess per invocation), every session-host verb is a stateless
   request over the ONE already-open connection, addressed by session name — the exact problem the
   shadow-client machinery exists to make cheap for tmux is simply not a problem here. See the
-  `sendKeys`/`paneCommand`/`capture` rows above: none of them need an attached client.
+  `sendKeys`/`paneCommand`/`capture` rows above: none of them need an attached client. A raw
+  background write to a RELEASED node (`PtyManager.backgroundWrite`, the tier tmux serves through a
+  shadow) uses `writeDetachedV1`: verbatim bytes, addressed by name, no attachment. It is not gated
+  on `ptyShadowClients` (that switch governs `tmux -C` children) and is never retried — a lost
+  reply may still have typed.
 
 ## The seeding trap (read this before touching `spawnNew`/`join`/`SessionHostPty`)
 
@@ -398,11 +437,91 @@ confirmed `{ok:true}` host responses, while a transport/request rejection remain
 propagated. That propagation is what lets the periodic snapshot keep its dirty bit for a retry and
 what prevents a delete from claiming a persistent process is gone when the host never confirmed it.
 
+## Staged host runtime (issue #829, step 3)
+
+A host launched as a hard link of `nodeterm.exe` inside the install directory maps the installed
+executable, its DLLs and `resources.pak`, so the installer cannot replace them while it runs. On
+macOS/Linux the sessions live in tmux, a separate binary, and survive an update; the staged runtime
+gives Windows the same property.
+
+**What happens.** In a packaged Windows build, before the app spawns a host it stages
+(`src/core/session-host-runtime.ts`) a private copy of the runtime into
+
+    %LOCALAPPDATA%\nodeterm\session-host\<app version>-<fingerprint>\
+        nodeterm-sessionhost-v2.exe          (nodeterm.exe, renamed)
+        *.dll, icudtl.dat, resources.pak, snapshot_blob.bin, v8_context_snapshot.bin, locales\
+        resources\session-host\host.cjs + node_modules\node-pty\…
+        nodeterm-runtime.json                (marker: file list, sizes, SHA-256)
+
+and launches the host from there. The fingerprint hashes every source file's path, size and mtime,
+so a reinstall of the same version with different bytes gets its own directory. `app.asar` is not
+copied (the host never reads it).
+
+**The file set is not measured.** It was written on Linux and is the conservative set an
+`ELECTRON_RUN_AS_NODE` process can plausibly touch: `icudtl.dat` is required (Node's ICU data);
+`resources.pak` was measured open by a running host in #829; the DLLs cover load-time and delayed
+imports; `locales\` covers resource-bundle initialisation. The per-machine proof is the smoke run
+below. Device checklist item 1 measures the real set so it can be pruned.
+
+**Never a half-staged directory.** Files are copied into `.staging-<uuid>` beside the target, each
+copy is re-read and compared by SHA-256 to what was read from the install directory, and the copy is
+smoke-run once: `nodeterm-sessionhost-v2.exe -e …` with `ELECTRON_RUN_AS_NODE=1` must load,
+`require` its own node-pty and exit `42`. Only then is the marker written, and the directory is
+published by one `renameAtomic`. A directory without a valid marker (or whose files no longer have
+their recorded sizes) is moved aside and restaged, never launched. Two app processes staging the
+same version at once both succeed: the second rename loses and adopts the first one's directory.
+
+**A new image name.** Uninstallers already in the field match `nodeterm.exe` and
+`nodeterm-session-host.exe` machine-wide by name; the staged host runs as
+`nodeterm-sessionhost-v2.exe` so none of them mistakes it for something that blocks them.
+
+**Fail-safe.** Every staging failure (no `%LOCALAPPDATA%`, a missing required file, disk full, a
+failed hash, a smoke run that does not answer 42 within 60 s — STATUS_DLL_NOT_FOUND, an AppLocker or
+WDAC policy blocking executables under the profile) falls back to the legacy launch: the hard link
+in the install directory, then `nodeterm.exe` itself. A staged host that dies within 10 s with an
+exit code other than the host's own `0`/`1` also falls back, and staging is not offered again for
+the rest of the app run. The legacy host still blocks the installer, so the preflight below still
+protects the install. The first launch of a new version waits at most 45 s for staging (copy,
+hashing, smoke run; usually a few seconds, longer behind an antivirus scan); past that the host is
+launched the legacy way and the finished copy serves the next launch. Staging progress and failures
+are appended to `<userData>\session-host.log` with an `[app]` tag.
+
+**Old copies.** After staging, copies other than the current one are collected — fail-closed: only
+when a Win32_Process query SUCCEEDS, no `nodeterm-sessionhost-v2.exe` process has an unreadable
+path, nothing runs from under that directory, the directory is older than 10 minutes, and renaming
+it aside succeeds (Windows refuses while an image inside is mapped). A failed query deletes nothing.
+A host started by an older version therefore keeps its copy for as long as it runs; once it exits
+(30 s after its last session), the next app launch removes that copy. Disk use: about 250 MB per
+version, normally one or two versions.
+
+**Versions talk to each other.** There is one host per user-data directory, whichever runtime
+started it. A newer app connects to a host started by an older staged runtime through the existing
+negotiation: the state file's protocol version (v1 or v2 accepted) and the `hello` feature list
+(`SESSION_HOST_FEATURES`, e.g. `geometry`). New sessions go to that host as long as it is
+compatible; it exits by itself once it empties, and the next host is launched from the current
+version's copy. The rule for every future change: **the host protocol is additive-only** — a new
+command or push frame is negotiated at `hello`, never assumed. An operation an older host cannot
+perform is refused with `SessionHostProtocolCompatibilityError`, which tells the user why. A host
+whose protocol version the app does not accept at all is left running and the connect fails with
+that reason — an app never kills a host to replace it.
+
+**Not covered.** A dev checkout (`electron-vite dev`) and an asar-resolved bundle keep the legacy
+launch. Server Edition and macOS/Linux are unaffected (tmux).
+
 ## Windows updates and uninstalls
 
-A running host maps the installed Electron executable and its DLLs. Its separate hard-link name
-makes it identifiable; it does **not** make the install directory safe to replace. Closing the app
-alone deliberately leaves the host and its sessions running (#829).
+A host launched the legacy way (a hard link inside the install directory, or `nodeterm.exe` itself)
+maps the installed Electron executable and its DLLs. Its separate hard-link name makes it
+identifiable; it does **not** make the install directory safe to replace. Closing the app alone
+deliberately leaves the host and its sessions running (#829). A host running from its staged
+runtime (above) maps nothing in the install directory and does not block an update or an
+uninstall: the preflight matches it neither by name nor by path, and the old version's uninstaller
+does not know its name. Updating from a version that predates the staged runtime still meets that
+version's legacy host once.
+
+The uninstaller leaves `%LOCALAPPDATA%\nodeterm\session-host` in place, because a staged host may
+still be running from it and the uninstaller never stops a host. `docs/uninstall.md` says how to
+remove it afterwards.
 
 The NSIS install/uninstall preflight now refuses to proceed while the app or host is running from
 any installation, or a process runs under the installation path prefix. It replaces electron-builder's
@@ -418,7 +537,31 @@ path prefix without a directory boundary. Another installation (even a sibling d
 name begins with this installation's name) can therefore block an update. The new preflight must
 cover those legacy targets before invoking the old executable; it never stops them on your behalf.
 
-To update while keeping your saved canvas:
+**The in-app way (nodeterm with the `shutdown` host feature):** open the command palette
+(Ctrl+K) → **Prepare for update…**, or the button on the update card. When the running host is the
+staged copy, the dialog leads with **Quit nodeterm (sessions keep running)** — quit, including from
+the system tray, then run the installer; **Stop all sessions instead…** is the secondary path. A
+host whose location cannot be determined is treated as blocking. Otherwise it:
+
+1. lists every session the host holds — every project, closed ones too — and waits while any agent
+   is working or waiting for your answer (each listed with a **Go** button; **Check again** when
+   it is done);
+2. asks each idle agent whose terminal is open on the canvas to exit normally (`/exit`, `/quit`;
+   Gemini's bare `/quit`, never `--delete`) so its conversation is saved, and reports any that did
+   not;
+3. shows what will still stop — shells and anything running in them (unsaved work there is lost),
+   agents it could not exit — and asks you to confirm (Cancel is the default);
+4. sends the host its `shutdown` command: the host ends every session with its ordinary kill path,
+   replies, removes its state files and exits. nodeterm confirms the process is gone, then quits
+   (optionally opening the download page).
+
+Canvas nodes are kept; on the next launch every terminal cold-starts and agents resume with
+`--resume` where their CLI and saved history allow. If the host cannot end a session it says which
+and keeps running — nothing is quit. A host started by an older nodeterm does not have the
+command; the dialog then shows the manual steps below. nodeterm never kills the host process
+itself. The installer's own refusal is unchanged.
+
+To update by hand (older host, or the in-app flow did not finish), while keeping your saved canvas:
 
 1. Cancel the installer and reopen nodeterm if you already quit it. Save work in every local
    terminal and agent, including closed/other projects and sessions accessed from a phone.
@@ -449,9 +592,18 @@ alone does not guarantee resume, restore an in-flight task, or recover unsaved w
 
 New installers run this check before invoking the previous version's uninstaller. Already shipped
 installers/uninstallers cannot be patched retroactively; use the same preparation steps for them.
-This is a safe refusal and manual recovery path, not live host migration: sessions cannot yet
-survive replacing the binaries they have mapped. A process could still start after the preflight;
-it is not an installation-wide launch lock.
+This is a safe refusal and manual recovery path, not live host migration. A **staged** host
+(0.4.1 and later, running from `%LOCALAPPDATA%\nodeterm\session-host`) maps none of the installed
+files, so it does not block the installer and its sessions survive the update — quitting nodeterm
+(from the tray too) is enough; device-verified across 0.4.1 → 0.4.2 → 0.4.3 in #829, all sessions
+reattached warm. Only a legacy hard-link host inside the installation must be stopped first. A
+process could still start after the preflight; it is not an installation-wide launch lock.
+
+Unattended runs (silent, or the app's own `--updated` handoff) wait up to about 30 seconds for
+nodeterm to finish exiting before refusing; "could not verify" (exit 20) still refuses at once. If
+an `--updated` install still finds nodeterm running, it writes
+`%LOCALAPPDATA%\nodeterm\update-failed.json`, restarts the installed version, and quits; the app
+logs the failure on its next start.
 
 Server Edition has no NSIS updater and is unchanged. Mobile/relay clients must expect a disconnect
 when the user deliberately ends desktop sessions; they cannot authorize an update shutdown.
@@ -464,6 +616,9 @@ Mirrors tmux's server lifetime rule as closely as a different OS allows:
 
 - **Spawned detached, unref'd, `stdio: 'ignore'`, `windowsHide: true`**
   (`session-host-launcher.ts`) — survives the spawning app process exiting entirely.
+- In a packaged Windows build the binary is the **staged runtime's**
+  `nodeterm-sessionhost-v2.exe` outside the install directory (see "Staged host runtime"), so a
+  host also outlives an update of the app; the legacy hard link is the fallback.
 - In a **packaged** app, `process.execPath` is the Electron binary itself (there is no separate
   `node` executable to shell out to), so the child is spawned with `ELECTRON_RUN_AS_NODE=1`,
   which tells Electron to run as a plain Node process with no Chromium/BrowserWindow machinery.
@@ -533,16 +688,128 @@ app already keeps at rest (accounts, hook tokens) relies on.
 
 ## Memory bound
 
-Each `HostSession` holds one `@xterm/headless` `Terminal` with `scrollback` capped at
-`settings.tmuxScrollback` (default 50,000 lines) — the exact same setting that already bounds real
-tmux's `history-limit`, so a machine that already accepted the cost of N tmux panes accepts the
-same order of cost for N session-host sessions. The per-session cost is a cell buffer sized
-`cols × (rows + scrollback)`, plus `SerializeAddon`'s own transient string-building cost only at
-the moment `serialize()` is actually called (attach, join, periodic snapshot, capture request) —
-never held continuously. This is a genuinely new per-session cost the tmux backend does not pay
-(tmux's server keeps its own C-side pane buffer regardless, but that cost is outside this app's
-process); it was a deliberate choice per the task brief ("bound the memory... document the cost
-you chose and why") rather than an oversight.
+Each `HostSession` holds one `@xterm/headless` `Terminal` whose `scrollback` is
+`xtermScrollback(settings.tmuxScrollback)` — floored at 1,000 and **capped at 10,000 lines**
+(`src/shared/scrollback.ts`), the same clamp as the renderer's own xterm. Core sends the clamped
+value, and the host clamps again at the `attach` request boundary (`clampEmulatorScrollback`) so an
+older client still sending the raw 50,000 is bounded too; the clamp runs before both the
+replacement-replay fingerprint and construction, so a replay of the same request still matches.
+The main-process `NativeWindowsPane` mirror (non-persisted win32 panes) uses the same clamp.
+
+Why not reuse tmux's `history-limit` (default 50,000): the costs are not the same order. tmux
+stores only the cells a line actually uses, in C. xterm's `BufferLine` is a `Uint32Array(cols × 3)`
+— **12 B per cell for every buffered line, whatever it holds** — so a 120-column session that fills
+50,000 lines holds ~72 MB of ArrayBuffer (measured ~91 MB with heap overhead; ~139 MB at 200 cols)
+inside the one shared host process, against ~14–18 MB at 10,000. And lines past the renderer's
+10,000 were never reachable: on this backend the renderer's xterm is the only surface a user
+scrolls, yet every warm attach serialized the full history, shipped it over the pipe and IPC, and
+the receiving xterm discarded 80% of it (measured: 50k lines → 5.4 MB string built synchronously in
+~0.7 s, stalling every session's output; 10k → 1.1 MB in ~0.13 s). Capping the emulator bounds that
+attach seed, the co-attach resync and `capture`'s `full: true` by construction — no protocol field
+was needed.
+
+Not reclaimed in place: a session that an OLDER host created at 50,000 keeps that buffer until it
+ends — installing a new app does not upgrade a running host (see below), and an old host cannot be
+told to shrink. Lowering the setting likewise applies to new sessions only. Beyond the emulator,
+the remaining per-session cost is `SerializeAddon`'s transient string at the moment `serialize()`
+runs (attach, join, periodic snapshot, capture request) — never held continuously.
+
+Device check owed (not blocking): host RSS with 10–20 busy normal-screen sessions, before and after.
+
+A DETACHED session's cost is bounded by the same session budget tmux sessions are
+(`core/session-budget.ts`): past the grace window, under memory pressure or past the detached-count
+cap, the reaper ends it through the host's generation-checked kill — see "Observability" above.
+
+### Observability (`sessionDetails`): reaper, session-memory panel, dev-server ports
+
+The three surfaces that ask tmux about its sessions — the session reaper (`list-windows` for
+`session_attached` + `window_activity`), the session-memory panel and dev-server ports
+(`list-panes` for `pane_pid`) — ask the host instead, through ONE additive hello feature,
+`sessionDetails`. A connection that negotiated it gets, beside the unchanged `names`, a row per
+LIVE generation: `{name, pid, subscribers, lastOutputMs, createdMs, generation}`
+(`ListSessionsResult.sessions`). An older client never asks and reads `{names}` byte-for-byte; an
+older host never answers, and the client reports `sessions: null` — named but undescribed.
+
+- **`lastOutputMs` is the honest idleness clock** (tmux's `window_activity`, not its
+  `session_activity`): stamped on every pty `data` callback, moved by nothing that only LOOKS —
+  attach, detach, capture (`session-details-host.test.ts` pins both directions against the real
+  bundled host).
+- **`subscribers` needs no `shadowed` subtraction**: the host has no control-mode shadows (a
+  background `sendKeys` needs no subscription), so every subscriber is a viewer. The reaper backend
+  (`PtyManager.sessionHostReaperBackend`) instead ADDS one for a node this process holds a live
+  session for — a host reconnect briefly reports zero subscribers for a terminal on screen.
+- **The read never launches a host** (`listSessionsDetailed`), and a failed read is `null` — never
+  an empty listing. Absent state is "no host"; PUBLISHED state is not proof of a live one (a host
+  killed from Task Manager, a reboot), so a cold client connects with `ensureConnected({launch:
+  false})` and nothing answering is a failed read — the ordinary `request()` path would otherwise
+  start a fresh host from every poll. The reaper then plans nothing, the memory panel
+  says "could not measure", dev ports say `unreachable`.
+- **A reap kills exactly the generation the listing observed** (`killSession`'s
+  `expectedGeneration`), never by name alone, and nothing else: no scrollback deletion, no
+  tombstone. The client refuses such a kill for a name it is attached to, PtyManager re-asks
+  "do we watch this node?" at kill time, and a successful observed-generation kill never clears a
+  live local attachment (the host answers success for an already-gone generation, which may mean a
+  same-name successor is the one attached). A reaped node cold-restores (`fresh: true`), the same contract as a tmux reap. The
+  reaper's budget, triggers and kill-time re-verify are `session-budget.ts`'s, unchanged; the
+  memory reading on Windows is `os.freemem()`, which there is the OS's available physical memory.
+- **Memory panel**: each row's pid is rolled up over the Windows process table
+  (`Get-CimInstance Win32_Process`, `WorkingSetSize`, one `powershell.exe -NoProfile` per panel
+  open — never polled; always the absolute `%SystemRoot%\System32\WindowsPowerShell\v1.0` path,
+  `powershellExe()`, because Windows resolves a bare name against the cwd first). Sessions an older host cannot describe are `unmeasured`, with their own
+  sentence. No host running is "no sessions", not a failure.
+- **The host's own cost** (`SessionMemoryReport.host`, `hostOverhead` in `core/session-memory.ts`):
+  rows roll up from each pane's SHELL, and ConPTY's conhost/OpenConsole is the host's child (the
+  shell's sibling), so neither it nor the host process itself — every session's headless emulator,
+  node-pty's per-session conout worker thread — was in any row. The listing now carries the host pid
+  from the state file (`SessionHostListing.hostPid`; every host version writes it, so no protocol
+  change), and the panel shows one non-killable line, `nodeterm session host (N consoles)`, added to
+  the total only under the `measured` gate. Both figures are MEASURED working sets, labelled as
+  such; nothing is estimated. Every non-shell child is included, so while the host's pane-probe
+  PowerShell worker (below) is warm — up to 60 s after a probe — its working set is part of the line
+  too; it is genuinely the host's cost, but expect the line to drop when it idles out. Unknown host pid, a pid missing from the table, or an undescribed
+  session (whose shell would be booked as host overhead) ⇒ no line, never `0 B`. An idle host with no
+  session is still measured.
+- **Dev-server ports**: one PowerShell call per scan — `Win32_Process` plus
+  `Get-NetTCPConnection` (owning pid is a kernel field, nothing a process can rename itself into),
+  falling back to `netstat -ano` (listeners recognised by a foreign port of 0, because the state
+  column is localized). A non-zero exit is `unreachable`; with no nt- session nothing is spawned.
+
+### Pane probes: one long-lived PowerShell per process
+
+`paneCommand` (restart/Eco exit poll, agent liveness, launch readiness) and the console-owner probe
+(`readWindowsConsoleOwner` — messaging, Eco's owner read, `terminateOwnerV1`) used to start a fresh
+`powershell.exe` per call; the owner probe also re-ran `Add-Type` (csc + a temp assembly on PS 5.1)
+every time. Both now go through `session-host/windows-probe-worker.ts`: one lazy child per process
+(the host's, or main's for a direct Windows PTY) that compiles the type ONCE and answers JSON-line
+requests FIFO. Rules a refactor must keep:
+
+- **Fallback, not replacement.** `unavailable` (could not start, timed out, died, garbage) falls
+  back to the original one-shot script; `failed` (the worker ran the probe and it failed) is a
+  real answer and is not retried. Two consecutive transport failures bench the worker for 5 min —
+  never a respawn loop. Deadlines: 6 s for the first request after a spawn (startup + compile),
+  1.5 s warm. Idle exit after 60 s; stdin closing ends the loop, so it dies with its parent.
+- **The worker holds its own stdio first** (`OpenStandardInput/Output` before any probe), because
+  the probe `FreeConsole`/`AttachConsole`s. Unverified on a device — checklist item P1 below.
+- **Table reads are coalesced in flight, never cached by time** (`createProcessTableReader`). The
+  exit poll accepts a changed reading only on two CONSECUTIVE polls; a cached snapshot answering
+  both would confirm a momentary child of a still-running CLI from ONE observation and type the
+  resume line into a live agent.
+- **Every one-shot path is the absolute `%SystemRoot%` PowerShell** (`powershellExe()`), never a
+  bare name.
+- **A slow read still gets its samples.** The exit phase owes a pane that keeps answering at least
+  `RESTART_MIN_EXIT_SAMPLES` (4) readings, each with `max(window left, timeoutMs/2)`, so a cold
+  ~1.5 s read cannot turn a CLI that quit at 8 s into a false `exit-timeout` (inert on tmux).
+
+### node-pty's conout worker thread (documented, not changed)
+
+node-pty 1.1.0 starts one `worker_threads` Worker (a full V8 isolate) per ConPTY
+(`lib/windowsConoutConnection.js`), measured on plain Node at ~11–12 MB RSS each idle (10 workers
++118 MB, 30 workers +349 MB); under `ELECTRON_RUN_AS_NODE` it is probably a little more. It is
+node-pty's design for keeping conout reads off the main thread (a `ClosePseudoConsole` must never
+block on an undrained pipe), and we pin and patch exactly 1.1.0, so we do not remove it. It is now
+VISIBLE — it is inside the session-host line of the memory panel — and the lever on our side is
+session count (offscreen release, Eco, the reaper for detached sessions). Sharing one conout worker
+via `scripts/patch-node-pty.mjs` is worth doing only if a device shows ≥ ~8 MB per session: item P4.
 
 ## Honest limitations
 
@@ -561,11 +828,13 @@ you chose and why") rather than an oversight.
   the resulting process. A genuinely Windows-reachable tmux found by the existing resolver still
   follows the tmux path; a `tmux` installed only inside WSL is not on the native Windows PATH.
 - **`paneCommand`'s answer can be imprecise** when a session has multiple concurrent child
-  processes (an agent CLI plus MCP servers) — see `process-tree.ts`'s doc comment. The one caller
-  that depends on it (in-place agent restart) only needs "is a shell back in charge of this pane
-  yet", which every non-shell answer satisfies equally, so this imprecision is harmless for that
-  caller specifically; a future caller with finer-grained needs should not assume more precision
-  than this.
+  processes (an agent CLI plus MCP servers) — see `process-tree.ts`'s doc comment. Its callers
+  (in-place agent restart, wake, trigger delivery, RunBar, session rename) only need "is a shell
+  back in charge of this pane yet", so the walk answers a SHELL name only when every live process in
+  the tree is a shell; otherwise it answers a non-shell. This matters since `isShellCommand`
+  recognises `pwsh.exe` / `cmd.exe` / `bash.exe`: a shell that is merely a leaf under a running agent
+  (claude's Bash/PowerShell tool, an MCP server launched via `cmd /c npx`) must not read as "the CLI
+  let go". A future caller with finer-grained needs should not assume more precision than this.
 - **The node-pty actuator is global, so ownership is ledgered rather than guessed.** Within one app
   process, `pty-manager.ts` keeps a per-viewer/owner `pausedBy` ledger. The standalone host then
   keeps a second set keyed by authenticated socket: the first socket to pause actuates node-pty,
@@ -576,10 +845,31 @@ you chose and why") rather than an oversight.
   live session for every healthy viewer forever.
 - **Windows named-pipe/unix-socket ACL is not independently audited** — see "Auth" above; the
   bearer token is the enforced boundary.
+- **`paneCwd` only knows what the shell reports.** pwsh, Windows PowerShell and cmd report nothing
+  by default (no OSC 7 / 9;9), so a plain Windows shell's relative file links still resolve against
+  the launch cwd only; agent CLIs and shell integrations that emit OSC 7 / 9;9 / 633 work. No prompt
+  hook is installed for them (it would rewrite the user's prompt); an opt-in one is a follow-up.
+- **Control typing into a session-host node needs the node open when the viewer joins**: a viewer
+  of a node nobody holds rides a read-only `watch-attach` attachment, which has no typing path (the
+  host refuses its writes, and keys must not be retyped as a framed `sendKeys` paste). The input
+  route is decided at join, so that viewer stays read-only after the owner opens the node, until it
+  rejoins.
 - **No equivalent of `paneOwner` / `bracketPasteRequested` / a standalone `paneCursor` query** —
   see the protocol table's "Not implemented" note. Nothing in this app currently calls these for a
   session-host-backed node (they are gated behind `this.tmuxPath` being set), so nothing is
   silently broken; a future feature that wants one of these on Windows needs a new host verb.
+- **The phone relay has no tmux to drive on this backend.** Over SSH-less (relay-only) pairing the
+  phone used to (a) type a POSIX launch line into a fresh pane and (b) scroll by writing SGR wheel
+  bytes for tmux's copy-mode. Neither holds here: pwsh / cmd reject `2>/dev/null`, `env -u`,
+  `VAR=x cmd`, and a wheel nobody asked for lands in the prompt as text. So the phone sends
+  `pty.attach { launch }` and the HOST launches (`core/relay-launch.ts`: cwd/account ride the spawn
+  options, the line is built for the pane's real parser and typed once; `launched:true` is promised
+  only after a preflight build succeeded, and `paneShell` tells the phone whether a typed POSIX line
+  is safe in that pane — an SSH-project node of a Windows desktop is `posix`), the attach reply says
+  `scroll:'local'` with a full-buffer snapshot, and `pty.scroll` writes a wheel only when
+  `paneModesV1` reports the app asked for the mouse. Keyed Inbox answers (`agent.key`), read-acks
+  (`inbox.ack`), the folder browser (`fs.browse`) and plain capture (`pty.capture`) are relay
+  verbs for the same reason. All additive; `host.info` lists them for feature detection.
 - **ConPTY helper teardown can emit `Error: AttachConsole failed`** from
   `node-pty/lib/conpty_console_list_agent.js`. The protocol test determines kill success from the
   host response and follow-up session state rather than stderr text. Whether this cosmetic
@@ -624,6 +914,18 @@ A host-backed session stays addressable after the desktop releases its client (p
 offscreen release). `targetLive` comes from `PtyManager.sessionExists`, and the three messaging
 probes route by `sessionHostOwns`, which reads the release record when no `Session` is left and
 otherwise applies `sendText`'s rule (no local tmux means the host owns persistence).
+
+**Stopping the agent (`terminateOwnerV1`, model switch / "Restart on subscription").** Windows has
+no foreground process group, so `PtyManager.terminateForeground` cannot SIGTERM one. On a
+session-host pane it sends the owner it just proved with `messageOwnerV1` (the agent-identity gate
+is MANDATORY here — the legacy "not a shell" guard is not provable on Windows); the host re-reads
+the owner, requires `sameNativeProcess` (pane generation, root pid, the single pid, OS birth time,
+executable), refuses the console root and any shell, and only then runs `taskkill /T /F` on that
+pid (`session-host/terminate-owner.ts`). The shell survives for the recycle that follows. A direct
+ConPTY pane runs the same helper in core against `NativeWindowsPane.owner()`. An older host answers
+`unknown command`; the client maps that to `'unsupported'` and the canvas says the host predates
+the verb instead of "busy". Unlike SIGTERM, `/F` gives the agent no chance to flush — the CLI's
+transcript is appended per message, so `--resume` still finds the conversation (device item).
 
 The extension is independently versioned so the existing terminal protocol v1/v2 is unchanged.
 Old live hosts reject the new command names, and the client returns null/false without falling
@@ -695,6 +997,61 @@ and atomic state publication are now additionally behaviour-tested with adversar
 injected sharing violations. That source/runtime evidence does not replace the packaged check.
 
 ## Packaged verification still owed
+
+### Staged host runtime (#829 step 3) — device checklist
+
+Written and unit-tested on Linux; nothing below has run on Windows yet.
+
+1. **Measure the file set.** On a packaged build, run Process Monitor filtered to
+   `nodeterm-sessionhost-v2.exe` during host start and an attach; record every file opened under
+   the staged directory. Prune `RUNTIME_*` in `session-host-runtime.ts` to that set (expect
+   `locales\` and most DLLs to be unnecessary) and re-run the smoke check.
+2. **Smoke run passes.** Fresh install of the new build, open a terminal: `session-host.log`
+   shows `[app] staged runtime: published <key>`, and Task Manager → Details shows
+   `nodeterm-sessionhost-v2.exe` with a path under `%LOCALAPPDATA%\nodeterm\session-host`.
+3. **Update 0.3.x → new build with live sessions.** On a release with the legacy host, the first
+   update still meets the legacy host (expected: prepare as before). Then, with the new build's
+   staged host holding live shells/agents, install the NEXT build with the app closed: the installer
+   must not prompt, must complete, and after reopening every session re-attaches **warm** (log:
+   `attach (warm)`, same host pid as before the update).
+4. **Same, with the app open** during the install: the preflight prompts for the app only; after
+   closing it the install completes and sessions stay warm.
+5. **Old uninstaller during update.** Confirm the previous version's uninstaller (both a pre-#868
+   stock one and a #868 one) completes with the staged host running.
+6. **Compatibility.** With a staged host from build N running, launch build N+1: new terminals go
+   to the old host; after the last session closes and 30 s pass, the next terminal starts a host
+   from N+1's copy and N's directory is removed on the following launch.
+7. **GC fail-closed.** With a staged host of an old version running, launch the new app: that old
+   directory is kept. With PowerShell blocked by policy: nothing is removed.
+8. **Defender / AV.** First staging with real-time protection on: time it (log timestamps), check
+   for quarantine or SmartScreen prompts, and that a scan holding the new exe does not fail the
+   publish rename. Repeat with a third-party AV and with AppLocker/WDAC denying executables in the
+   profile (expected: smoke run fails, legacy launch, installer still protects the install).
+9. **Disk usage.** Size of one staged version directory; confirm only the current (plus running)
+   versions remain after a few updates.
+10. **Uninstall** with a staged host running: completes, host and sessions keep running, the
+    staged folder remains; after the host exits the folder can be deleted.
+11. **Two users / all-users install.** Each user stages their own copy; one user's host does not
+    block another user's update.
+
+### Session-host overhead and Windows probes — device checklist
+
+P1. **Probe worker stdio.** With the worker warm, run 100 agent messages and an Eco cycle: every
+    probe answers, no `csc.exe`/`powershell.exe` sawtooth in Process Explorer, and
+    `FreeConsole`/`AttachConsole` inside the persistent process never breaks its own stdin/stdout.
+P2. **Probe latency.** Time a cold and a warm `paneCommand` and owner probe on PS 5.1. Target: warm
+    under ~300 ms, well inside the 2 s pane-probe budget; cold inside the 6 s first-request deadline.
+P3. **conhost parentage.** `Get-CimInstance Win32_Process` shows conhost.exe / OpenConsole.exe with
+    `ParentProcessId` = the session host's pid (so the panel's line counts it), for inbox ConPTY.
+P4. **Per-session host cost.** Session-host working set + private bytes at 0 / 10 / 30 idle `cmd`
+    sessions, and again with `useConptyDll`. Record the per-session delta here; patch a shared
+    conout worker only if the worker share is ≥ ~8 MB per session.
+P5. **Eco on Windows**, with pwsh and with cmd as the default shell: idle → `/exit` → SLEEPING →
+    wake → `claude --resume <id>` typed once; the session-memory panel shows the tree drop to the
+    shell alone. Repeat with a native `claude.exe` and an npm `claude.cmd`; a node with an MCP child
+    (`node` → `cmd /c` → `node`) is not misread as a shell; a `blocked` node is never exited.
+
+### Earlier items
 
 The real Windows x64 installer must still be exercised through the required cheap headless route:
 create every available profile, verify input/output/resize/Unicode/copy/cwd and labels, relaunch

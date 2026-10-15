@@ -1,7 +1,9 @@
 import { subscribeAgentReplay } from '../shared/agent-replay-subscription'
 import { contextBridge, ipcRenderer, webFrame, webUtils } from 'electron'
 import { IPC } from '../shared/ipc'
+import type { AlertSoundKind } from '../shared/alert-sound'
 import { resolveUiScale } from '../shared/ui-scale'
+import type { RecentConversationsRequest } from '../shared/recent-conversations'
 import type {
   CanvasMutation,
   CanvasState,
@@ -11,17 +13,22 @@ import type {
   PtyPressure,
   LogRecord,
   RecycledInfo,
+  RelayClosedReason,
   RelayPeerPending,
   RemoteUsageQuery,
   SessionMemoryQuery,
   UpdateInfo,
+  UpdateInstalling,
   UpdateProgress,
   Workspace,
   WorkspaceSaveOptions,
-  WorkspaceMigrationKind
+  WorkspaceMigrationKind,
+  ZoomActualSizeModifiers
 } from '../shared/types'
 import type { ClientId, PeerDiff, PeerIdentity, PeerState } from '../shared/presence'
 import type { ProjectConsentRequest, ProjectSetupEvent } from '../shared/project-settings'
+import type { WatchChatMessage, WatchLinkNotice, WatchLinkView } from '../shared/watch-link-types'
+import type { DevPortForwardRequest, DevPortsQuery } from '../shared/dev-ports'
 
 // Fan a single ipcRenderer listener per channel out to many renderer subscribers. Without
 // this, every node that subscribes (e.g. Cmd+M markdown toggle on each terminal/editor) adds
@@ -75,6 +82,10 @@ const subscribeProjectSetupConsentDismiss = subscribe<[{ requestId: string }]>(
 // payload carries the projectId, fanned out the same way — nobody broadcasts it yet (Task 2), but
 // the renderer cache subscribes ahead of the emitter.
 const subscribeProjectTrustChanged = subscribe<[{ projectId: string }]>(IPC.projectTrustChanged)
+// Live links: owner-only pushes from core (the node chip, the popover and Settings all listen).
+const subscribeWatchLinkState = subscribe<[WatchLinkView[]]>(IPC.watchLinkState)
+const subscribeWatchLinkChat = subscribe<[string, WatchChatMessage]>(IPC.watchLinkChat)
+const subscribeWatchLinkNotice = subscribe<[WatchLinkNotice]>(IPC.watchLinkNotice)
 
 const api: NodeTerminalApi = {
   pty: {
@@ -88,7 +99,8 @@ const api: NodeTerminalApi = {
     destroy: (persistKey, opts) =>
       ipcRenderer.send(IPC.ptyDestroy, persistKey, opts?.everySocket === true),
     recycle: (persistKey) => ipcRenderer.send(IPC.ptyRecycle, persistKey),
-    generateName: (persistKey, cwd) => ipcRenderer.invoke(IPC.ptyGenerateName, persistKey, cwd),
+    generateName: (persistKey, cwd, accountId) =>
+      ipcRenderer.invoke(IPC.ptyGenerateName, persistKey, cwd, accountId),
     generateGroupName: (memberKeys, cwd) =>
       ipcRenderer.invoke(IPC.ptyGenerateGroupName, memberKeys, cwd),
     capture: (persistKey, full) => ipcRenderer.invoke(IPC.ptyCapture, persistKey, full),
@@ -98,9 +110,14 @@ const api: NodeTerminalApi = {
     readScrollback: (persistKey) => ipcRenderer.invoke(IPC.ptyReadScrollback, persistKey),
     sendText: (persistKey, text, opts) =>
       ipcRenderer.invoke(IPC.ptySendText, persistKey, text, opts?.enter),
+    sendChatPrompt: (persistKey, text, agentId) =>
+      ipcRenderer.invoke(IPC.ptySendChatPrompt, persistKey, text, agentId),
     tmuxStatus: () => ipcRenderer.invoke(IPC.ptyTmuxStatus),
     paneCommand: (persistKey) => ipcRenderer.invoke(IPC.ptyPaneCommand, persistKey),
+    paneCwd: (persistKey) => ipcRenderer.invoke(IPC.ptyPaneCwd, persistKey),
+    launchHeadless: (req) => ipcRenderer.invoke(IPC.ptyLaunchHeadless, req),
     paneOwner: (persistKey) => ipcRenderer.invoke(IPC.ptyPaneOwner, persistKey),
+    executeLaunch: (persistKey, request) => ipcRenderer.invoke(IPC.ptyExecuteLaunch, persistKey, request),
     terminateForeground: (persistKey, expectedAgentId) =>
       ipcRenderer.invoke(IPC.ptyTerminateForeground, persistKey, expectedAgentId),
     readSessionName: (sessionId, accountId, agentId) =>
@@ -167,7 +184,19 @@ const api: NodeTerminalApi = {
     // behalf. `HeadlessNodeFactory` is Server Edition only — the desktop's canvas-control verbs run
     // through the renderer's own React Flow state, and its watcher path stays on onExternalChange.
     // A real subscription would be dead wiring for a channel this main process never broadcasts.
-    onServerChange: (_cb: (project: Project) => void) => () => {}
+    onServerChange: (_cb: (project: Project) => void) => () => {},
+    // Quit / restart-to-update flush (src/main/renderer-flush.ts): answer with the request id once
+    // the callback settles, whether it saved, had nothing to save, or failed.
+    onFlushRequest: (cb: () => Promise<unknown> | void) => {
+      const h = (_e: unknown, id: string) => {
+        void Promise.resolve()
+          .then(cb)
+          .catch(() => {})
+          .finally(() => ipcRenderer.send(IPC.appFlushDone, id))
+      }
+      ipcRenderer.on(IPC.appFlushRequest, h)
+      return () => ipcRenderer.removeListener(IPC.appFlushRequest, h)
+    }
   },
   projectSettings: {
     read: (projectId: string) => ipcRenderer.invoke(IPC.projectSettingsRead, projectId),
@@ -218,6 +247,9 @@ const api: NodeTerminalApi = {
     load: () => ipcRenderer.invoke(IPC.settingsLoad),
     save: (settings) => ipcRenderer.invoke(IPC.settingsSave, settings)
   },
+  integrations: {
+    status: () => ipcRenderer.invoke(IPC.integrationsStatus)
+  },
   githubIssues: {
     subscribe: (projectId) => ipcRenderer.invoke(IPC.githubIssuesSubscribe, { projectId }),
     unsubscribe: async (projectId) => {
@@ -228,6 +260,12 @@ const api: NodeTerminalApi = {
     moveIssue: (request) => ipcRenderer.invoke(IPC.githubIssuesMove, request),
     createMissingLabels: (projectId) => ipcRenderer.invoke(IPC.githubIssuesCreateLabels, projectId),
     clearCache: (projectId) => ipcRenderer.invoke(IPC.githubIssuesClearCache, projectId),
+    pullStatus: (projectId) => ipcRenderer.invoke(IPC.githubIssuesPullStatus, projectId),
+    chasePulls: (projectId) => ipcRenderer.invoke(IPC.githubIssuesChasePulls, projectId),
+    pullChecks: (projectId, pullNumber) =>
+      ipcRenderer.invoke(IPC.githubIssuesPullChecks, projectId, pullNumber),
+    claimPullAutoMove: (request) => ipcRenderer.invoke(IPC.githubIssuesClaimPullAutoMove, request),
+    notePullWaits: (request) => ipcRenderer.invoke(IPC.githubIssuesNotePullWaits, request),
     projectAvatar: (projectId) => ipcRenderer.invoke(IPC.githubProjectAvatar, projectId),
     onChanged: (projectId, listener) => {
       const channel = IPC.githubIssuesChanged(projectId)
@@ -263,7 +301,8 @@ const api: NodeTerminalApi = {
       ipcRenderer.on(IPC.speechProgress, handler)
       return () => ipcRenderer.removeListener(IPC.speechProgress, handler)
     },
-    micConsent: () => ipcRenderer.invoke(IPC.speechMicConsent)
+    micConsent: () => ipcRenderer.invoke(IPC.speechMicConsent),
+    openMicSettings: () => ipcRenderer.invoke(IPC.speechOpenMicSettings)
   },
   ssh: {
     list: () => ipcRenderer.invoke(IPC.sshList),
@@ -300,6 +339,24 @@ const api: NodeTerminalApi = {
       ipcRenderer.on(IPC.sshPassphraseDismiss, h)
       return () => ipcRenderer.removeListener(IPC.sshPassphraseDismiss, h)
     }
+  },
+  shareTeam: {
+    probe: (projectId, nodeIds) => ipcRenderer.invoke(IPC.shareTeamProbe, projectId, nodeIds),
+    install: (projectId) => ipcRenderer.invoke(IPC.shareTeamInstall, projectId),
+    cancelInstall: (projectId) => ipcRenderer.invoke(IPC.shareTeamCancelInstall, projectId),
+    onInstallOutput: (projectId, listener) => {
+      const h = (_e: unknown, p: { projectId?: unknown; text?: unknown }) => {
+        if (p?.projectId === projectId && typeof p.text === 'string') listener(p.text)
+      }
+      ipcRenderer.on(IPC.shareTeamInstallOutput, h)
+      return () => ipcRenderer.removeListener(IPC.shareTeamInstallOutput, h)
+    },
+    flushMirror: (projectId) => ipcRenderer.invoke(IPC.shareTeamFlushMirror, projectId),
+    bootstrap: (projectId) => ipcRenderer.invoke(IPC.shareTeamBootstrap, projectId),
+    killSessions: (projectId, nodeIds) => ipcRenderer.invoke(IPC.shareTeamKillSessions, projectId, nodeIds),
+    resume: (projectId, serverProjectId, sessions) =>
+      ipcRenderer.invoke(IPC.shareTeamResume, projectId, serverProjectId, sessions),
+    seedBookmark: (joinCode) => ipcRenderer.invoke(IPC.shareTeamSeedBookmark, joinCode)
   },
   sshFs: {
     list: (projectId: string, path: string) => ipcRenderer.invoke(IPC.sshFsList, projectId, path),
@@ -366,6 +423,8 @@ const api: NodeTerminalApi = {
   },
   clipboard: {
     // Route to the MAIN process: renderer-side `clipboard` access is deprecated in Electron.
+    // Fire-and-forget with no failure surface, so `ClipboardWriteOptions.quiet` has nothing to
+    // silence here and is ignored.
     writeText: (text: string) => ipcRenderer.send(IPC.clipboardWrite, text),
     writeFiles: (paths: string[]) => ipcRenderer.invoke(IPC.clipboardWriteFiles, paths)
   },
@@ -416,7 +475,11 @@ const api: NodeTerminalApi = {
     saveUpload: (name: string, dataBase64: string) =>
       ipcRenderer.invoke(IPC.filesSaveUpload, name, dataBase64),
     saveCanvasImage: (projectId: string, name: string, dataBase64: string) =>
-      ipcRenderer.invoke(IPC.filesSaveCanvasImage, projectId, name, dataBase64)
+      ipcRenderer.invoke(IPC.filesSaveCanvasImage, projectId, name, dataBase64),
+    saveAlertSound: (kind: AlertSoundKind, name: string, dataBase64: string) =>
+      ipcRenderer.invoke(IPC.filesSaveAlertSound, kind, name, dataBase64),
+    readAlertSound: (kind: AlertSoundKind) => ipcRenderer.invoke(IPC.filesReadAlertSound, kind),
+    clearAlertSound: (kind: AlertSoundKind) => ipcRenderer.invoke(IPC.filesClearAlertSound, kind)
   },
   updates: {
     onAvailable: (listener) => {
@@ -449,10 +512,19 @@ const api: NodeTerminalApi = {
       ipcRenderer.on(IPC.appUpdateNoChannel, handler)
       return () => ipcRenderer.removeListener(IPC.appUpdateNoChannel, handler)
     },
+    onInstalling: (listener) => {
+      const handler = (_e: unknown, s: UpdateInstalling) => listener(s)
+      ipcRenderer.on(IPC.appUpdateInstalling, handler)
+      return () => ipcRenderer.removeListener(IPC.appUpdateInstalling, handler)
+    },
     check: () => ipcRenderer.send(IPC.appCheckForUpdates),
     getVersion: () => ipcRenderer.invoke(IPC.appGetVersion),
     getPolicy: () => ipcRenderer.invoke(IPC.appUpdatePolicy),
-    restart: () => ipcRenderer.send(IPC.appRestartToUpdate)
+    getStaged: () => ipcRenderer.invoke(IPC.appGetStagedUpdate),
+    restart: () => ipcRenderer.send(IPC.appRestartToUpdate),
+    prepareInspect: () => ipcRenderer.invoke(IPC.appUpdatePrepInspect),
+    prepareShutdownHost: () => ipcRenderer.invoke(IPC.appUpdatePrepShutdown),
+    prepareQuit: () => ipcRenderer.send(IPC.appUpdatePrepQuit)
   },
   license: {
     upgrade: (target?: 'pro' | 'seats') => ipcRenderer.invoke(IPC.licenseUpgrade, target),
@@ -492,11 +564,34 @@ const api: NodeTerminalApi = {
     read: (q?: SessionMemoryQuery) => ipcRenderer.invoke(IPC.sessionMemory, q),
     host: (q?: SessionMemoryQuery) => ipcRenderer.invoke(IPC.sessionMemoryHost, q)
   },
+  // Forwarded verbatim for the same reason as sessionMemory: `remote` is OR-ed with the core's own
+  // claim, and a forward request carries only node + port — the host-side address is decided in core.
+  devPorts: {
+    scan: (q?: DevPortsQuery) => ipcRenderer.invoke(IPC.devPortsScan, q),
+    forward: (req: DevPortForwardRequest) => ipcRenderer.invoke(IPC.devPortsForward, req),
+    unforward: (req: { projectId: string; localPort: number }) => ipcRenderer.invoke(IPC.devPortsUnforward, req)
+  },
+  recentConversations: {
+    list: (req?: RecentConversationsRequest) =>
+      ipcRenderer.invoke(IPC.recentConversationsList, req)
+  },
   wallpaper: {
     listStills: () => ipcRenderer.invoke(IPC.wallpaperListStills),
     load: (w) => ipcRenderer.invoke(IPC.wallpaperLoad, w),
     importImage: (p) => ipcRenderer.invoke(IPC.wallpaperImport, p)
   },
+  runConfig: {
+    entries: (dir) => ipcRenderer.invoke(IPC.runEntries, dir),
+    devices: (refresh) => ipcRenderer.invoke(IPC.runDevices, refresh),
+    bootDevice: (udid) => ipcRenderer.invoke(IPC.runBootDevice, udid),
+    discoverProjects: (dir) => ipcRenderer.invoke(IPC.runDiscover, dir),
+    start: (nodeId, config) => ipcRenderer.invoke(IPC.runStart, nodeId, config),
+    status: (nodeId) => ipcRenderer.invoke(IPC.runStatus, nodeId),
+    stop: (nodeId, force) => ipcRenderer.invoke(IPC.runStop, nodeId, force),
+    signal: (nodeId, kind) => ipcRenderer.invoke(IPC.runSignal, nodeId, kind),
+    watch: (nodeId, dir) => ipcRenderer.invoke(IPC.runWatch, nodeId, dir)
+  },
+
   triggers: {
     arm: (projectId, nodeId, spec) => ipcRenderer.invoke(IPC.triggersArm, { projectId, nodeId, spec }),
     disarm: (projectId, nodeId) => ipcRenderer.invoke(IPC.triggersDisarm, { projectId, nodeId }),
@@ -528,6 +623,14 @@ const api: NodeTerminalApi = {
       return () => ipcRenderer.removeListener(IPC.canvasMut, handler)
     }
   },
+  // The desktop never governs: a canvas authority runs only in a Server Edition hosting a team
+  // (docs/hosted-team-relay.md), and main registers no `canvas:authority` handler. A relay tab onto
+  // such a host answers for itself (renderer/bridge/relay-api.ts).
+  canvasAuthority: {
+    assumeAllUntilAnswered: false,
+    governed: async () => [],
+    onChanged: () => () => {}
+  },
   codex: {
     identityCaps: () => ipcRenderer.invoke(IPC.codexIdentityCaps),
     cliCaps: () => ipcRenderer.invoke(IPC.codexCliCaps),
@@ -558,7 +661,8 @@ const api: NodeTerminalApi = {
     readTranscript: (sessionId, cwd, accountId, nodeId, agentId, page) =>
       ipcRenderer.invoke(IPC.chatReadTranscript, sessionId, cwd, accountId, nodeId, agentId, page),
     transcriptExists: (sessionId, accountId, nodeId) =>
-      ipcRenderer.invoke(IPC.transcriptExists, sessionId, accountId, nodeId)
+      ipcRenderer.invoke(IPC.transcriptExists, sessionId, accountId, nodeId),
+    catalog: (nodeId, agentId, accountId, cwd) => ipcRenderer.invoke(IPC.chatCatalog, nodeId, agentId, accountId, cwd)
   },
   claudeAccounts: {
     add: (ctx) => ipcRenderer.invoke(IPC.claudeAccountsAdd, ctx),
@@ -651,11 +755,16 @@ const api: NodeTerminalApi = {
     },
     onClosed: (connectionId, listener) => {
       const channel = IPC.relayClientClosed(connectionId)
-      const handler = () => listener()
+      // A hosted host's refusal reason rides the close; a legacy pairing offer sends none.
+      const handler = (_e: unknown, reason?: RelayClosedReason) => listener(reason)
       ipcRenderer.on(channel, handler)
       return () => ipcRenderer.removeListener(channel, handler)
     },
     disconnect: (connectionId) => ipcRenderer.send(IPC.relayClientDisconnect, connectionId)
+  },
+  relayHosted: {
+    bookmarks: () => ipcRenderer.invoke(IPC.relayHostedBookmarks),
+    removeBookmark: (hostId) => ipcRenderer.invoke(IPC.relayHostedBookmarkRemove, hostId)
   },
   handoff: {
     build: (sessionId, agentId, sourceNodeId, cwd, accountId) =>
@@ -672,7 +781,11 @@ const api: NodeTerminalApi = {
     probeSsh: () => ipcRenderer.invoke(IPC.pairingProbeSsh),
     openRemoteLoginSettings: () => ipcRenderer.invoke(IPC.pairingOpenRemoteLoginSettings),
     listDevices: () => ipcRenderer.invoke(IPC.pairingListDevices),
-    revokeDevice: (id) => ipcRenderer.invoke(IPC.pairingRevokeDevice, id)
+    revokeDevice: (id) => ipcRenderer.invoke(IPC.pairingRevokeDevice, id),
+    webhookStatus: () => ipcRenderer.invoke(IPC.pairingWebhookStatus),
+    webhookMint: () => ipcRenderer.invoke(IPC.pairingWebhookMint),
+    webhookRevoke: () => ipcRenderer.invoke(IPC.pairingWebhookRevoke),
+    webhookEndpoint: () => ipcRenderer.invoke(IPC.pairingWebhookEndpoint)
   },
   // Team presence. `hello` is the only request (its response is how this client learns its OWN
   // ClientId, without which it would draw its own cursor as a peer's); the publishers are
@@ -741,7 +854,7 @@ const api: NodeTerminalApi = {
   },
   onMarkdownToggle: subscribe(IPC.appToggleMarkdown),
   onCloseNode: subscribe(IPC.appCloseNode),
-  onZoomActualSize: subscribe(IPC.appZoomActualSize),
+  onZoomActualSize: subscribe<[ZoomActualSizeModifiers?]>(IPC.appZoomActualSize),
   // Native View menu → renderer.
   onToggleAutoAlign: subscribe(IPC.appToggleAutoAlign),
   onFitView: subscribe(IPC.appFitView),
@@ -767,6 +880,11 @@ const api: NodeTerminalApi = {
     const handler = (_e: unknown, severity: 'warning' | 'critical') => listener(severity)
     ipcRenderer.on(IPC.appMemoryPressure, handler)
     return () => ipcRenderer.removeListener(IPC.appMemoryPressure, handler)
+  },
+  onWindowVisibility: (listener) => {
+    const handler = (_e: unknown, state: 'hidden' | 'shown') => listener(state)
+    ipcRenderer.on(IPC.appWindowVisibility, handler)
+    return () => ipcRenderer.removeListener(IPC.appWindowVisibility, handler)
   },
   onPtyPressure: (listener) => {
     const handler = (_e: unknown, reading: PtyPressure) => listener(reading)
@@ -794,6 +912,7 @@ const api: NodeTerminalApi = {
     return () => ipcRenderer.removeListener(IPC.agentStatus, handler)
   }, () => ipcRenderer.invoke(IPC.agentSubagentSnapshot), listener),
   reportHibernated: (nodeId, on) => ipcRenderer.send(IPC.agentHibernated, { nodeId, on }),
+  seedAgentIdentity: (entries) => ipcRenderer.send(IPC.agentSeedIdentity, entries),
   onAgentWake: (listener) => {
     const handler = (_e: unknown, nodeId: string) => listener(nodeId)
     ipcRenderer.on(IPC.agentWake, handler)
@@ -841,7 +960,57 @@ const api: NodeTerminalApi = {
   },
   sendHostChatReply: (reply) => ipcRenderer.send(IPC.hostChatReply, reply),
   agentMessage: {
-    deliver: (req) => ipcRenderer.invoke(IPC.agentMessageDeliver, req)
+    deliver: (req) => ipcRenderer.invoke(IPC.agentMessageDeliver, req),
+    deliverBoardComment: (req) => ipcRenderer.invoke(IPC.agentBoardCommentDeliver, req)
+  },
+  boardDispatch: {
+    report: (entries) => {
+      void ipcRenderer.invoke(IPC.boardDispatchReport, entries).catch(() => undefined)
+    }
+  },
+  stationNotice: {
+    list: () => ipcRenderer.invoke(IPC.stationNoticeList),
+    onChanged: (cb) => {
+      const handler = (_e: unknown, views: Parameters<typeof cb>[0]) => cb(views)
+      ipcRenderer.on(IPC.stationNoticeChanged, handler)
+      return () => ipcRenderer.removeListener(IPC.stationNoticeChanged, handler)
+    },
+    reportDropped: (nodeId, dropped) => {
+      void ipcRenderer.invoke(IPC.stationNoticeDropped, nodeId, dropped).catch(() => undefined)
+    }
+  },
+  stationOutcome: {
+    list: () => ipcRenderer.invoke(IPC.stationOutcomeList),
+    onChanged: (cb) => {
+      const handler = (_e: unknown, records: Parameters<typeof cb>[0]) => cb(records)
+      ipcRenderer.on(IPC.stationOutcomeChanged, handler)
+      return () => ipcRenderer.removeListener(IPC.stationOutcomeChanged, handler)
+    }
+  },
+  stationHandover: {
+    list: () => ipcRenderer.invoke(IPC.stationHandoverList),
+    onChanged: (cb) => {
+      const handler = (_e: unknown, records: Parameters<typeof cb>[0]) => cb(records)
+      ipcRenderer.on(IPC.stationHandoverChanged, handler)
+      return () => ipcRenderer.removeListener(IPC.stationHandoverChanged, handler)
+    }
+  },
+  // Live links (src/core/watch-link/service.ts). Owner-only IPC; the service answers this window.
+  watchLink: {
+    create: (req) => ipcRenderer.invoke(IPC.watchLinkCreate, req),
+    list: () => ipcRenderer.invoke(IPC.watchLinkList),
+    revoke: (linkId) => ipcRenderer.invoke(IPC.watchLinkRevoke, linkId),
+    revokeAll: () => ipcRenderer.invoke(IPC.watchLinkRevokeAll),
+    kick: (linkId, viewerId) => ipcRenderer.invoke(IPC.watchLinkKick, linkId, viewerId),
+    sendChat: (linkId, text) => ipcRenderer.invoke(IPC.watchLinkChatSend, linkId, text),
+    chatHistory: (linkId) => ipcRenderer.invoke(IPC.watchLinkChatHistory, linkId),
+    setControl: (linkId, enabled) => ipcRenderer.invoke(IPC.watchLinkSetControl, linkId, enabled),
+    setPassword: (linkId, password) => ipcRenderer.invoke(IPC.watchLinkSetPassword, linkId, password),
+    allowControl: (linkId) => ipcRenderer.invoke(IPC.watchLinkAllowControl, linkId),
+    controlSupport: (nodeId) => ipcRenderer.invoke(IPC.watchLinkControlSupport, nodeId),
+    onState: subscribeWatchLinkState,
+    onChat: subscribeWatchLinkChat,
+    onNotice: subscribeWatchLinkNotice
   }
 }
 

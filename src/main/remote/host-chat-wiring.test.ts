@@ -20,7 +20,7 @@ describe('phone chat verbs are wired end to end', () => {
   it('both phone hosts forward bridge.chat into the session, and the session into the handlers', () => {
     expect(read('main/remote/host-service.ts')).toMatch(/chat: bridge\.chat,/)
     expect(read('main/remote/standing-host.ts')).toMatch(/chat: bridge\.chat,/)
-    expect(read('main/remote/host-service.ts')).toMatch(/opts\.kanban,\n\s*opts\.chat\n\s*\)/)
+    expect(read('main/remote/host-service.ts')).toMatch(/opts\.kanban,\n\s*opts\.chat,\n\s*opts\.relayExtras \?\? \{\}\n\s*\)/)
   })
   it('the remote transcript leg resolves an UNMOUNTED SSH node by its project', () => {
     const src = read('main/index.ts')
@@ -32,6 +32,14 @@ describe('phone chat verbs are wired end to end', () => {
     const block = src.slice(src.indexOf('chat: createHostChat({'), src.indexOf('workspaceRoots: () =>'))
     expect(block).toMatch(/getMainWindow\(\)/)
     expect(block).not.toMatch(/\bwin\.(webContents|isDestroyed)/)
+  })
+  it('the phone catalog reads through the SAME deps the ⌘M composer\'s channel uses (remote leg included)', () => {
+    const src = read('main/index.ts')
+    expect(src).toMatch(/registerChatCatalogIpc\(chatCatalogDeps\)/)
+    expect(src).toMatch(/catalog: \(q\) => readChatCatalog\(q, chatCatalogDeps\)/)
+    expect(src).toMatch(/runRemote: async \(nodeId, cmd\) =>/)
+    // The Server Edition names an SSH-project node remote (built-ins + partial), never reads its own ~/.claude for it.
+    expect(read('server/index.ts')).toMatch(/registerChatCatalogIpc\(\{ isRemoteNode: \(nodeId\) => !!workspaceStore\.sshProjectIdForNode\(nodeId\) \}\)/)
   })
   it('the renderer answers the round-trip', () => {
     const canvas = read('renderer/canvas/Canvas.tsx')

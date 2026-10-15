@@ -40,7 +40,7 @@ describe('hostChatSend', () => {
     sendText: ReturnType<typeof vi.fn> = vi.fn(async () => true),
     now = 1000
   ) =>
-    hostChatSend(base, { getStatus: () => status as never, sendText: sendText as never, now: () => now }).then((r) => ({
+    hostChatSend(base, { getStatus: () => status as never, sendText: sendText as never, now: () => now, paneRefusal: async () => null }).then((r) => ({
       r,
       sendText
     }))
@@ -70,7 +70,7 @@ describe('hostChatSend', () => {
   })
   it('refuses a node whose agent is unknown everywhere (no process can be proven in the pane)', async () => {
     const sendText = vi.fn(async () => true as const)
-    const r = await hostChatSend({ ...base, agentId: undefined }, { getStatus: () => ({ state: 'done' }), sendText, now: () => 1000 })
+    const r = await hostChatSend({ ...base, agentId: undefined }, { getStatus: () => ({ state: 'done' }), sendText, now: () => 1000, paneRefusal: async () => null })
     expect(r).toEqual({ result: 'refused', reason: 'exited' })
     expect(sendText).not.toHaveBeenCalled()
   })
@@ -78,7 +78,7 @@ describe('hostChatSend', () => {
     const sendText = vi.fn(async () => true as const)
     const r = await hostChatSend(
       { ...base, agentId: undefined },
-      { getStatus: () => ({ state: 'done', agentId: 'claude' }), sendText, now: () => 1000 }
+      { getStatus: () => ({ state: 'done', agentId: 'claude' }), sendText, now: () => 1000, paneRefusal: async () => null }
     )
     expect(r).toEqual({ result: 'sent' })
   })
@@ -93,5 +93,31 @@ describe('hostChatSend', () => {
     // A sendText that REJECTED may have pasted already: unconfirmed, so the phone does not resend.
     expect((await run({ state: 'done' }, vi.fn(async () => { throw new Error('x') }))).r).toEqual({ result: 'unconfirmed' })
     expect((await run({ state: 'done' }, vi.fn(async () => 'yes' as never))).r).toEqual({ result: 'refused', reason: 'failed' })
+  })
+  it('asks the KERNEL gate last, with the resolved agent id, and refuses what it refuses — nothing typed', async () => {
+    // codex announces no session end: after a `/quit` the store still reads `done`, and only the
+    // pane's foreground process group can tell that a shell would receive the text.
+    for (const [refusal, reason] of [['exited', 'exited'], ['unverified', 'unavailable']] as const) {
+      const sendText = vi.fn(async () => true as const)
+      const paneRefusal = vi.fn(async () => refusal)
+      const r = await hostChatSend({ ...base, agentId: 'codex' }, { getStatus: () => ({ state: 'done' }), sendText, now: () => 1000, paneRefusal })
+      expect(r).toEqual({ result: 'refused', reason })
+      expect(paneRefusal).toHaveBeenCalledWith('n1', 'codex')
+      expect(sendText).not.toHaveBeenCalled()
+    }
+  })
+  it('a kernel gate that throws refuses (unavailable) rather than typing', async () => {
+    const sendText = vi.fn(async () => true as const)
+    const r = await hostChatSend(
+      { ...base, agentId: 'codex' },
+      { getStatus: () => ({ state: 'done' }), sendText, now: () => 1000, paneRefusal: async () => { throw new Error('x') } }
+    )
+    expect(r).toEqual({ result: 'refused', reason: 'unavailable' })
+    expect(sendText).not.toHaveBeenCalled()
+  })
+  it('the store gate refuses FIRST — no pane probe for a working agent', async () => {
+    const paneRefusal = vi.fn(async () => null)
+    await hostChatSend({ ...base, agentId: 'codex' }, { getStatus: () => ({ state: 'working' }), sendText: vi.fn(), now: () => 1000, paneRefusal })
+    expect(paneRefusal).not.toHaveBeenCalled()
   })
 })

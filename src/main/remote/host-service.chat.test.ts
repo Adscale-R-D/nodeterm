@@ -10,6 +10,7 @@
 //   - Happy paths answer `{page}` / `{status}` / `{result}` / `{ok}`.
 import { describe, expect, it, vi } from 'vitest'
 import { REF_MAX_LEN } from '../../shared/presence'
+import { GROK_AMBIGUOUS_SESSION_MESSAGE } from '../../shared/chat-page'
 import { CHAT_SEND_TEXT_MAX, type ChatPage, type ChatStatus } from '../../shared/mobile-chat'
 import {
   createHostHandlers,
@@ -126,6 +127,14 @@ describe('chat.page', () => {
       body: { message: 'Chat is not available for this agent.' }
     })
   })
+  it('an ambiguous grok session id reaches the phone as its own sentence, not "Could not read"', async () => {
+    const { call } = make({ page: vi.fn(async () => { throw new Error(GROK_AMBIGUOUS_SESSION_MESSAGE) }) })
+    expect(await call('chat.page', { nodeId: 'n1' })).toEqual({
+      id: 'r1',
+      ok: false,
+      body: { message: GROK_AMBIGUOUS_SESSION_MESSAGE }
+    })
+  })
   it('a failed read is an error, never an empty page', async () => {
     const { call } = make({ page: vi.fn(async () => { throw new Error('boom') }) })
     expect(await call('chat.page', { nodeId: 'n1' })).toEqual({
@@ -140,6 +149,14 @@ describe('chat.status', () => {
   it('answers {status}', async () => {
     const { call } = make()
     expect(await call('chat.status', { nodeId: 'n1' })).toEqual({ id: 'r1', ok: true, body: { status: STATUS } })
+  })
+  it('passes the phone\'s catalog opt-in through — and only a literal true', async () => {
+    const status = vi.fn(async (_nodeId: string, _opts?: { catalog?: boolean }) => STATUS)
+    const { call } = make({ status })
+    await call('chat.status', { nodeId: 'n1', catalog: true })
+    await call('chat.status', { nodeId: 'n1', catalog: 'yes' })
+    await call('chat.status', { nodeId: 'n1' })
+    expect(status.mock.calls.map((c) => c[1])).toEqual([{ catalog: true }, undefined, undefined])
   })
   it('unknown node ⇒ "Unknown node."', async () => {
     const { call } = make({ status: vi.fn(async () => null) })

@@ -1,3 +1,5 @@
+import { findSshBinary, nativeMux, setNativePassphrasePrompt, useNativeSsh } from '../../core/remote-ssh/native/native-runtime'
+import { runScpArgv, runSshArgv, startNativeMaster } from '../../core/remote-ssh/native/native-invoke'
 import { promises as fs } from 'fs'
 import path from 'path'
 import { createHash, randomUUID } from 'crypto'
@@ -18,14 +20,15 @@ import type {
   ClaudeSessionCopyResult,
   DownloadResult,
   SshPassphraseRequest,
-  SshProjectStatusEvent
+  SshProjectStatusEvent,
+  RemoteCodexNoDaemon
 } from '../../shared/types'
 import {
   parseRemoteSessionCopy,
   remoteClaudeConfigDir,
   remoteSessionCopyCommand
 } from '../../core/remote-claude-session-copy'
-import { candidateName, safeDownloadBasename } from '../../core/download-name'
+import { candidateName, localChildName, safeDownloadBasename } from '../../core/download-name'
 import { removeAtomic, renameAtomic } from '../../core/fs-atomic'
 import { findExecutableSync, shellPathNow } from '../../core/exec-path'
 import { isSafeRemoteHome } from '../../core/remote-safety'
@@ -53,7 +56,10 @@ import {
 } from '../../core/remote-ssh/control-master'
 import { SshChildGate } from '../../core/remote-ssh/ssh-child-gate'
 import { claudeVersionProbeCommand, parseClaudeVersionProbe } from '../../core/remote-ssh/claude-version-probe'
-import { RemoteHooks } from './remote-hooks'
+import { codexNoDaemonProbeCommand, parseCodexNoDaemonProbe } from '../../core/remote-ssh/codex-no-daemon-probe'
+import { codexProbeHostKey } from '../../shared/agents/codex-daemon'
+import { NO_REMOTE_INTEGRATION, RemoteHooks, type RemoteIntegrationPlan } from './remote-hooks'
+import type { AgentToolsTrigger } from './agent-tools-freshness'
 import {
   recordTunnelRepair,
   shouldAttemptTunnelRepair,
@@ -73,7 +79,7 @@ import { askpassServer } from './ssh-askpass'
 import { appSshAgent } from './ssh-agent'
 import { probeAgentSockToPin } from '../../core/remote-ssh/agent-probe'
 import { sessionName } from '../../core/tmux-naming'
-import { remoteAtomicWrite } from '../remote-atomic-write'
+import { remoteAtomicWrite, runRemoteAtomicWrite } from '../remote-atomic-write'
 import { isBoundedAnswerContent, PENDING_REQUEST_MAX_BYTES } from '../../core/agents/permission-decision'
 import { buildCodexLauncherScript } from '../../core/codex-identity-proxy'
 import {
@@ -104,8 +110,10 @@ interface Runners {
      *  master rather than guessed from a global timestamp. */
     pid?: () => number | undefined
   }
-  /** Run a one-shot ssh, resolving its stdout + exit code; optional stdin written to the child. */
-  run: (args: string[], stdin?: string) => Promise<{ code: number; stdout: string }>
+  /** Run a one-shot ssh, resolving its stdout + exit code; optional stdin written to the child.
+   *  `timeoutMs` (default 15 s) bounds the child; only a caller whose remote command legitimately
+   *  runs longer passes more (Share with team's verbs, up to 75 s for resume). */
+  run: (args: string[], stdin?: string, timeoutMs?: number) => Promise<{ code: number; stdout: string }>
   /** Run a one-shot ssh with a hard timeout, OUTSIDE the per-master child gate, and say only
    *  whether it finished in time. Used by the wake-from-sleep liveness probe: after a sleep the
    *  gate is often full of children hung on the dead master, and a probe queued behind them would
@@ -185,6 +193,18 @@ interface Runners {
   /** Mints this instance's per-node token, or null when there is no node-auth secret at all
    *  (legacy everywhere). Resolved per pass so one connect's tokens all come from one secret. */
   nodeTokenMinter?: () => ((nodeId: string) => string) | null
+  /** The managed Claude accounts pinned to this host (`sshHostKey`), whose config dirs on the host
+   *  carry their own copies of the canvas/context skills. Read per check, so an account added or
+   *  removed mid-run is picked up. Absent ⇒ no account dirs are checked (their skills are then
+   *  only ever written when the account is added). */
+  claudeAccountIdsForHost?: (hostKey: string) => string[]
+  /** What nodeterm may install on / must remove from one SSH host (`sshHostKey`), from the
+   *  agent-integration consent (issue #744, `remoteIntegrationPlan`). Absent ⇒ NOTHING is
+   *  installed and nothing removed on any host — the fail-closed direction. */
+  integrationsForHost?: (hostKey: string) => RemoteIntegrationPlan
+  /** Receipts for the skill files nodeterm wrote on hosts, so a decline can tell its own bytes
+   *  from a user's edit. Absent ⇒ only this build's exact bytes count as ours. */
+  integrationReceipts?: { get(key: string): string | undefined; set(key: string, v: string | null): void }
 }
 
 /** Backoff after a FAILED remote claude probe (no markers = claude not found on that attempt).
@@ -213,10 +233,11 @@ async function removeScpPart(partPath: string): Promise<void> {
     .catch(() => {})
 }
 
-/** Windows aliases terminal dots/spaces, so do not let two remote names bypass one reservation. */
+/** Windows aliases terminal dots/spaces (and reserves device names), so do not let two remote
+ *  names bypass one reservation. The ONE rule, shared with a tree's children (download-name.ts). */
 function localDownloadName(name: string): string {
   if (process.platform !== 'win32') return name
-  return name.replace(/[. ]+$/, '') || 'download'
+  return localChildName(name, 'win32') ?? 'download'
 }
 
 /** Cap on how much master stderr we retain (a misconfigured host can spew), enough for the error. */
@@ -299,6 +320,7 @@ export interface ConnectResult {
   codexCliPath?: string
   claudeAutoPermissionMode?: boolean
   remoteClaudeVersion?: string | null
+  remoteCodexNoDaemon?: RemoteCodexNoDaemon
 }
 
 /**
@@ -372,6 +394,10 @@ interface Conn {
   controlPath: string
   master: ReturnType<Runners['spawnMaster']>
   hookEndpointPath?: string
+  /** The connect's setup chain has finished on this master (the moment `connected` is emitted):
+   *  the facts below are as final as they will get. A spawn that CREATES a session before this
+   *  would create it without the hook/account env and tmux.conf, for life. */
+  setupDone?: boolean
   /** The remote path of nodeterm's tmux.conf (`<remoteHome>/.nodeterm/tmux.conf`), written +
    * source-filed at connect. Threaded to `remoteTmuxCommand`'s `-f` so cold-start remote sessions
    * get mouse/clipboard/scrollback. Undefined if the write/source failed (fail-open). */
@@ -399,6 +425,8 @@ interface Conn {
   /** The probed remote `claude --version` output. `null` = the probe ran and found no claude
    * (feeds the tab-menu hint); undefined = not probed yet. */
   remoteClaudeVersion?: string | null
+  /** This host's `codex` takes `--no-daemon` (probed after connect); undefined = not probed. */
+  remoteCodexNoDaemon?: RemoteCodexNoDaemon
 }
 
 /**
@@ -408,16 +436,8 @@ interface Conn {
  * the common locations. A MISS is only memoized once the async PATH probe has settled.
  * (Do NOT use the brief's always-returns-first stub.)
  */
-let cachedSsh: string | null | undefined
 function sshBin(): string {
-  if (cachedSsh !== undefined) return cachedSsh ?? 'ssh'
-  const found = findExecutableSync('ssh', [
-    '/usr/bin/ssh',
-    '/usr/local/bin/ssh',
-    '/opt/homebrew/bin/ssh'
-  ])
-  if (found || shellPathNow() !== undefined) cachedSsh = found
-  return found ?? 'ssh'
+  return findSshBinary() ?? 'ssh'
 }
 
 /** Resolve an absolute `scp` path the same way `sshBin()` resolves `ssh` (GUI apps lack shell PATH). */
@@ -448,7 +468,11 @@ export class SshProjectManager {
   >()
   private watchdog?: ReturnType<typeof setInterval>
   constructor(private r: Runners) {
-    this.remoteHooks = new RemoteHooks({ run: r.run })
+    this.remoteHooks = new RemoteHooks(
+      { run: r.run },
+      (conn) => r.integrationsForHost?.(sshHostKey(conn)) ?? NO_REMOTE_INTEGRATION,
+      r.integrationReceipts
+    )
   }
 
   /**
@@ -515,6 +539,11 @@ export class SshProjectManager {
         this.tunnelRepair.delete(projectId)
         this.tunnelProbeFailures.delete(projectId)
         this.hookTunnelHealth(projectId, true)
+        // Free once this run has confirmed the host (the check's own cadence); otherwise this is
+        // where a host the connect-time check could not confirm gets looked at again.
+        if (existing.remoteHome && existing.hookEndpointPath) {
+          this.refreshAgentTools(existing.conn, existing.controlPath, existing.remoteHome, 'reuse')
+        }
         return
       }
       const failures = (this.tunnelProbeFailures.get(projectId) ?? 0) + 1
@@ -543,6 +572,12 @@ export class SshProjectManager {
       existing.hookEndpointPath = res.endpointPath
       this.tunnelProbeFailures.delete(projectId)
       this.hookTunnelHealth(projectId, true)
+      // The agent tools are gated on a verified tunnel, so a host whose tunnel failed at connect
+      // never got them; and a tunnel that died may have died with a master another desktop
+      // rebuilt. Look now.
+      if (existing.remoteHome) {
+        this.refreshAgentTools(existing.conn, existing.controlPath, existing.remoteHome, 'repair')
+      }
       // Same contract as the establish path: hook events lost while the tunnel was down are gone
       // for good, so the working agents need a resync. Fire-and-forget behind a catch — a repair
       // job must never surface to the user as a dead SSH project.
@@ -553,6 +588,68 @@ export class SshProjectManager {
       }
     } catch {
       // fail-open: the reuse returns whatever it already had, exactly as before this repair existed
+    }
+  }
+
+  /**
+   * Bring the host's canvas/context shims, skills (system + this host's managed accounts) and
+   * instruction blocks up to this build — rewriting only what differs (RemoteHooks.refreshAgentTools
+   * owns the probe and the cadence). Fire-and-forget on every caller: it is several remote round
+   * trips at most, pure best-effort, and must never delay or fail a connect.
+   */
+  private refreshAgentTools(
+    conn: SshConnection,
+    controlPath: string,
+    remoteHome: string,
+    trigger: AgentToolsTrigger
+  ): void {
+    let accounts: string[] = []
+    try {
+      accounts = this.r.claudeAccountIdsForHost?.(sshHostKey(conn)) ?? []
+    } catch {
+      // a settings read that throws costs the account dirs this check, nothing else
+    }
+    void this.remoteHooks.refreshAgentTools(conn, controlPath, remoteHome, accounts, trigger).catch(() => {})
+  }
+
+  private applyIntegrationRemovals(conn: SshConnection, controlPath: string, remoteHome: string): void {
+    const plan = this.remoteHooks.planFor(conn)
+    // An unanswered host is left exactly as it is: no clean-up, no account lookup, no ssh.
+    if (!plan.decided) return
+    let accounts: string[] = []
+    try {
+      if (plan.remove.has('claude')) accounts = this.r.claudeAccountIdsForHost?.(sshHostKey(conn)) ?? []
+    } catch {
+      /* the account dirs are skipped this time */
+    }
+    void this.remoteHooks
+      .applyIntegrationRemovals(conn, controlPath, remoteHome, accounts, this.r.integrationReceipts)
+      .catch(() => {})
+  }
+
+  /** Last consent signature applied per connected project (issue #744). */
+  private integrationSigs = new Map<string, string>()
+
+  /**
+   * The user changed an agent-integration choice. For every connected project whose host's plan
+   * moved: remove what is no longer consented, and install what newly is (hooks need the verified
+   * tunnel's endpoint, so they wait for `hookEndpointPath`). Never throws, never awaited.
+   */
+  onIntegrationConsentChanged(): void {
+    for (const [projectId, c] of this.conns) {
+      if (!c.remoteHome) continue
+      const plan = this.remoteHooks.planFor(c.conn)
+      const sig = `${plan.decided}|${[...plan.install].sort().join(',')}|${[...plan.remove].sort().join(',')}`
+      if (this.integrationSigs.get(projectId) === sig) continue
+      this.integrationSigs.set(projectId, sig)
+      this.applyIntegrationRemovals(c.conn, c.controlPath, c.remoteHome)
+      if (plan.install.size && c.hookEndpointPath) {
+        const { conn, controlPath, remoteHome } = c
+        void this.remoteHooks
+          .installAgentHooks(conn, controlPath, remoteHome)
+          .then(() => this.refreshAgentTools(conn, controlPath, remoteHome, 'repair'))
+          .catch(() => {})
+      }
     }
   }
 
@@ -773,7 +870,8 @@ export class SshProjectManager {
           codexRelayRuntimePath: existing.codexRelayRuntimePath,
           codexCliPath: existing.codexCliPath,
           claudeAutoPermissionMode: existing.claudeAutoPermissionMode,
-          remoteClaudeVersion: existing.remoteClaudeVersion
+          remoteClaudeVersion: existing.remoteClaudeVersion,
+          remoteCodexNoDaemon: existing.remoteCodexNoDaemon
         }
       }
       this.emitStatus({ projectId, status: 'reconnecting' })
@@ -959,13 +1057,11 @@ export class SshProjectManager {
             // write (mkdir perms, disk full, …) must leave it undefined so `remoteTmuxCommand`
             // never passes `-f <missing-conf>` (which makes tmux refuse to start → terminal dies).
             // The invocation-owned temp also keeps an older valid config intact if ssh drops.
-            const confWrite = remoteAtomicWrite(confPath)
-            const w = await this.r.run(
-              childArgs(conn, controlPath, confWrite.command),
-              // Lead-pane width applies on the host too: an agent team spawned in a remote
-              // session squeezes the lead exactly like a local one. 0/absent ⇒ pre-feature conf.
-              remoteTmuxConf(50000, this.r.leadPaneWidth?.() ?? 0)
-            )
+            // Lead-pane width applies on the host too: an agent team spawned in a remote
+            // session squeezes the lead exactly like a local one. 0/absent ⇒ pre-feature conf.
+            // The size check inside the write keeps an old conf intact if the body never arrives.
+            const confWrite = remoteAtomicWrite(confPath, remoteTmuxConf(50000, this.r.leadPaneWidth?.() ?? 0))
+            const w = await this.r.run(childArgs(conn, controlPath, confWrite.command), confWrite.stdin)
             if (w.code === 0) {
               // source-file is best-effort (pushes options into a warm server); ignore its result.
               await this.r.run(childArgs(conn, controlPath, `${remoteTmuxPathPrologue()}tmux -L ${RMT_TMUX_SOCKET} source-file ${posixQuote(confPath)}`))
@@ -982,14 +1078,23 @@ export class SshProjectManager {
         // canvas control as unavailable. Not awaited: it is several remote round-trips of pure
         // best-effort setup, and holding the connect on them would delay every terminal.
         if (remoteHome && hookEndpointPath) {
-          void this.remoteHooks.installCanvasControl(conn, controlPath, remoteHome)
-          void this.remoteHooks.installContextLink(conn, controlPath, remoteHome)
+          // ONE chain, not two: canvas control and context link merge into the same instruction
+          // files, and two writers racing on one file cannot both publish (see
+          // RemoteHooks.installAgentTools) — the check applies them group by group, in order. It
+          // writes only what differs from this build; a master just came up, so it always looks,
+          // and an app update's new docs reach the host here, on the first connect after the relaunch.
+          this.refreshAgentTools(conn, controlPath, remoteHome, 'connect')
           // Per-node tokens for every node of this project (the endpoint file written just above
           // is what tells the host's hook script where to find them, which is also why this is
           // gated on `hookEndpointPath`: a token nothing can be pointed at is a wasted round-trip).
           // Same not-awaited best-effort terms as the two installs.
           void this.materialiseNodeTokens(projectId, conn, controlPath, remoteHome)
         }
+        // Agent-integration consent (issue #744), REMOVAL side: a host the user declined (or agents
+        // they declined) loses what we wrote there, and the legacy instruction blocks older builds
+        // merged are stripped. Independent of the tunnel; not awaited (best-effort, never delays
+        // the connect). The INSTALL side rides setup() and the agent-tools check above.
+        if (remoteHome) this.applyIntegrationRemovals(conn, controlPath, remoteHome)
         // Managed-Codex runtime: upload the relay bundle + launcher and probe node/codex/curl.
         // Deliberately gated on `remoteHome` ALONE, not on `hookEndpointPath` — account isolation +
         // a shared app-server need only the launcher/relay, never the canvas hooks, and the reverse
@@ -1018,6 +1123,7 @@ export class SshProjectManager {
           entry.codexRelayScriptPath = codexRuntime?.relay
           entry.codexRelayRuntimePath = codexRuntime?.runtime
           entry.codexCliPath = codexRuntime?.codex
+          entry.setupDone = true
           this.emitStatus({ projectId, status: 'connected' })
           if (hookEndpointPath) this.hookTunnelHealth(projectId, true)
           // The tunnel is live again on a master we just established (the reuse branch returned long
@@ -1059,6 +1165,11 @@ export class SshProjectManager {
         // log line. Internals are already try/catch-guarded, but `this.r.onStatus` (IPC send) can
         // still throw if the window is torn down mid-probe, that must never surface here.
         if (entry) void this.probeClaudeAutoPermissionMode(projectId, entry).catch(() => {})
+        // Same shape for the host's codex: may a remote Codex TUI carry `--no-daemon`? (From
+        // 0.157.0 it otherwise joins an auto-started shared app-server that runs every later node
+        // as the first one — shared/agents/codex-daemon.ts.) Unawaited and swallowed for the same
+        // reasons; until it lands, remote Codex lines stay exactly as they were.
+        if (entry) void this.probeRemoteCodexNoDaemon(projectId, entry).catch(() => {})
         return {
           controlPath,
           hookEndpointPath,
@@ -1069,7 +1180,8 @@ export class SshProjectManager {
           codexRelayRuntimePath: entry?.codexRelayRuntimePath,
           codexCliPath: entry?.codexCliPath,
           claudeAutoPermissionMode: entry?.claudeAutoPermissionMode,
-          remoteClaudeVersion: entry?.remoteClaudeVersion
+          remoteClaudeVersion: entry?.remoteClaudeVersion,
+          remoteCodexNoDaemon: entry?.remoteCodexNoDaemon
         }
       }
       const alive = master.exited ? !master.exited() : undefined
@@ -1469,8 +1581,8 @@ export class SshProjectManager {
    * search read over the SAME ControlMaster. `args` are full ssh child args (e.g. from
    * `childArgs(conn, controlPath, cmd)`); returns `{ code, stdout }`.
    */
-  sshRun(args: string[], stdin?: string): Promise<{ code: number; stdout: string }> {
-    return this.r.run(args, stdin)
+  sshRun(args: string[], stdin?: string, opts?: { timeoutMs?: number }): Promise<{ code: number; stdout: string }> {
+    return this.r.run(args, stdin, opts?.timeoutMs)
   }
 
   /**
@@ -1503,6 +1615,34 @@ export class SshProjectManager {
   ): { conn: SshConnection; controlPath: string; remoteCwd?: string } | undefined {
     const c = this.conns.get(projectId)
     return c ? { conn: c.conn, controlPath: c.controlPath, remoteCwd: c.remoteCwd } : undefined
+  }
+
+  /**
+   * Everything a remote SPAWN needs from this connection, for spawns the renderer did not build —
+   * today the relay host's `pty.attach` (core `prepareRelayAttach`). The same facts the renderer
+   * reads off the `connected` event (`resolveSshRemote`), read here from the entry itself.
+   * `undefined` = no master for this scope.
+   */
+  spawnRefFor(scopeId: string):
+    | {
+        conn: SshConnection
+        controlPath: string
+        hookEndpointPath?: string
+        tmuxConfPath?: string
+        remoteHome?: string
+        setupDone: boolean
+      }
+    | undefined {
+    const c = this.conns.get(scopeId)
+    if (!c) return undefined
+    return {
+      conn: c.conn,
+      controlPath: c.controlPath,
+      hookEndpointPath: c.hookEndpointPath,
+      tmuxConfPath: c.tmuxConfPath,
+      remoteHome: c.remoteHome,
+      setupDone: c.setupDone === true
+    }
   }
 
   /** Does this project already have a master, or an attempt in flight? The pre-warm's gate — it
@@ -1649,19 +1789,21 @@ export class SshProjectManager {
         if (c.controlPath !== controlPath) continue
         // Refuse a path that is not under a known-safe home shape — belt to the builder's braces.
         if (/[\0\n\r'"`$\\]/.test(remotePath) || !remotePath.startsWith('/')) return
-        const dir = remotePath.slice(0, remotePath.lastIndexOf('/'))
-        await this.r.run(
-          childArgs(
-            c.conn,
-            c.controlPath,
-            `umask 077; mkdir -p ${posixQuote(dir)} && cat > ${posixQuote(remotePath)}`
-          ),
-          content
+        // Atomic AND complete: the remote command polls for this file and sources it the moment
+        // it exists, so a `cat >` straight at the name could be sourced half-written, and a channel
+        // that died before the body arrived left it empty with `cat` still exiting 0.
+        await runRemoteAtomicWrite(
+          (cmd, stdin) => this.r.run(childArgs(c.conn, c.controlPath, cmd), stdin),
+          remotePath,
+          content,
+          { restrictPermissions: true, mode: '600' }
         )
         return
       }
-    } catch {
-      /* fail-open: never let an env write reach a pty spawn */
+    } catch (e) {
+      // Fail-open: never let an env write reach a pty spawn. The agent then launches without its
+      // env and fails loudly in its own pane; this line says why.
+      console.warn(`[ssh-project] session env not staged: ${e instanceof Error ? e.message : String(e)}`)
     }
   }
 
@@ -1756,6 +1898,11 @@ export class SshProjectManager {
 
   /** The connection's cached remote `--permission-mode auto` capability (undefined = not
    *  probed / not connected). Feeds the agent-status settings block the phone reads. */
+  /** This connection's host codex takes `--no-daemon` — `true` only when its own probe said so. */
+  remoteCodexNoDaemonFor(projectId: string): boolean {
+    return this.conns.get(projectId)?.remoteCodexNoDaemon?.supported === true
+  }
+
   remoteAutoPermFor(projectId: string): boolean | undefined {
     return this.conns.get(projectId)?.claudeAutoPermissionMode
   }
@@ -1799,16 +1946,14 @@ export class SshProjectManager {
     if (!c) return
     const file = this.statusFilePath(projectId, c)
     this.statusPushed.add(projectId)
-    await this.r
-      .run(
-        childArgs(
-          c.conn,
-          c.controlPath,
-          remoteAtomicWrite(file, { restrictPermissions: true }).command
-        ),
-        json
-      )
-      .catch(() => {})
+    try {
+      // The size check keeps the phone's last good doc if the body never arrives: an empty file
+      // there is not "no agents", it is a document the phone cannot parse.
+      const write = remoteAtomicWrite(file, json, { restrictPermissions: true })
+      await this.r.run(childArgs(c.conn, c.controlPath, write.command), write.stdin)
+    } catch {
+      /* best-effort, see above */
+    }
   }
 
   /**
@@ -1905,17 +2050,14 @@ export class SshProjectManager {
     if (!/^[A-Za-z0-9_-]+$/.test(pendingId)) return false
     if (typeof content !== 'string' || !isBoundedAnswerContent(content)) return false
     const file = `${this.pendingDirFor(c)}/${pendingId}.answer`
-    const { code } = await this.r
-      .run(
-        childArgs(
-          c.conn,
-          c.controlPath,
-          remoteAtomicWrite(file, { restrictPermissions: true }).command
-        ),
-        content
-      )
-      .catch(() => ({ code: 1, stdout: '' }))
-    return code === 0
+    try {
+      // The hook polls for this file, so it must never see a truncated answer under its name.
+      const write = remoteAtomicWrite(file, content, { restrictPermissions: true })
+      const { code } = await this.r.run(childArgs(c.conn, c.controlPath, write.command), write.stdin)
+      return code === 0
+    } catch {
+      return false
+    }
   }
 
   /**
@@ -2123,26 +2265,26 @@ export class SshProjectManager {
     // multiplexed ssh child, body on stdin). CodeQL note: this file-data→network write is confined
     // to the authenticated SSH transport, and the payload is our OWN executable bundle, never a
     // credential (Property 1). `chmod 700` — owner-only, executable code.
-    const writeRelay = await this.r.run(
-      childArgs(
-        conn,
-        controlPath,
-        `umask 077; mkdir -p ${posixQuote(dir)} && cat > ${posixQuote(relay)} && chmod 700 ${posixQuote(relay)}`
-      ),
-      source
-    )
-    if (writeRelay.code !== 0) return null
-    // The launcher embeds the app-server start command (absolute node + codex only, no secret). Same
-    // SSH-tunnel-confined write; still only executable code.
-    const writeLauncher = await this.r.run(
-      childArgs(
-        conn,
-        controlPath,
-        `umask 077; cat > ${posixQuote(launcher)} && chmod 700 ${posixQuote(launcher)}`
-      ),
-      buildCodexLauncherScript(remoteCodexAppServerStartCommand(runtime, codex))
-    )
-    return writeLauncher.code === 0 ? { launcher, relay, runtime, codex } : null
+    //
+    // Both go through the atomic, size-checked write: a running Codex node executes these files, so
+    // a `cat >` that the channel cut short (it truncates first) left every Codex node on the host
+    // launching an empty or half-written launcher until the next connect.
+    const runCmd = (cmd: string, stdin: string) => this.r.run(childArgs(conn, controlPath, cmd), stdin)
+    try {
+      await runRemoteAtomicWrite(runCmd, relay, source, { restrictPermissions: true, mode: '700' })
+      // The launcher embeds the app-server start command (absolute node + codex only, no secret).
+      // Same SSH-tunnel-confined write; still only executable code.
+      await runRemoteAtomicWrite(
+        runCmd,
+        launcher,
+        buildCodexLauncherScript(remoteCodexAppServerStartCommand(runtime, codex)),
+        { restrictPermissions: true, mode: '700' }
+      )
+    } catch (e) {
+      console.warn(`[ssh-project] codex runtime not installed on the host: ${e instanceof Error ? e.message : String(e)}`)
+      return null
+    }
+    return { launcher, relay, runtime, codex }
   }
 
   /** Ensure one app-server is live for the system account plus each named managed account, and
@@ -2454,6 +2596,27 @@ export class SshProjectManager {
   }
 
   /**
+   * One remote `codex --help` (login shell, marker-delimited — `codex-no-daemon-probe.ts`), pushed
+   * as a `connected` event once it lands. No retries: an unknown answer only means the remote line
+   * stays as it has always been (no `--no-daemon`), and the next connect asks again.
+   */
+  private async probeRemoteCodexNoDaemon(projectId: string, entry: Conn): Promise<void> {
+    let supported: boolean | null = null
+    try {
+      const { stdout } = await this.r.run(childArgs(entry.conn, entry.controlPath, codexNoDaemonProbeCommand()))
+      supported = parseCodexNoDaemonProbe(stdout)
+    } catch {
+      supported = null
+    }
+    if (supported === null || this.conns.get(projectId) !== entry) return
+    const hostKey = codexProbeHostKey(entry.conn)
+    if (!hostKey) return
+    const answer: RemoteCodexNoDaemon = { hostKey, supported }
+    entry.remoteCodexNoDaemon = answer
+    this.emitStatus({ projectId, status: 'connected', remoteCodexNoDaemon: answer })
+  }
+
+  /**
    * Probe the remote CLI's `--permission-mode auto` support AFTER the connect resolves, then push
    * the answer into the live conn + the renderer (a `connected` status event carrying it).
    *
@@ -2684,6 +2847,14 @@ export function resolvePassphrasePrompt(requestId: string, value: string | null)
  *  not hand a host two budgets. */
 const sshChildGate = new SshChildGate()
 
+/** In-process listeners for every project status event (beside the renderer push). Used by the
+ *  dev-port forward registry to forget a disconnected project's forwards. */
+const sshStatusListeners = new Set<(e: SshProjectStatusEvent) => void>()
+export function onSshProjectStatus(listener: (e: SshProjectStatusEvent) => void): () => void {
+  sshStatusListeners.add(listener)
+  return () => sshStatusListeners.delete(listener)
+}
+
 export function initSshProject(
   onConnected?: (projectId: string) => void,
   askpassScriptPath?: string,
@@ -2698,7 +2869,12 @@ export function initSshProject(
   codexRelaySource?: () => Promise<string>,
   /** Current `settings.tmuxLeadPaneWidth` for the remote tmux conf (issue #119). Injected by
    *  main/index.ts because the settings store lives there; absent ⇒ 0 ⇒ pre-feature conf. */
-  leadPaneWidth?: () => number
+  leadPaneWidth?: () => number,
+  /** The managed Claude accounts pinned to a host (see Runners.claudeAccountIdsForHost). Injected
+   *  for the same reason: the settings store lives in main/index.ts. */
+  claudeAccountIdsForHost?: (hostKey: string) => string[],
+  /** Agent-integration consent per host (see Runners.integrationsForHost / integrationReceipts). */
+  integrations?: Pick<Runners, 'integrationsForHost' | 'integrationReceipts'>
 ): SshProjectManager {
   const ssh = sshBin()
   const scp = scpBin()
@@ -2708,9 +2884,19 @@ export function initSshProject(
   ipcMain.handle(IPC.sshPassphraseSubmit, (_e, requestId: string, value: string | null) =>
     resolvePassphrasePrompt(requestId, value)
   )
+  // WINDOWS (and NODETERM_NATIVE_SSH=1): OpenSSH cannot multiplex there, so every runner below is
+  // served by the in-process transport instead (core/remote-ssh/native/). The manager does not
+  // know: it still builds OpenSSH argv and reads OpenSSH-shaped answers. Decided ONCE here, at
+  // boot, so a single app run never mixes the two transports for one ControlPath.
+  const native = useNativeSsh()
+  if (native) {
+    setNativePassphrasePrompt(async (identityFile, req) =>
+      (await promptForPassphrase({ identityFile, retry: req.retry, target: req.target })) ?? null
+    )
+  }
   const mgr = new SshProjectManager({
     userDataDir: app.getPath('userData'),
-    spawnMaster: (args, env) => {
+    spawnMaster: native ? (args) => startNativeMaster(nativeMux(), args) : (args, env) => {
       // Capture the master's stderr (stdin/stdout stay ignored) so a failed connect can report the
       // real ssh error instead of a generic timeout. Buffer is capped so a chatty host can't grow it
       // unbounded; the master is long-lived and mostly silent, so this holds only the connect-time
@@ -2748,7 +2934,9 @@ export function initSshProject(
       ...(askpassScriptPath ? askpassServer.envFor(identityFile, askpassScriptPath) : {}),
       ...appSshAgent.env()
     }),
-    ensureAgent: () => appSshAgent.start(),
+    // No app-private ssh-agent on the native transport: Windows' ssh-agent is a service and has no
+    // `-a <socket>`, and the native transport authenticates in-process (agent pipe, then key files).
+    ensureAgent: native ? async () => {} : () => appSshAgent.start(),
     // The `ssh -G` probe that honors a config-level `IdentityAgent SSH_AUTH_SOCK` (issue #427):
     // shared with the pty spawn path in core, so the master and the fallback children can never
     // disagree about which agent a host is routed at.
@@ -2758,10 +2946,13 @@ export function initSshProject(
     // real project connects).
     onIdle: () => appSshAgent.scheduleStop(),
     onTunnelVerified,
-    askpassWasCancelled: (masterPid) => askpassServer.wasCancelledBy(masterPid),
-    askpassIsPrompting: () => askpassServer.isPromptingAny(),
-    askpassAsked: (masterPid) => askpassServer.askedBy(masterPid),
-    runSync: (args) => {
+    // Native: a declined passphrase is reported in the master's own error text (native-mux.ts), and
+    // the "key held only in your system agent" hint is about the app-private agent, which the
+    // native transport does not use — so answer "asked" to keep that hint off.
+    askpassWasCancelled: native ? () => false : (masterPid) => askpassServer.wasCancelledBy(masterPid),
+    askpassIsPrompting: native ? () => false : () => askpassServer.isPromptingAny(),
+    askpassAsked: native ? () => true : (masterPid) => askpassServer.askedBy(masterPid),
+    runSync: native ? (args) => void runSshArgv(nativeMux(), args) : (args) => {
       // Quit path only (disconnectAll). Bounded hard: `before-quit` is blocked while this runs, and
       // an unreachable host must not add seconds to every quit.
       try {
@@ -2775,9 +2966,16 @@ export function initSshProject(
     // `MaxSessions` every excess child silently becomes a full login — enough of those at once
     // and sshd's `MaxStartups` resets some outright, which the app sees as a dropped terminal.
     // Mux control commands and the terminals themselves are never queued (see ssh-child-gate.ts).
-    run: (args, stdin) =>
+    run: (args, stdin, timeoutMs) =>
       sshChildGate.run(args, () =>
-        new Promise<{ code: number; stdout: string }>((resolve) => {
+        native
+          ? // Still gated: sshd's MaxSessions bounds channels on ONE connection just as it bounds
+            // mux clients on a ControlMaster.
+            runSshArgv(nativeMux(), args, { stdin, timeoutMs: timeoutMs ?? 15000 }).then((r) => ({
+              code: r.timedOut ? 1 : (r.code ?? 1),
+              stdout: r.stdout.toString('utf-8')
+            }))
+          : new Promise<{ code: number; stdout: string }>((resolve) => {
           // 16 MB ceiling: remote transcript reads pull up to REMOTE_TRANSCRIPT_CAP (5 MB) via
           // RemoteFile; the default 1 MB maxBuffer would kill the child and silently break the
           // remote context meter / subagent transcript / content search for large transcripts.
@@ -2789,7 +2987,7 @@ export function initSshProject(
           const child = execFile(
             ssh,
             args,
-            { timeout: 15000, maxBuffer: 16 * 1024 * 1024, env: { ...process.env, ...appSshAgent.env() } },
+            { timeout: timeoutMs ?? 15000, maxBuffer: 16 * 1024 * 1024, env: { ...process.env, ...appSshAgent.env() } },
             (err, stdout) =>
               resolve({ code: err ? ((err as { code?: number }).code ?? 1) : 0, stdout: stdout ?? '' })
           )
@@ -2808,7 +3006,9 @@ export function initSshProject(
     // Deliberately NOT through `sshChildGate`: after a sleep the gate is typically full of children
     // hung on the very master this probes, and queueing behind them would time the queue.
     probe: (args, timeoutMs) =>
-      new Promise((resolve) => {
+      native
+        ? runSshArgv(nativeMux(), args, { timeoutMs }).then((r) => (r.timedOut ? 'timeout' : 'answered'))
+        : new Promise((resolve) => {
         execFile(
           ssh,
           args,
@@ -2817,7 +3017,12 @@ export function initSshProject(
         )
       }),
     runScp: (args) =>
-      new Promise((resolve) => {
+      native
+        ? runScpArgv(nativeMux(), args).then((r) => {
+            if (r.renamed) console.warn(`[ssh] download: ${r.renamed} file name(s) were changed to be valid on this computer`)
+            return { code: r.code }
+          })
+        : new Promise((resolve) => {
         // Same reason as `run`: scp re-authenticates when the master socket is gone.
         execFile(scp, args, { maxBuffer: 1024 * 1024, env: { ...process.env, ...appSshAgent.env() } }, (err) =>
           resolve({ code: err ? 1 : 0 })
@@ -2826,11 +3031,20 @@ export function initSshProject(
     getHook: () => ({ port: hookServer.getPort(), token: hookServer.getToken(), version: hookServer.getVersion() }),
     codexRelaySource,
     leadPaneWidth,
+    claudeAccountIdsForHost,
+    ...integrations,
     // Per-node identity for REMOTE nodes. Both come from the same module the local materialiser
     // uses, so one canvas cannot be judged by two different rules depending on where it runs.
     nodeIdsForProject: (projectId) => nodeIdsForCanvas(projectId),
     nodeTokenMinter: () => remoteNodeTokenMinter(),
     onStatus: (e) => {
+      for (const listener of [...sshStatusListeners]) {
+        try {
+          listener(e)
+        } catch {
+          // an in-process listener must never break the status push to the UI
+        }
+      }
       // sendToMain resolves the window AT SEND TIME (see main-window.ts): the `win` captured here
       // is destroyed and recreated by a macOS close/reopen, and sending to the stale reference is
       // silently dropped. The try/catch is the other half: webContents.send THROWS when the render

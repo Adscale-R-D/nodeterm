@@ -7,7 +7,11 @@ import { NumberField } from '@renderer/ui/NumberField'
 import { Select } from '@renderer/ui/Select'
 import { SegmentedPill } from '@renderer/ui/SegmentedPill'
 import { Input } from '@renderer/ui/Input'
-import { hintLabel } from '@shared/platform-utils'
+import { hintLabel, isMacPlatform, isWindowsPlatform } from '@shared/platform-utils'
+import { trackpadRoutingSupported } from '@renderer/canvas/wheel-gesture'
+import { isBrowserRuntime } from '@renderer/bridge/runtime'
+import { backgroundCloseDescription, backgroundCloseRowVisible } from '@renderer/lib/backgroundClose'
+import type { BackgroundOnCloseSetting } from '@shared/types'
 import { clampWheelZoomSpeed } from '@renderer/canvas/wheel-zoom'
 import { DEFAULT_WORKTREE_PATH_TEMPLATE } from '@shared/worktree'
 
@@ -35,10 +39,18 @@ const ROWS = {
     keywords: ['snap', 'grid', 'align', 'arrange', 'auto', 'mode']
   },
   panHover: { title: 'Pan-hover delay (ms)', keywords: ['pan', 'hover', 'delay', 'focus', 'guard'] },
+  focusFollowsPointer: {
+    title: 'Terminal focus follows pointer',
+    keywords: ['focus', 'hover', 'pointer', 'click', 'follows', 'x11', 'sloppy', 'mouse', 'keyboard', 'terminal', 'mac']
+  },
   doubleClick: { title: 'Double-click to focus', keywords: ['double', 'click', 'focus'] },
   focusZoom: {
     title: 'Zoom when going to a node',
     keywords: ['zoom', 'focus', 'go to', 'node', 'jump', 'camera', 'session', 'sidebar']
+  },
+  closeProjectOnLastSession: {
+    title: 'Offer to close a project after its last session',
+    keywords: ['close', 'project', 'last', 'session', 'node', 'tab', 'recently closed', 'cleanup', 'agent', 'terminal']
   },
   rememberLock: {
     title: 'Remember the canvas lock',
@@ -67,7 +79,7 @@ const ROWS = {
   },
   trackpadPan: {
     title: 'Trackpad scroll pans',
-    keywords: ['trackpad', 'pan', 'scroll', 'zoom', 'magic', 'mouse', 'two-finger', 'macos']
+    keywords: ['trackpad', 'pan', 'scroll', 'zoom', 'magic', 'mouse', 'two-finger', 'macos', 'windows', 'touchpad']
   },
   dragMode: {
     title: 'Canvas left-drag',
@@ -79,14 +91,21 @@ const ROWS = {
   },
   keepAwake: {
     title: 'Keep awake while agents work',
-    keywords: ['sleep', 'awake', 'power', 'battery', 'suspend', 'run']
+    keywords: ['sleep', 'awake', 'power', 'battery', 'suspend', 'run', 'lid', 'thermal', 'heat']
   },
   confirmQuit: {
     title: 'Confirm before quitting',
     keywords: ['quit', 'exit', 'close', 'confirm', 'dialog', 'ask']
+  },
+  backgroundClose: {
+    title: 'Keep running when the window closes',
+    keywords: ['tray', 'background', 'close', 'minimize', 'notification area', 'system tray', 'quit', 'phone']
   }
 }
-const ENTRIES = Object.values(ROWS)
+// The background-close row only exists for a desktop window off macOS, so search must not offer
+// it anywhere else. Decided once: neither the platform nor the runtime changes under a live page.
+const SHOW_BACKGROUND_CLOSE = backgroundCloseRowVisible(isMacPlatform(), isBrowserRuntime())
+const ENTRIES = Object.values(ROWS).filter((r) => SHOW_BACKGROUND_CLOSE || r !== ROWS.backgroundClose)
 
 export function BehaviorSection({ isActive }: { isActive: boolean }): React.JSX.Element {
   const settings = useSettings((s) => s.settings)
@@ -198,9 +217,31 @@ export function BehaviorSection({ isActive }: { isActive: boolean }): React.JSX.
           }
         />
       </SearchableRow>
+      <SearchableRow {...ROWS.focusFollowsPointer}>
+        <FieldRow
+          label="Terminal focus follows pointer"
+          description={
+            settings.terminalFocusFollowsPointer
+              ? 'On: hovering a terminal for the pan-hover delay gives it the keyboard. It keeps the keyboard when the pointer moves off — until you hover another terminal, or click another node, the empty canvas or a field. Turn off for click to focus.'
+              : 'Off (click to focus): click a terminal to type in it. It keeps the keyboard until you click another node, the empty canvas or a field — moving the pointer away changes nothing.'
+          }
+          control={
+            <Switch
+              checked={settings.terminalFocusFollowsPointer}
+              onChange={(v) => update({ terminalFocusFollowsPointer: v })}
+              ariaLabel="Terminal focus follows pointer"
+            />
+          }
+        />
+      </SearchableRow>
       <SearchableRow {...ROWS.panHover}>
         <FieldRow
           label="Pan-hover delay (ms)"
+          description={
+            settings.terminalFocusFollowsPointer
+              ? undefined
+              : 'Not used in click-to-focus mode (Terminal focus follows pointer is off): hovering never takes the keyboard.'
+          }
           control={
             <NumberField
               value={settings.panHoverDelay}
@@ -233,6 +274,19 @@ export function BehaviorSection({ isActive }: { isActive: boolean }): React.JSX.
               checked={settings.focusZoomToNode}
               onChange={(v) => update({ focusZoomToNode: v })}
               ariaLabel="Zoom when going to a node"
+            />
+          }
+        />
+      </SearchableRow>
+      <SearchableRow {...ROWS.closeProjectOnLastSession}>
+        <FieldRow
+          label="Offer to close a project after its last session"
+          description="When you close the last terminal or agent node in a project with ×, ask whether to close the project too. It stays reopenable from Recently closed."
+          control={
+            <Switch
+              checked={settings.offerCloseProjectOnLastSession}
+              onChange={(v) => update({ offerCloseProjectOnLastSession: v })}
+              ariaLabel="Offer to close a project after its last session"
             />
           }
         />
@@ -354,21 +408,23 @@ export function BehaviorSection({ isActive }: { isActive: boolean }): React.JSX.
           />
         </SearchableRow>
       </div>
-      <SearchableRow {...ROWS.trackpadPan}>
-        <FieldRow
-          label="Trackpad scroll pans"
-          description={hintLabel(
-            'macOS: a two-finger trackpad scroll pans the canvas even with wheel zoom on. The desktop app tells mouse and trackpad apart directly, so a wheel mouse still zooms; in the browser (Server Edition) detection is heuristic — turn off there if a precise-pixel mouse (Magic Mouse, MX) pans when you meant to zoom.'
-          )}
-          control={
-            <Switch
-              checked={settings.trackpadPan}
-              onChange={(v) => update({ trackpadPan: v })}
-              ariaLabel="Trackpad scroll pans"
-            />
-          }
-        />
-      </SearchableRow>
+      {trackpadRoutingSupported({ mac: isMacPlatform(), windows: isWindowsPlatform() }) && (
+        <SearchableRow {...ROWS.trackpadPan}>
+          <FieldRow
+            label="Trackpad scroll pans"
+            description={hintLabel(
+              'A two-finger trackpad scroll pans the canvas even with wheel zoom on, while a wheel mouse still zooms. The macOS desktop app tells mouse and trackpad apart directly; on Windows and in the browser (Server Edition) detection is heuristic — turn off if a smooth-scrolling mouse (Magic Mouse, MX) pans when you meant to zoom.'
+            )}
+            control={
+              <Switch
+                checked={settings.trackpadPan}
+                onChange={(v) => update({ trackpadPan: v })}
+                ariaLabel="Trackpad scroll pans"
+              />
+            }
+          />
+        </SearchableRow>
+      )}
       <SearchableRow {...ROWS.dragMode}>
         <FieldRow
           label="Canvas left-drag"
@@ -401,7 +457,7 @@ export function BehaviorSection({ isActive }: { isActive: boolean }): React.JSX.
       <SearchableRow {...ROWS.keepAwake}>
         <FieldRow
           label="Keep awake while agents work"
-          description="Holds off idle sleep while a local agent is running. A closed lid still sleeps the machine."
+          description="Holds off idle sleep while a local agent is running. Lets the machine sleep on battery below 5% or when it runs critically hot. A closed lid still sleeps the machine, except on macOS when plugged in with an external display connected."
           control={
             <Switch
               checked={settings.keepAwakeWhileAgentsWork}
@@ -424,6 +480,25 @@ export function BehaviorSection({ isActive }: { isActive: boolean }): React.JSX.
           }
         />
       </SearchableRow>
+      {SHOW_BACKGROUND_CLOSE && (
+        <SearchableRow {...ROWS.backgroundClose}>
+          <FieldRow
+            label="Keep running when the window closes"
+            description={backgroundCloseDescription(isWindowsPlatform())}
+            control={
+              <Select
+                aria-label="Keep running when the window closes"
+                value={settings.runInBackgroundOnClose}
+                onChange={(e) => update({ runInBackgroundOnClose: e.target.value as BackgroundOnCloseSetting })}
+              >
+                <option value="auto">Automatic</option>
+                <option value="on">Always</option>
+                <option value="off">Never (closing quits)</option>
+              </Select>
+            }
+          />
+        </SearchableRow>
+      )}
     </SettingsSection>
   )
 }

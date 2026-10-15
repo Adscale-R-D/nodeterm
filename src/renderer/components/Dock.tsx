@@ -12,6 +12,7 @@ import { accountsForProject, sshAccountsHint } from '../state/workspace'
 import { CONTENT_ADD_ITEMS, contentAddItemsToDockRows, type AddHandlers } from '../lib/addMenuSpec'
 import { layoutSubtitle, sortedLayouts } from '../lib/canvasLayoutView'
 import { ZOOM_PRESETS, activeZoomPreset } from '../lib/zoomPresets'
+import { useCoreIsWindows } from '../terminal/use-core-platform'
 import { Tooltip } from './Tooltip'
 
 const isMac = /Mac/i.test(navigator.platform || navigator.userAgent)
@@ -30,6 +31,8 @@ interface DockProps {
   onAddDino: () => void
   onAddTrigger: () => void
   onAddFiles: () => void
+  /** A run node (a launch.json configuration) rooted in the project folder. */
+  onAddRun: () => void
   onAddAgent: (agentId: AgentId, accountId?: string) => void
   onOpenFile: () => void
   onAddRemote: () => void
@@ -80,6 +83,7 @@ export function Dock({
   onAddDino,
   onAddTrigger,
   onAddFiles,
+  onAddRun,
   onAddAgent,
   onOpenFile,
   onAddRemote,
@@ -183,6 +187,7 @@ export function Dock({
   // remote-connection is a different flow than the pane menu's remote picker).
   const hasCwd = !!(activeProject?.ssh?.remoteCwd ?? activeProject?.cwd)
   const isSshProject = !!activeProject?.ssh
+  const isWindowsCore = useCoreIsWindows()
   const dockAddHandlers: AddHandlers = {
     terminal: onAddTerminal,
     remote: onAddRemote,
@@ -193,13 +198,15 @@ export function Dock({
     dino: onAddDino,
     trigger: onAddTrigger,
     files: onAddFiles,
+    run: onAddRun,
     openFile: onOpenFile,
     newFile: onNewFile,
     worktree: onAddWorktree
   }
   const contentRows = contentAddItemsToDockRows(CONTENT_ADD_ITEMS, dockAddHandlers, {
     hasCwd,
-    isSshProject
+    isSshProject,
+    isWindowsCore
   })
 
   return (
@@ -232,7 +239,7 @@ export function Dock({
               // rows), byte-identical to before nesting existed.
               if (inheriting.length === 0) {
                 const base = (
-                  <button key={aid} onClick={pick(() => onAddAgent(aid))}>
+                  <button key={aid} title={AGENT_CONFIG[aid].notice} onClick={pick(() => onAddAgent(aid))}>
                     <AgentIcon agentId={aid} size={18} />
                     <span>{AGENT_CONFIG[aid].label}</span>
                   </button>
@@ -276,7 +283,7 @@ export function Dock({
                   onMouseEnter={() => setOpenSub(aid)}
                   onMouseLeave={() => setOpenSub((cur) => (cur === aid ? null : cur))}
                 >
-                  <button onClick={pick(() => onAddAgent(aid))}>
+                  <button title={AGENT_CONFIG[aid].notice} onClick={pick(() => onAddAgent(aid))}>
                     <AgentIcon agentId={aid} size={18} />
                     <span>{AGENT_CONFIG[aid].label}</span>
                     <span className="dock-menu__chevron">▸</span>

@@ -29,13 +29,21 @@ import {
   type HasSessionResult,
   type PaneCommandResult,
   type CaptureResult,
+  type TerminateOwnerResult,
+  type CaptureVisibleResult,
+  type PaneCwdResult,
+  type PaneModesResult,
   type KillSessionResult,
-  type ListSessionsResult
+  type ListSessionsResult,
+  type SessionHostSessionDetail,
+  type ShutdownResult
 } from './protocol'
 import { HostSession } from './session'
 import { sendTextWhenSettled } from '../core/settled-text'
 import { paneCommand as readPaneCommand } from './process-tree'
 import { terminateWindowsProcessTree } from './windows-process-tree'
+import { terminatePaneOwner } from './terminate-owner'
+import { readWindowsConsoleOwner } from './windows-pane-owner'
 import { publishSessionHostState } from './state-file'
 import {
   EMPTY_LOCK_STALE_MS,
@@ -53,6 +61,7 @@ import { drainSessionHostTransport, writeSessionHostFrame } from './socket-flow'
 import { SessionHostSocketRequestQueue } from './socket-request-queue'
 import { trySessionHostHello } from './hello-probe'
 import { killHostSession } from './kill-session'
+import { clampEmulatorScrollback } from '../shared/scrollback'
 
 /** How long a session-less host lingers before exiting — mirrors tmux's own server lifetime rule
  *  ("the server exits when its last session dies"), plus a grace window so an app restart that
@@ -70,6 +79,11 @@ function tokenMatches(received: unknown, expected: string): boolean {
   const b = Buffer.from(expected)
   return a.length === b.length && crypto.timingSafeEqual(a, b)
 }
+
+/** How long a `shutdown` waits for any one session's kill to be CONFIRMED (node-pty's onExit)
+ *  before reporting it as not ended. Without a bound one wedged process would leave the host
+ *  refusing every new session for the rest of its life. */
+const SHUTDOWN_KILL_DEADLINE_MS = 20_000
 
 const COMPLETED_KILL_TTL_MS = 10 * 60_000
 const MAX_COMPLETED_KILLS = 1_024
@@ -332,6 +346,20 @@ async function main(): Promise<void> {
   /** Connections that negotiated the `geometry` feature at hello. Only these may ever receive a
    *  `geometry` push: an older client reads any non-`data` push frame as an exit (issue #914). */
   const geometrySockets = new WeakSet<net.Socket>()
+  /** Connections that negotiated the `shutdown` feature. Only these may ask the host to end every
+   *  session and exit (issue #829): the command is destructive, so an app build that never asked
+   *  for it can never trigger it by accident. */
+  const shutdownSockets = new WeakSet<net.Socket>()
+  /** Connections that negotiated `sessionDetails`: only these get per-session rows (pid,
+   *  subscribers, output clock, generation) on `listSessions`. An older client reads `{names}`. */
+  const sessionDetailsSockets = new WeakSet<net.Socket>()
+  /** Connections that negotiated `watch-attach`: only these may subscribe without a geometry claim.
+   *  `captureVisible` / `paneCwd` are plain reads and need no per-socket gate — a client that did not
+   *  negotiate them never sends them, and an older host answers `unknown command`. */
+  const watchSockets = new WeakSet<net.Socket>()
+  /** Set while a `shutdown` is ending sessions. New sessions (attach / attachExisting / launches)
+   *  are refused for its duration; cleared again only if the shutdown could not end everything. */
+  let shuttingDown = false
 
   /** Tell every geometry-aware subscriber the size the pty now actually runs at. */
   function publishGeometry(session: HostSession, geometry: { cols: number; rows: number }): void {
@@ -365,6 +393,9 @@ async function main(): Promise<void> {
       ? SESSION_HOST_FEATURES.filter((feature) => requested.includes(feature))
       : []
     if (features.includes('geometry')) geometrySockets.add(socket)
+    if (features.includes('shutdown')) shutdownSockets.add(socket)
+    if (features.includes('sessionDetails')) sessionDetailsSockets.add(socket)
+    if (features.includes('watch-attach')) watchSockets.add(socket)
     return features.length > 0
       ? { protocolVersion: currentProtocolVersion(), features }
       : { protocolVersion: currentProtocolVersion() }
@@ -450,6 +481,9 @@ async function main(): Promise<void> {
       // node-pty may flush a queued data callback after its exit callback. Once endSession has
       // disposed the emulator and broadcast exit, no data may touch or appear after that boundary.
       if (session.exited) return
+      // Output is output whether or not it is shown: the reaper's idleness clock (sessionDetails).
+      session.lastOutputAt = Date.now()
+      session.noteOutput(data)
       // Trusted launch input is typed through the same ConPTY and therefore echoed by the shell.
       // While HostSession verifies that echo, keep the entire chunk out of both renderer push
       // frames and the reconstructable screen so executable/argv/prompt material stays core-only.
@@ -492,6 +526,9 @@ async function main(): Promise<void> {
     req: Extract<SessionHostRequest, { cmd: 'attach' }>,
     socket: net.Socket
   ): Promise<AttachResult> {
+    // Clamped ONCE at the request boundary, before both the replacement-replay fingerprint check
+    // and construction, so an older client's raw 50,000 still matches its own replay.
+    const scrollback = clampEmulatorScrollback(req.scrollback)
     return generationCoordinator.run<AttachResult>(req.name, async (existing) => {
       if (ending.has(req.name)) {
         throw new Error(`session '${req.name}' is ending and cannot be attached`)
@@ -503,7 +540,7 @@ async function main(): Promise<void> {
               `reserved replacement '${req.name}' cannot attach a different live generation`
             )
           }
-          if (!existing.matchesReplacementReplay(req.spawn, req.scrollback)) {
+          if (!existing.matchesReplacementReplay(req.spawn, scrollback)) {
             throw new Error(
               `reserved replacement '${req.name}' replay changed its trusted launch plan`
             )
@@ -565,7 +602,7 @@ async function main(): Promise<void> {
       if (reservation) replacementReservations.delete(req.name)
       let session: HostSession
       try {
-        session = new HostSession(req.name, req.spawn, req.scrollback, reservation?.token)
+        session = new HostSession(req.name, req.spawn, scrollback, reservation?.token)
       } catch (error) {
         scheduleGraceExitIfEmpty()
         log(`spawn failed name=${req.name} category=profile-start-failed detail=${String(error)}`)
@@ -630,12 +667,13 @@ async function main(): Promise<void> {
       if (req.expectedGeneration && req.expectedGeneration !== existing.generation) {
         throw new Error(`session '${req.name}' was replaced by a different generation`)
       }
-      const attachment = await existing.prepareExistingAttachment(
-        socket,
-        req.paused === true,
-        req.cols,
-        req.rows
-      )
+      if (req.watch === true && !watchSockets.has(socket)) {
+        throw new Error('watch attach requires the watch-attach feature negotiated at hello')
+      }
+      const attachment =
+        req.watch === true
+          ? await existing.prepareWatchAttachment(socket)
+          : await existing.prepareExistingAttachment(socket, req.paused === true, req.cols, req.rows)
       try {
         const screen = await existing.serialize()
         if (!attachment.isCurrent()) {
@@ -648,7 +686,10 @@ async function main(): Promise<void> {
           return RETRY_SESSION_GENERATION
         }
         if (!attachment.commit()) throw new Error('attachExisting cancelled before activation')
-        log(`attach-existing name=${req.name} subscribers=${existing.subscribers.size}`)
+        log(
+          `attach-existing name=${req.name} subscribers=${existing.subscribers.size}` +
+            (req.watch === true ? ' watch' : '')
+        )
         return {
           fresh: false,
           screen: screen || undefined,
@@ -809,11 +850,98 @@ async function main(): Promise<void> {
     return promise
   }
 
+  /** Prepare-for-update (issue #829). Ends every live session through the SAME kill path a single
+   *  `killSession` takes (taskkill of the process tree on Windows, then node-pty's real onExit as
+   *  the proof), so a shutdown claims nothing a kill would not. Persisted node metadata belongs to
+   *  the app and is untouched: the nodes stay on the canvas and cold-restore on the next launch.
+   *  If ANY session could not be confirmed ended, the shutdown fails, names them, and the host
+   *  keeps serving — the caller must not quit the app believing the install directory is free. */
+  async function handleShutdown(socket: net.Socket): Promise<ShutdownResult> {
+    if (!shutdownSockets.has(socket)) {
+      throw new Error('shutdown requires the shutdown feature negotiated at hello')
+    }
+    if (shuttingDown) throw new Error('session-host is already shutting down')
+    shuttingDown = true
+    cancelGraceExit()
+    const targets = [...sessions.values()]
+    const endOne = async (session: HostSession): Promise<string> => {
+      const inFlight = ending.get(session.name)
+      if (inFlight) await inFlight.promise
+      else if (session.exited || session.retiring) await session.ending
+      else await handleKill(session.name, crypto.randomUUID(), session.generation, false)
+      return session.name
+    }
+    const withDeadline = (p: Promise<string>): Promise<string> =>
+      new Promise<string>((resolve, reject) => {
+        const timer = setTimeout(
+          () => reject(new Error('kill not confirmed in time')),
+          SHUTDOWN_KILL_DEADLINE_MS
+        )
+        timer.unref?.()
+        p.then(
+          (v) => {
+            clearTimeout(timer)
+            resolve(v)
+          },
+          (e) => {
+            clearTimeout(timer)
+            reject(e)
+          }
+        )
+      })
+    const results = await Promise.allSettled(targets.map((session) => withDeadline(endOne(session))))
+    const failed: string[] = []
+    const ended: string[] = []
+    results.forEach((r, i) => {
+      if (r.status === 'fulfilled') ended.push(r.value)
+      else failed.push(targets[i].name)
+    })
+    // A session that slipped in through a path the guard does not cover would still be running.
+    for (const session of sessions.values()) {
+      if (!session.exited && !failed.includes(session.name)) failed.push(session.name)
+    }
+    if (failed.length > 0) {
+      shuttingDown = false
+      scheduleGraceExitIfEmpty()
+      log(`shutdown incomplete — still running: ${failed.join(', ')}`)
+      throw new Error(`session-host could not end: ${failed.join(', ')}`)
+    }
+    log(`shutdown: ended ${ended.length} session(s)`)
+    return { ended }
+  }
+
+  /** Exit after the shutdown reply has been FLUSHED to the requester — the reply is the caller's
+   *  only proof the sessions ended, so it must not be lost to process exit. Bounded: a peer that
+   *  never reads cannot hold the host up. */
+  function exitAfterShutdown(socket: net.Socket): void {
+    try {
+      server.close()
+    } catch {
+      /* already closed */
+    }
+    for (const other of liveSockets) if (other !== socket) other.destroy()
+    let done = false
+    const finish = (): void => {
+      if (done) return
+      done = true
+      cleanupFiles()
+      process.exit(0)
+    }
+    setTimeout(finish, 2_000).unref?.()
+    socket.end(finish)
+  }
+
   async function dispatch(
     req: SessionHostRequest,
     socket: net.Socket,
     clientProtocolVersion: 1 | 2
   ): Promise<{ ok: true; result?: unknown } | { ok: false; error: string }> {
+    if (
+      shuttingDown &&
+      (req.cmd === 'attach' || req.cmd === 'attachExisting' || req.cmd === 'executeLaunch')
+    ) {
+      return { ok: false, error: 'session-host is shutting down for an update' }
+    }
     switch (req.cmd) {
       case 'attach':
         return { ok: true, result: withGeometry(req.name, socket, await handleAttach(req, socket)) }
@@ -841,6 +969,8 @@ async function main(): Promise<void> {
         const s = sessions.get(req.name)
         if (!s || s.exited) return { ok: false, error: 'no such session' }
         if (!s.subscribers.has(socket)) return { ok: false, error: 'not attached to session' }
+        // A watch attachment (live link / relay viewer) is read-only end to end.
+        if (s.isWatching(socket)) return { ok: false, error: 'watch attachment is read-only' }
         s.proc.write(req.data)
         return { ok: true }
       }
@@ -848,6 +978,8 @@ async function main(): Promise<void> {
         const s = sessions.get(req.name)
         if (!s || s.exited) return { ok: false, error: 'no such session' }
         if (!s.subscribers.has(socket)) return { ok: false, error: 'not attached to session' }
+        // No claim to update, and a viewer must never acquire one (`watch-attach`).
+        if (s.isWatching(socket)) return { ok: false, error: 'watch attachment cannot resize' }
         await s.resizeFor(socket, req.cols, req.rows)
         return { ok: true }
       }
@@ -892,6 +1024,28 @@ async function main(): Promise<void> {
           ok: true,
           result: await hostMessagePane(() => sessions.get(req.name)).send(req.envelope, req.expected)
         }
+      case 'terminateOwnerV1': {
+        const terminated = await terminatePaneOwner(() => sessions.get(req.name), req.expected, {
+          probe: readWindowsConsoleOwner,
+          terminate: (pid) => terminateWindowsProcessTree(pid)
+        })
+        return { ok: true, result: { terminated } satisfies TerminateOwnerResult }
+      }
+      case 'writeDetachedV1': {
+        // No subscriber check, exactly like sendKeys: the caller holds no attachment on purpose.
+        const s = sessions.get(req.name)
+        if (!s || s.exited) return { ok: false, error: 'no such session' }
+        if (typeof req.data !== 'string' || !req.data) return { ok: false, error: 'nothing to write' }
+        s.proc.write(req.data)
+        return { ok: true }
+      }
+      case 'paneModesV1': {
+        const s = sessions.get(req.name)
+        if (!s || s.exited) return { ok: true, result: null }
+        const mouseTracking = await s.mouseTrackingMode()
+        if (s.exited || sessions.get(req.name) !== s) return { ok: true, result: null }
+        return { ok: true, result: { mouseTracking } satisfies PaneModesResult }
+      }
       case 'capture': {
         const s = sessions.get(req.name)
         if (!s || s.exited) return { ok: true, result: { text: '' } satisfies CaptureResult }
@@ -900,6 +1054,18 @@ async function main(): Promise<void> {
           return { ok: true, result: { text: '' } satisfies CaptureResult }
         }
         return { ok: true, result: { text } satisfies CaptureResult }
+      }
+      case 'captureVisible': {
+        const s = sessions.get(req.name)
+        if (!s || s.exited) return { ok: false, error: 'no such session' }
+        const result = await s.captureVisible()
+        if (s.exited || sessions.get(req.name) !== s) return { ok: false, error: 'no such session' }
+        return { ok: true, result: result satisfies CaptureVisibleResult }
+      }
+      case 'paneCwd': {
+        const s = sessions.get(req.name)
+        const cwd = s && !s.exited ? s.paneCwd : null
+        return { ok: true, result: { cwd } satisfies PaneCwdResult }
       }
       case 'executeLaunch': {
         if (clientProtocolVersion === 1) {
@@ -952,10 +1118,31 @@ async function main(): Promise<void> {
         await sessions.get(req.name)?.detach(socket)
         return { ok: true }
       }
-      case 'listSessions':
-        return { ok: true, result: { names: [...sessions.keys()] } satisfies ListSessionsResult }
+      case 'listSessions': {
+        const names = [...sessions.keys()]
+        if (!sessionDetailsSockets.has(socket)) {
+          return { ok: true, result: { names } satisfies ListSessionsResult }
+        }
+        // Only live generations are described: a retiring/exited one is already being ended, and
+        // describing it would invite a second kill or a memory row for a dying tree.
+        const details: SessionHostSessionDetail[] = []
+        for (const s of sessions.values()) {
+          if (s.exited || s.retiring) continue
+          details.push({
+            name: s.name,
+            pid: s.proc.pid,
+            subscribers: s.subscribers.size,
+            lastOutputMs: s.lastOutputAt,
+            createdMs: s.createdAt,
+            generation: s.generation
+          })
+        }
+        return { ok: true, result: { names, sessions: details } satisfies ListSessionsResult }
+      }
       case 'ping':
         return { ok: true }
+      case 'shutdown':
+        return { ok: true, result: await handleShutdown(socket) }
       default:
         return { ok: false, error: `unknown command` }
     }
@@ -977,6 +1164,7 @@ async function main(): Promise<void> {
           encodeFrame({ id: req.id, ...res }),
           sessions.values()
         )
+        if (req.cmd === 'shutdown' && res.ok) exitAfterShutdown(socket)
       } catch (e) {
         writeSessionHostFrame(
           socket,
@@ -1178,7 +1366,8 @@ async function main(): Promise<void> {
       endpoint: paths.endpoint,
       tokenPath: paths.tokenPath,
       startedAt: Date.now(),
-      protocolVersion: currentProtocolVersion()
+      protocolVersion: currentProtocolVersion(),
+      exe: process.execPath
     }
     // Replace the empty startup-lock file atomically from a temp owned by THIS process. A fixed
     // `.tmp` lets racing/stale-reclaim hosts publish or remove one another's bytes; a bare rename

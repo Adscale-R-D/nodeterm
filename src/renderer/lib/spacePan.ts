@@ -49,9 +49,17 @@ export interface SpaceKeyEvent {
  *  - the auto-REPEAT of a held key, so engaging happens once per press rather than sixty times a
  *    second;
  *  - anything typed into a terminal, a note or a field, which is the case that matters most: a
- *    space swallowed there is a wrong character in the user's text, not a missing pan.
+ *    space swallowed there is a wrong character in the user's text, not a missing pan;
+ *  - any space at all while a board covers the canvas (see `canvasCovered`).
  */
-export function spacePanKeydown(e: SpaceKeyEvent, active: Element | null): SpacePanAction {
+export function spacePanKeydown(
+  e: SpaceKeyEvent,
+  active: Element | null,
+  /** A board view covers the canvas (it stays mounted underneath): there is nothing to pan, and
+   *  the space belongs to the board — its focused buttons and its "open the card" key. */
+  canvasCovered = false
+): SpacePanAction {
+  if (canvasCovered) return 'ignore'
   if (e.key !== ' ' && e.key !== 'Spacebar') return 'ignore'
   if (e.repeat) return 'ignore'
   if (e.ctrlKey || e.metaKey || e.altKey) return 'ignore'

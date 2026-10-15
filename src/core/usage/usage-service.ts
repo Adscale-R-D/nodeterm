@@ -17,7 +17,7 @@ import type {
   RemoteAccountUsage,
   RemoteUsageQuery
 } from '../../shared/types'
-import { emptyUsage, usageFromPayload } from './claude-usage-map'
+import { emptyUsage, holdLastGood, usageFromPayload } from './claude-usage-map'
 import {
   fetchRemoteUsage,
   type RemoteUsageRunner,
@@ -192,7 +192,10 @@ export async function fetchUsage(accountId?: string): Promise<ClaudeUsage> {
     if (!res.ok) {
       // 401/403 → token is an API key or expired: no subscription windows to show.
       const status = res.status === 401 || res.status === 403 ? 'unavailable' : 'error'
-      return identify(emptyUsage(email, now, status))
+      const failed = emptyUsage(email, now, status)
+      // 429 is named, not folded into "could not read": the endpoint answered, and its budget is
+      // shared with every Claude CLI using the same login — not a network or credentials fault.
+      return identify(res.status === 429 ? { ...failed, rateLimited: true } : failed)
     }
     const data = (await res.json()) as Record<string, any>
     return identify(usageFromPayload(data, email, now))
@@ -285,9 +288,15 @@ export function startUsageService(opts: UsageServiceOptions = {}): UsageService 
   const lastFetchAt = new Map<string, number>()
   const inFlight = new Map<string, Promise<ClaudeUsage>>()
 
-  const push = (key: string, u: ClaudeUsage): void => {
+  const push = (key: string, fresh: ClaudeUsage): ClaudeUsage => {
+    const now = Date.now()
+    // A failed read keeps the last good numbers (see holdLastGood) instead of blanking the row.
+    const u = holdLastGood(last.get(key), fresh, now)
     last.set(key, u)
-    lastFetchAt.set(key, u.updatedAt)
+    // The READ's time, not `u.updatedAt`: a held snapshot is older than the read that produced
+    // it, and debouncing on its age would re-read on every call — hammering the very endpoint
+    // that just answered 429.
+    lastFetchAt.set(key, now)
     // Only the system account feeds the push channel — the collapsed chip tracks it.
     // Best-effort: a fetch launched before shutdown (or a test's platform reset) can land after
     // the shell is gone, and this runs inside an un-awaited promise chain — throwing here is an
@@ -305,18 +314,18 @@ export function startUsageService(opts: UsageServiceOptions = {}): UsageService 
     } catch {
       // a mirror flush must never break the usage cache update
     }
+    return u
   }
 
   const run = async (accountId?: string): Promise<ClaudeUsage> => {
     const key = accountId ?? ''
     const pending = inFlight.get(key)
     if (pending) return pending
-    const p = fetchUsage(accountId)
+    // push() is inside the shared promise so a coalesced caller gets the HELD snapshot too.
+    const p = fetchUsage(accountId).then((u) => push(key, u))
     inFlight.set(key, p)
     try {
-      const u = await p
-      push(key, u)
-      return u
+      return await p
     } finally {
       inFlight.delete(key)
     }
@@ -456,7 +465,12 @@ export function startUsageService(opts: UsageServiceOptions = {}): UsageService 
     if (pending) return pending
     const p = target.provider === 'codex'
       ? fetchRemoteCodexUsage(target, deps.run, Date.now())
-      : fetchRemoteUsage(target, deps.run, Date.now())
+      : fetchRemoteUsage(target, deps.run, Date.now()).then((fresh) => {
+          // Same rule as the local cache: a failed read keeps this host's last good numbers.
+          // Folded in here, inside the shared promise, so a coalesced reader sees them too.
+          const prev = remoteCache.get(key)?.usage
+          return prev && !('provider' in prev) ? holdLastGood(prev, fresh, Date.now()) : fresh
+        })
     remoteInFlight.set(key, p)
     try {
       const u = await p

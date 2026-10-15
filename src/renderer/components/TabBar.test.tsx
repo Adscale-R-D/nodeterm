@@ -337,3 +337,199 @@ describe('TabBar options button', () => {
   })
 })
 
+
+describe('TabBar Share with team', () => {
+  let root: Root
+  let host: HTMLElement
+  let onShareWithTeam: ReturnType<typeof vi.fn<(id: string) => void>>
+
+  const SSH = { server: { host: 'box', user: 'alice' }, remoteCwd: '~/proj' }
+  const shareRow = (): HTMLButtonElement | undefined =>
+    Array.from(document.querySelectorAll<HTMLButtonElement>('.tab-menu button')).find(
+      (b) => b.textContent?.trim() === 'Share with team…'
+    )
+
+  async function open(
+    over: Partial<Project>,
+    props: { share?: boolean; blocked?: (id: string) => string | null } = {}
+  ): Promise<void> {
+    const { TabBar, useProjects } = await load()
+    useProjects.setState({ projects: [project(over)], activeProjectId: 'p1' })
+    await act(async () => {
+      root.render(
+        <TabBar
+          onSwitch={vi.fn()}
+          onReconnect={vi.fn()}
+          onReorder={vi.fn()}
+          onOpenWelcome={vi.fn()}
+          onRename={vi.fn()}
+          onSetFolder={vi.fn()}
+          onCloseProject={vi.fn()}
+          onRemoteAccess={vi.fn()}
+          onSetDefaultAccount={vi.fn()}
+          onSetDefaultPermissionMode={vi.fn()}
+          onOpenProjectSettings={vi.fn()}
+          {...(props.share === false ? {} : { onShareWithTeam })}
+          shareBlockedReason={props.blocked}
+        />
+      )
+    })
+    await click(host.querySelector<HTMLButtonElement>('.tab__caret')!)
+  }
+
+  beforeEach(() => {
+    host = document.createElement('div')
+    document.body.appendChild(host)
+    root = createRoot(host)
+    onShareWithTeam = vi.fn<(id: string) => void>()
+  })
+
+  afterEach(() => {
+    act(() => root.unmount())
+    host.remove()
+  })
+
+  it('shows for an SSH project, and opens the share for it', async () => {
+    await open({ ssh: SSH })
+    const row = shareRow()
+    expect(row).toBeDefined()
+    expect(row!.disabled).toBe(false)
+    await click(row!)
+    expect(onShareWithTeam).toHaveBeenCalledWith('p1')
+    expect(document.querySelector('.tab-menu')).toBeNull()
+  })
+
+  it('is absent for a local project, a relay tab and when the canvas offers no share', async () => {
+    await open({})
+    expect(shareRow()).toBeUndefined()
+    act(() => root.unmount())
+    root = createRoot(host)
+    await open({ ssh: SSH, remote: true })
+    expect(shareRow()).toBeUndefined()
+    act(() => root.unmount())
+    root = createRoot(host)
+    await open({ ssh: SSH }, { share: false })
+    expect(shareRow()).toBeUndefined()
+  })
+
+  it('is disabled with the reason while the share is blocked', async () => {
+    const reason = 'Connect this project first (its SSH connection is down).'
+    await open({ ssh: SSH }, { blocked: () => reason })
+    const row = shareRow()!
+    expect(row.disabled).toBe(true)
+    expect(row.title).toBe(reason)
+    await click(row)
+    expect(onShareWithTeam).not.toHaveBeenCalled()
+  })
+})
+
+describe('TabBar location tooltip', () => {
+  let root: Root
+  let host: HTMLElement
+
+  const tooltip = (): HTMLElement | null => document.querySelector<HTMLElement>('.tooltip')
+  const tab = (name: string): HTMLElement =>
+    Array.from(host.querySelectorAll<HTMLElement>('.tab')).find(
+      (t) => t.querySelector('.tab__name')?.textContent === name
+    )!
+
+  // React synthesises onMouseEnter/onMouseLeave from the delegated mouseover/mouseout events.
+  const hover = (el: HTMLElement): void =>
+    act(() => {
+      el.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }))
+    })
+  const leave = (el: HTMLElement): void =>
+    act(() => {
+      el.dispatchEvent(new MouseEvent('mouseout', { bubbles: true, relatedTarget: document.body }))
+    })
+  const dwell = (ms: number): void =>
+    act(() => {
+      vi.advanceTimersByTime(ms)
+    })
+
+  beforeEach(async () => {
+    const { TabBar, useProjects } = await load()
+    // The tooltip asks which session a tab belongs to; the app always has the local one.
+    const session = await import('../session/session')
+    session.setActiveSession(session.createSession('local', window.nodeTerminal, 'local').id)
+    host = document.createElement('div')
+    document.body.appendChild(host)
+    useProjects.setState({
+      projects: [
+        project({ id: 'p1', name: 'Alpha', cwd: '/repo/alpha' }),
+        project({
+          id: 'p2',
+          name: 'Remote',
+          cwd: undefined,
+          ssh: { server: { user: 'root', host: 'box.example' }, remoteCwd: '/srv/app' }
+        }),
+        project({ id: 'p3', name: 'Scratch', cwd: undefined })
+      ],
+      activeProjectId: 'p1'
+    })
+    root = createRoot(host)
+    await act(async () => {
+      root.render(
+        <TabBar
+          onSwitch={vi.fn()}
+          onReconnect={vi.fn()}
+          onReorder={vi.fn()}
+          onOpenWelcome={vi.fn()}
+          onRename={vi.fn()}
+          onSetFolder={vi.fn()}
+          onCloseProject={vi.fn()}
+          onRemoteAccess={vi.fn()}
+          onSetDefaultAccount={vi.fn()}
+          onSetDefaultPermissionMode={vi.fn()}
+          onOpenProjectSettings={vi.fn()}
+        />
+      )
+    })
+    vi.useFakeTimers()
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+    act(() => root.unmount())
+    host.remove()
+  })
+
+  it("shows a local project's folder once the pointer rests on its tab, and not before", () => {
+    hover(tab('Alpha'))
+    dwell(400)
+    expect(tooltip()).toBeNull()
+    dwell(100)
+    expect(tooltip()?.textContent).toBe('/repo/alpha')
+  })
+
+  it('carries no native title, so the OS does not draw a second tooltip over it', () => {
+    expect(tab('Alpha').hasAttribute('title')).toBe(false)
+  })
+
+  it('hides when the pointer leaves, or presses the tab', () => {
+    hover(tab('Alpha'))
+    dwell(500)
+    expect(tooltip()).not.toBeNull()
+    leave(tab('Alpha'))
+    expect(tooltip()).toBeNull()
+
+    hover(tab('Alpha'))
+    dwell(500)
+    act(() => {
+      tab('Alpha').dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))
+    })
+    expect(tooltip()).toBeNull()
+  })
+
+  it('names the host for an SSH project', () => {
+    hover(tab('Remote'))
+    dwell(500)
+    expect(tooltip()?.textContent).toBe('root@box.example:/srv/app')
+  })
+
+  it('shows nothing for a canvas with no folder', () => {
+    hover(tab('Scratch'))
+    dwell(1000)
+    expect(tooltip()).toBeNull()
+  })
+})

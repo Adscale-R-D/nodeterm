@@ -39,6 +39,38 @@ describe('Liquid Glass stylesheet', () => {
     expect(dot?.body).toMatch(/background:\s*transparent\s*!important/)
   })
 
+  it('the moved resize controls paint nothing in any look; their inert copies do the painting', () => {
+    const idx = (sel: string) => rules.findIndex((r) => r.selector === sel)
+    const moved = rules.filter((r) => r.selector.endsWith('> .react-flow__resize-control:is(.handle, .line)'))
+    expect(moved).toHaveLength(1)
+    expect(moved[0].selector.startsWith(GATE)).toBe(false) // every look, not just glass
+    expect(moved[0].body).toMatch(/background-color:\s*transparent\s*!important/)
+    expect(moved[0].body).toMatch(/border-color:\s*transparent\s*!important/)
+    // More specific than the neutralising glass overrides (6 class-level parts) it must beat.
+    expect(moved[0].selector).toBe(
+      ':root .flow-wrap .react-flow .react-flow__node:not(.react-flow__node-group) > .react-flow__resize-control:is(.handle, .line)'
+    )
+    expect(idx(":root[data-nt-glass='on'] .react-flow__node:not(.react-flow__node-group) .react-flow__resize-control.handle")).toBeGreaterThan(-1)
+    // The copies take no pointer.
+    expect(rules.find((r) => r.selector === '.react-flow__resize-control.nt-resize-ghost')?.body).toMatch(/pointer-events:\s*none/)
+  })
+
+  it('the moved link dots keep their clipped look, only while the root blur is live', () => {
+    const dotIn = gated('> .bridge-handle--in')[0]
+    const dotOut = gated('> .bridge-handle--out')[0]
+    // laid out against the root's padding box (1px inside the border), inner half only
+    expect(dotIn?.body).toMatch(/left:\s*1px/)
+    expect(dotOut?.body).toMatch(/right:\s*1px/)
+    expect(dotIn?.body).toMatch(/clip-path:\s*inset\(-48px -480px -48px 50%\)/)
+    expect(dotOut?.body).toMatch(/clip-path:\s*inset\(-48px 50% -48px -480px\)/)
+    // Not while the camera moves with blur-while-moving off, nor under Reduce Transparency:
+    // there the root's backdrop-filter is off and nothing was clipped.
+    for (const r of [dotIn, dotOut]) expect(r.selector).toContain('.flow-wrap:not(.canvas-moving)')
+    const media = CSS.indexOf('@media (prefers-reduced-transparency: no-preference) {')
+    const block = CSS.slice(media, CSS.indexOf('\n}\n', media))
+    for (const needle of ['> .bridge-handle--in', '> .bridge-handle--out']) expect(block).toContain(needle)
+  })
+
   it('keeps selection visible with neutral ink, not the accent', () => {
     const sel = gated('.term-node.selected')[0]
     expect(sel?.body).toMatch(/border-color:\s*var\(--text\)\s*!important/)
@@ -107,12 +139,21 @@ describe('Liquid Glass stylesheet', () => {
     expect(rules.find((r) => r.selector === `${ctxHost}::before`)?.body).toMatch(/var\(--glass-chrome-bg\)[\s\S]*var\(--glass-text-blur\)/)
     // Popovers inside a glass node or the card modal (their backdrop root) cannot blur: glass is
     // opt-in, so nothing hands them a translucent glass fill and they keep their opaque colour.
-    for (const nested of ['.dock-menu', '.dock-menu__sub', '.ctx-popover', '.color-popover', '.label-picker', '.kanban-meta__picker']) {
+    for (const nested of ['.dock-menu', '.dock-menu__sub', '.ctx-popover', '.color-popover', '.label-picker', '.kanban-meta__picker', '.live-pop']) {
       const fills = gated(nested).filter(
         (r) => !r.selector.includes('::before') && /background:[^;]*var\(--glass-(chrome|control)-bg\)/.test(r.body)
       )
       expect(fills.map((r) => r.selector), nested).toEqual([])
     }
+  })
+
+  it('the opaque floating surfaces share one look and keep their own placeholder (N4-M1/M2)', () => {
+    // The live-link popover is one of them: opaque over a glass node header or the card modal.
+    const OPAQUE = ['.ctx-popover', '.color-popover', '.label-picker', '.kanban-meta__picker', '.live-pop']
+    const look = rules.find((r) => r.selector === `${GATE} :is(${OPAQUE.join(', ')})`)
+    expect(look?.body).toMatch(/background:\s*var\(--panel\)[\s\S]*border:\s*1px solid var\(--glass-edge\)/)
+    const placeholder = rules.find((r) => r.selector.startsWith(`${GATE} :not(`) && r.selector.endsWith('::placeholder'))
+    expect(placeholder?.selector).toContain(`:is(${OPAQUE.join(', ')}) *`)
   })
 
   it('OK-range meters match the literal green the fills are drawn in (M1)', () => {

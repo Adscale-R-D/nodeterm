@@ -71,7 +71,7 @@ describe('resolveOrCreateColumn', () => {
   })
 
   it('keeps a GitHub column mapping in step for a created column (addColumn does the bookkeeping)', () => {
-    const k: ProjectKanban = { ...defaultKanban(), github: { columnMappings: [] } as never }
+    const k: ProjectKanban = { ...defaultKanban('p1'), github: { columnMappings: [] } as never }
     const r = created(resolveOrCreateColumn(k, 'Task A', true))
     expect(r.k.github!.columnMappings).toEqual([{ columnId: r.columnId, label: 'status:task-a' }])
   })
@@ -116,5 +116,22 @@ describe('sweepEmptiedAgentColumns', () => {
   it('returns the SAME object when nothing is swept, so callers can skip the write', () => {
     const k = board()
     expect(sweepEmptiedAgentColumns(k, k)).toBe(k)
+  })
+})
+
+describe('live board sync carries the agent marker (kanban-ops column allowlist)', () => {
+  it('keeps origin: agent on a column op, and drops any other origin value', async () => {
+    const { sanitizeKanbanOp } = await import('./kanban-ops')
+    const agent = sanitizeKanbanOp({
+      op: 'kb-column',
+      column: { id: 'kcol-a', title: 'Task A', color: '#fff', origin: 'agent' }
+    })
+    expect(agent).toMatchObject({ op: 'kb-column', column: { origin: 'agent' } })
+    // A closed value: anything else is not a marker this build knows, so a peer never acts on it.
+    const other = sanitizeKanbanOp({
+      op: 'kb-column',
+      column: { id: 'kcol-b', title: 'Mine', color: '#fff', origin: 'robot' }
+    }) as unknown as { column: Record<string, unknown> }
+    expect(other.column).not.toHaveProperty('origin')
   })
 })

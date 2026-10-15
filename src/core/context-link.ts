@@ -15,20 +15,18 @@
 // that already knows the difference. The link documents are also still written to
 // <userData>/context-links/ as a debugging aid.
 import fs from 'fs'
-import os from 'os'
 import path from 'path'
 import { platform } from './platform'
+import { syncWindowsShLauncher, writeManagedHookFileAtomic } from './agents/hooks/install-helper'
 import { IPC } from '../shared/ipc'
 import type { ContextLinkInfo, ContextLinkMap } from '../shared/types'
 import { type PtyManager } from './pty-manager'
-import { directExecutableInvocation, findInLoginPath } from './exec-path'
+import { findInLoginPath } from './exec-path'
+import { isSafeOpencodeSessionId, runOpencodeExportAt } from './opencode-export'
 import { TMUX_SOCKET } from './tmux-naming'
 import {
   buildContextShimScript,
-  buildContextLinkSkillBody,
   buildLinkDoc,
-  buildLinkedContextInstructions,
-  mergeInstructionsBlock,
   resolveLinkTranscript,
   transcriptPathOf,
   type LinkDoc,
@@ -43,7 +41,6 @@ import {
 } from './context-link-render'
 import { hookServer } from './agents/hook-server'
 import { locateClaude, locateCodex, locateGemini, locateGrok } from './handoff/locate'
-import { opencodeConfigDir } from './agents/hooks/opencode'
 
 export { setNodeTranscript } from './context-link-core'
 
@@ -55,59 +52,25 @@ export function contextLinkDir(): string {
 function cliShimPath(): string {
   return path.join(contextLinkDir(), 'context.sh')
 }
-function skillPath(): string {
-  return path.join(os.homedir(), '.claude', 'skills', 'get-linked-context', 'SKILL.md')
+/** The context-link shim the get-linked-context skill points at (written by `initContextLink`).
+ *  The skill itself is installed by the consent lifecycle (`core/agent-integrations.ts`). */
+export function contextLinkShimPath(): string {
+  return cliShimPath()
 }
 
 function writeCliFiles(): void {
   const d = contextLinkDir()
   fs.mkdirSync(d, { recursive: true })
-  fs.writeFileSync(cliShimPath(), buildContextShimScript(codexThreadIdentityRoot()))
-  try {
-    fs.chmodSync(cliShimPath(), 0o755)
-  } catch {
-    /* fail open */
-  }
+  // Temp + rename, never a truncating write: agents execute this file (see canvas-control.ts).
+  writeManagedHookFileAtomic(cliShimPath(), buildContextShimScript(codexThreadIdentityRoot()), undefined, 0o755)
+  // Windows: `context.cmd` beside it for PowerShell-run agents (see canvas-control.ts).
+  syncWindowsShLauncher(d, 'context.sh')
   // Sweep the retired Electron-as-Node CLI off upgraders' disks: the shim no longer execs it,
   // and it would sit there pointing at a binary path that moves with every app update.
   try {
     fs.rmSync(path.join(d, 'context-cli.mjs'), { force: true })
   } catch {
     /* fail open */
-  }
-}
-
-function installSkill(): void {
-  try {
-    fs.mkdirSync(path.dirname(skillPath()), { recursive: true })
-    fs.writeFileSync(skillPath(), buildContextLinkSkillBody(cliShimPath()), 'utf8')
-  } catch (e) {
-    console.warn('[context-link] skill install failed', e)
-  }
-}
-
-// Codex/Gemini/opencode have no skill system — merge an instructions block into their global
-// instruction files instead (marker-delimited, idempotent, other content preserved).
-function installAgentInstructions(): void {
-  const block = buildLinkedContextInstructions(cliShimPath())
-  const targets = [
-    path.join(os.homedir(), '.codex', 'AGENTS.md'),
-    path.join(os.homedir(), '.gemini', 'GEMINI.md'),
-    path.join(opencodeConfigDir(), 'AGENTS.md')
-  ]
-  for (const p of targets) {
-    try {
-      let existing = ''
-      try {
-        existing = fs.readFileSync(p, 'utf8')
-      } catch {
-        /* new file */
-      }
-      fs.mkdirSync(path.dirname(p), { recursive: true })
-      fs.writeFileSync(p, mergeInstructionsBlock(existing, block), 'utf8')
-    } catch (e) {
-      console.warn('[context-link] instructions install failed', p, e)
-    }
   }
 }
 
@@ -222,42 +185,16 @@ async function fetchTranscript(node: LinkDocEntry): Promise<string | null> {
   }
 }
 
-/** An export names ONE provider session. The id reaches us from a hook payload, so it is re-checked
- *  here, where it becomes an argv entry: `directExecutableInvocation` stops it being read as shell
- *  syntax, and nothing but this stops a leading `-` being read by opencode as an option. */
-const SAFE_OPENCODE_SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$/
+// The id check and the export bounds live in `opencode-export.ts`, shared with the ⌘M chat view's
+// reader. Re-exported so this module's callers are unchanged.
+export { isSafeOpencodeSessionId } from './opencode-export'
 
-export function isSafeOpencodeSessionId(sessionId: string): boolean {
-  return SAFE_OPENCODE_SESSION_ID.test(sessionId)
-}
-
-// A whole conversation comes back on stdout. execFile's default 1 MiB buffer turns a long session
-// into an error, which reads here as "no transcript"; and with no timeout a wedged CLI holds the
-// linked agent's read open for good.
-const OPENCODE_EXPORT_MAX_BYTES = 32 * 1024 * 1024
+// With no timeout a wedged CLI holds the linked agent's read open for good.
 const OPENCODE_EXPORT_TIMEOUT_MS = 60_000
 
 export async function opencodeExportAt(bin: string, sessionId: string): Promise<string | null> {
-  const invocation = directExecutableInvocation(bin, ['export', sessionId])
-  if (!invocation) return null
-  try {
-    const { execFile } = await import('node:child_process')
-    return await new Promise<string | null>((resolve) => {
-      execFile(
-        invocation.executable,
-        invocation.args,
-        {
-          ...invocation.options,
-          encoding: 'utf-8',
-          maxBuffer: OPENCODE_EXPORT_MAX_BYTES,
-          timeout: OPENCODE_EXPORT_TIMEOUT_MS
-        },
-        (err, stdout) => resolve(err ? null : stdout)
-      )
-    })
-  } catch {
-    return null
-  }
+  const out = await runOpencodeExportAt(bin, sessionId, OPENCODE_EXPORT_TIMEOUT_MS)
+  return out.ok ? out.stdout : null
 }
 
 async function fetchOpencodeExport(node: LinkDocEntry): Promise<string | null> {
@@ -352,29 +289,20 @@ export function setContextLinks(map: ContextLinkMap): Promise<void> {
 }
 
 /**
- * Boot Context Link: register the hook-server read handler, (re)write the shim under `dataDir`,
- * and — only when `options.installAgentIntegrations` says so — install the discovery surface into
- * the machine's REAL agent configuration directories (`~/.claude/skills/get-linked-context`, plus
- * the marker block in `~/.codex/AGENTS.md`, `~/.gemini/GEMINI.md` and opencode's `AGENTS.md`).
+ * Boot Context Link: register the hook-server read handler and (re)write the shim under `dataDir`.
  *
- * `options` is REQUIRED and its flag is a plain `boolean`, deliberately: those instruction files
- * belong to the user and are loaded by every agent session on the machine, ours or not, so
- * writing them is a decision each caller owes an answer to (issue #490). The previous shape —
- * an optional options bag whose flag was read as `!== false` — meant the WRITE was what you got
- * by saying nothing, which is the wrong default direction for a filesystem effect outside our own
- * data dir, and it is exactly how a unit test that never thought about `HOME` came to rewrite the
- * developer's own `~/.codex/AGENTS.md` on every run. Same asymmetry as
- * `session-memory-service.ts`'s required `remote.isRemoteProject`: acting-without-knowing is a
- * compile error. `platformDeps` lost its default with it — every caller already passes one, and a
- * defaulted parameter in front of a required one is unreachable anyway.
+ * Nothing here writes outside our own data dir. The discovery surface (the `get-linked-context`
+ * skill in each consented agent's skills dir) is installed by the consent lifecycle
+ * (`core/agent-integrations.ts`, issue #744) — the one place that decides what nodeterm may write
+ * into user-owned agent configuration. `platformDeps` carries the shell's remote reach.
  */
-export function initContextLink(
-  ptyManager: PtyManager,
-  platformDeps: ContextLinkDeps,
-  options: { installAgentIntegrations: boolean }
-): void {
+export function initContextLink(ptyManager: PtyManager, platformDeps: ContextLinkDeps): void {
   pty = ptyManager
   deps = platformDeps
+  // Re-derive from the platform this init runs under: a process that boots a second core (the
+  // server e2e suites start several, each on its own dataDir) must not keep writing into the
+  // FIRST one's directory — which is how a test's removed dataDir came back, `context.sh` and all.
+  dir = ''
   linkRevision++
   linkDocs.clear()
   verifiedPaths.clear()
@@ -386,14 +314,12 @@ export function initContextLink(
       if (f.endsWith('.json')) fs.rmSync(path.join(d, f), { force: true })
     }
     writeCliFiles()
-    if (options.installAgentIntegrations) {
-      installSkill()
-      installAgentInstructions()
-    }
   } catch (e) {
     console.error('[context-link] setup failed', e)
     return
   }
   platform().handle(IPC.contextLinkSetLinks, (map: ContextLinkMap) => setContextLinks(map))
-  platform().handle(IPC.contextLinkInfo, () => ({ shimPath: cliShimPath() }))
+  // `platform` is THIS core's: the renderer words the connect-time note for the machine whose shim
+  // it names (a Windows core's non-claude agents run the `.cmd` launcher), never the viewer's.
+  platform().handle(IPC.contextLinkInfo, () => ({ shimPath: cliShimPath(), platform: process.platform }))
 }

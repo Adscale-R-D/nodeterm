@@ -12,6 +12,7 @@ import type { ChatSendOutcome, HostChatQuery, RendererChatStatus } from '@shared
 import type { TextDeliveryResult } from '@shared/text-delivery'
 import type { AgentNodeStatus } from '../state/agentStatus'
 import { chatSendRefusal } from './chatSendGate'
+import { chatPaneRefusalReason, type ChatPaneRefusal } from './chatPaneGate'
 
 type StatusSlice = Pick<AgentNodeStatus, 'state' | 'held' | 'hibernated' | 'paused' | 'dropped' | 'sessionEnded' | 'agentId'>
 
@@ -30,6 +31,12 @@ export interface HostChatSendDeps {
   getStatus(nodeId: string): Partial<StatusSlice> | undefined
   sendText(nodeId: string, text: string): Promise<TextDeliveryResult>
   now(): number
+  /**
+   * The KERNEL gate (`chatPaneRefusal`, chatPaneGate.ts): for an agent that announces no session end
+   * (codex), is the agent really in the pane? Required, not optional — a shell that forgot it would
+   * type the phone's text into whatever shell a quit codex left behind, and that must not compile.
+   */
+  paneRefusal(nodeId: string, agentId: string): Promise<ChatPaneRefusal>
 }
 
 export async function hostChatSend(
@@ -45,6 +52,14 @@ export async function hostChatSend(
   const refusal = chatSendRefusal(agentId, st)
   if (refusal !== null) return { result: 'refused', reason: refusal }
   if (st.held) return { result: 'refused', reason: 'dialog' }
+  // Last, because it is the one gate that costs a round trip (a remote pane is read over ssh).
+  let pane: ChatPaneRefusal
+  try {
+    pane = await deps.paneRefusal(q.nodeId, agentId)
+  } catch {
+    pane = 'unverified'
+  }
+  if (pane) return { result: 'refused', reason: chatPaneRefusalReason(pane) }
   try {
     const r = await deps.sendText(q.nodeId, q.text)
     if (r === true) return { result: 'sent' }

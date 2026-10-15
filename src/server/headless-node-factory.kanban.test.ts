@@ -1,15 +1,16 @@
 import fs from 'node:fs'
-import os from 'node:os'
 import path from 'node:path'
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import { fakePlatform } from '../core/platform-fake'
+import { testTmpDir } from '../core/test-tmp'
 import { initPlatform, resetPlatformForTests } from '../core/platform'
 import { WorkspaceStore } from '../core/workspace-store'
 import {
   DEFAULT_SETTINGS,
   type BoardLogEntry,
+  type CanvasMutation,
   type CanvasNodeState,
   type Project,
   type ProjectKanban,
@@ -30,6 +31,31 @@ import {
 
 class FakePty implements HeadlessPty {
   readonly live = new Set<string>()
+  private readonly taps = new Map<string, Set<(c: string) => void>>()
+  private readonly lines = new Map<string, string>()
+  // The same interactive-shell model as upstream's fake in headless-node-factory.test.ts: it echoes
+  // what it is typed and Enter submits the line. These tests open terminals with no command, so no
+  // launch is ever typed — the members exist to keep this fake honest about the interface.
+  persistentSpawnAvailable(): boolean {
+    return true
+  }
+  onOutput(key: string, cb: (c: string) => void): () => void {
+    let set = this.taps.get(key)
+    if (!set) this.taps.set(key, (set = new Set()))
+    set.add(cb)
+    return () => set!.delete(cb)
+  }
+  writeHeadless(key: string, data: string): boolean {
+    if (!this.live.has(key)) return false
+    if (data === '\r' || data === '\x15' || data === '\x1b') {
+      this.lines.set(key, '')
+      return true
+    }
+    this.lines.set(key, (this.lines.get(key) ?? '') + data)
+    for (const cb of [...(this.taps.get(key) ?? [])]) cb(data)
+    return true
+  }
+  releaseHeadless(): void {}
   async createHeadless(options: PtyCreateOptions): Promise<PtyCreateResult> {
     if (options.persistKey) this.live.add(options.persistKey)
     return { sessionId: `pty-${options.persistKey}`, fresh: true, persistent: true }
@@ -68,6 +94,7 @@ describe('HeadlessNodeFactory kanban control', () => {
   let ownership: HeadlessNodeOwnership
   let published: Project[]
   let log: Array<{ projectId: string; entry: BoardLogEntry }>
+  let ops: CanvasMutation[]
 
   const seed = async (kanban?: ProjectKanban): Promise<void> => {
     const initial: Workspace = {
@@ -105,7 +132,7 @@ describe('HeadlessNodeFactory kanban control', () => {
   }
 
   beforeEach(async () => {
-    dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nodeterm-headless-kanban-'))
+    dataDir = testTmpDir('nodeterm-headless-kanban-')
     projectDir = path.join(dataDir, 'project')
     fs.mkdirSync(projectDir, { recursive: true })
     resetPlatformForTests()
@@ -114,6 +141,7 @@ describe('HeadlessNodeFactory kanban control', () => {
     ownership = createHeadlessNodeOwnership()
     published = []
     log = []
+    ops = []
     await seed()
     factory = new HeadlessNodeFactory({
       workspaceStore: store,
@@ -130,8 +158,7 @@ describe('HeadlessNodeFactory kanban control', () => {
       codexSharedIdentity: async () => false,
       ownership,
       stateOf: () => undefined,
-      publishNode: () => {},
-      publishRemoval: () => {},
+      publishMutation: (_projectId, m) => ops.push(m),
       publishProject: (p) => published.push(structuredClone(p)),
       appendBoardLog: async (projectId, entry) => {
         log.push({ projectId, entry })
@@ -144,7 +171,6 @@ describe('HeadlessNodeFactory kanban control', () => {
   afterEach(() => {
     factory.stop()
     resetPlatformForTests()
-    fs.rmSync(dataDir, { recursive: true, force: true })
   })
 
   it('board answers the lazy default for a project with no saved board, and writes nothing', async () => {
@@ -174,19 +200,33 @@ describe('HeadlessNodeFactory kanban control', () => {
     expect(taskA[0].origin).toBe('agent')
     // The lazy default was materialized on the first write, exactly as a desktop first edit does.
     expect(board.columns.map((c) => c.title)).toEqual(['To Do', 'In Progress', 'Done', 'Task A'])
-    expect(board.assignments).toEqual([
-      { nodeId: a, columnId: taskA[0].id },
-      { nodeId: b, columnId: taskA[0].id }
-    ])
+    // Placement only: every assignment now also carries an order `rank` (@shared/kanban-order).
+    expect(board.assignments.map(({ nodeId, columnId }) => ({ nodeId, columnId }))).toEqual(
+      expect.arrayContaining([
+        { nodeId: a, columnId: taskA[0].id },
+        { nodeId: b, columnId: taskA[0].id }
+      ])
+    )
+    expect(board.assignments).toHaveLength(2)
 
-    // Live: the full-project publish is what the browser's replaceProject() adopts (it carries
-    // `kanban`), so an open board updates without a reload.
+    // Live: the board change is CAST as board ops before the save — the path an open board and a
+    // canvas authority follow — and the agent column travels WITH its marker (the op sanitizer is
+    // an allowlist; without `origin` there a peer would hold a column it never removes).
+    expect(ops).toContainEqual(
+      expect.objectContaining({
+        op: 'kb-column',
+        column: expect.objectContaining({ title: 'Task A', origin: 'agent' })
+      })
+    )
+    // …and the persisted project is re-published whole, as every other headless write is.
     expect(published.at(-1)!.kanban).toEqual(board)
 
     const read = await factory.board('term-source', {})
     const col = (read.result as { columns: Array<{ title: string; cards: string[]; origin?: string }> })
       .columns.find((c) => c.title === 'Task A')
-    expect(col).toEqual(expect.objectContaining({ cards: [a, b], origin: 'agent' }))
+    // Newest on top: an unanchored `assign` lands at the TOP of its column (upstream's rule — the card
+    // an agent just filed is the first one a reader sees), so the second card filed reads first.
+    expect(col).toEqual(expect.objectContaining({ cards: [b, a], origin: 'agent' }))
     expect(read.message).toContain('(agent-created)')
   })
 
@@ -284,6 +324,9 @@ describe('HeadlessNodeFactory kanban control', () => {
     const board = (await project()).kanban!
     expect(board.columns.map((col) => col.title)).toEqual(['Mine', 'Empty mine'])
     expect(log.map((l) => l.entry.event)).toEqual([{ type: 'column-deleted', title: 'Task A' }])
+    // The removal rides the same op batch as the node removals, so a live board drops it too.
+    const taskA = published.flatMap((p) => p.kanban?.columns ?? []).find((c) => c.title === 'Task A')
+    expect(ops).toContainEqual({ op: 'kb-column-remove', id: taskA!.id })
     // …and the browser hears about it through the same full-project publish.
     expect(published.at(-1)!.kanban!.columns.map((col) => col.title)).toEqual(['Mine', 'Empty mine'])
   })
@@ -295,7 +338,7 @@ describe('HeadlessNodeFactory kanban control', () => {
     expect(reply.ok).toBe(true)
     const board = (await project()).kanban!
     expect(board.columns.map((c) => c.title)).toEqual(['To Do', 'In Progress', 'Done'])
-    expect(board.assignments).toEqual([
+    expect(board.assignments.map(({ nodeId, columnId }) => ({ nodeId, columnId }))).toEqual([
       { nodeId: a, columnId: board.columns[1].id }
     ])
   })

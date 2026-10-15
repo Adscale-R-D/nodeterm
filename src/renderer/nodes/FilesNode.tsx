@@ -25,21 +25,27 @@
  * Canvas's one `openFile`, and this node never grows a second opinion about what a `.png` is.
  * Directories navigate in place (persisted, so a reload comes back where you were).
  */
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { NodeResizer, useReactFlow, type NodeProps } from '@xyflow/react'
 import type { DirEntry } from '@shared/types'
 import { NODE_MIN_SIZES } from '../lib/nodeSizing'
-import { COLLAPSED_HEIGHT, type CanvasNode } from '../state/workspace'
+import { toggleCollapsed, type CanvasNode } from '../state/workspace'
+import { MaximizeButton } from './MaximizeButton'
 import { NodeColorSwatches } from '../components/NodeColorSwatches'
 import {
   breadcrumbs,
+  childOnPath,
   childPath,
   classifyEmptyListing,
   downloadMenuEntries,
   fileOpenTarget,
   filterEntries,
   folderTitle,
-  parentDir
+  listKeyAction,
+  parentDir,
+  scrollTopToReveal,
+  typeAhead,
+  type TypeAheadState
 } from '../lib/filesNode'
 import { ancestorDirs, createTargetDir, newEntryPath } from '../lib/explorerCreate'
 import { sshFs } from '../terminal/ssh-fs'
@@ -49,6 +55,7 @@ import { promptDialog } from '../components/promptDialog'
 import { ContextMenu, type MenuItem } from '../components/ContextMenu'
 import { isBrowserRuntime } from '../bridge/runtime'
 import { canUseLocalShell, downloadRoute } from '../lib/download'
+import { osRevealLabel } from '../lib/osReveal'
 import { ROW_DOWNLOAD_TITLE, useDownloads, type RowDownloadState } from '../lib/useDownloads'
 import { DownloadStrip } from '../components/DownloadStrip'
 
@@ -107,6 +114,15 @@ export function FilesNode({ id, data, selected }: NodeProps<CanvasNode>) {
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null)
   /** Bumped to force a re-list after a create; `cwd` alone cannot express "same dir, new content". */
   const [version, setVersion] = useState(0)
+  /**
+   * The selected entry, stamped with the directory it was selected IN, so every way the cwd
+   * changes (navigation, a removed worktree re-pointing the node) drops a selection that no longer
+   * names anything here without a clearing effect. Transient — a reload opens with none.
+   */
+  const [sel, setSel] = useState<{ cwd: string; name: string } | null>(null)
+  const typeRef = useRef<TypeAheadState>({ buffer: '', at: 0 })
+  const listRef = useRef<HTMLDivElement>(null)
+  const rowRefs = useRef(new Map<string, HTMLDivElement>())
 
   const collapsed = !!data.collapsed
   /**
@@ -227,8 +243,12 @@ export function FilesNode({ id, data, selected }: NodeProps<CanvasNode>) {
       const patch: Record<string, unknown> = { cwd: to }
       if (data.titleAuto !== false) patch.title = folderTitle(to)
       updateNodeData(id, patch)
+      // Going UP (↑, Backspace, a breadcrumb) lands on the folder you came out of, as in Windows
+      // Explorer and Finder; going down or sideways selects nothing.
+      const cameFrom = childOnPath(to, cwd)
+      setSel(cameFrom ? { cwd: to, name: cameFrom } : null)
     },
-    [id, updateNodeData, data.titleAuto]
+    [id, updateNodeData, data.titleAuto, cwd]
   )
 
   const open = useCallback(
@@ -349,42 +369,81 @@ export function FilesNode({ id, data, selected }: NodeProps<CanvasNode>) {
         onClick: () => api.clipboard.writeText(path)
       })
       if (localShell) {
-        items.push({ label: 'Reveal in file manager', onClick: () => api.shell.reveal(path) })
+        items.push({ label: osRevealLabel(), onClick: () => api.shell.reveal(path) })
       }
       setMenu({ x: e.clientX, y: e.clientY, items })
     },
     [cwd, open, create, api, localShell, source, route, rowDl, download, downloadTo]
   )
 
-  const toggleCollapse = () =>
-    setNodes((ns) =>
-      ns.map((n) => {
-        if (n.id !== id) return n
-        const next = !n.data.collapsed
-        const expandedHeight =
-          (n.data.expandedHeight as number) ?? n.measured?.height ?? (n.height as number) ?? 460
-        const height = next ? COLLAPSED_HEIGHT : expandedHeight
-        return {
-          ...n,
-          height,
-          style: { ...n.style, height },
-          data: { ...n.data, collapsed: next, expandedHeight }
-        }
-      })
-    )
+  const toggleCollapse = () => setNodes((ns) => toggleCollapsed(ns as CanvasNode[], [id]))
 
   const shown = useMemo(() => filterEntries(entries ?? [], query), [entries, query])
+  const selectedName = sel && sel.cwd === cwd ? sel.name : null
+  /** -1 when nothing is selected, or the selection is filtered out of view. */
+  const selIndex = useMemo(
+    () => (selectedName === null ? -1 : shown.findIndex((e) => e.name === selectedName)),
+    [shown, selectedName]
+  )
+  const select = useCallback((name: string) => setSel({ cwd, name }), [cwd])
+
+  // Keep the selection in view as the keyboard moves it — and after going up, once the parent's
+  // listing has arrived, so the folder you came out of is on screen.
+  useEffect(() => {
+    const list = listRef.current
+    const row = selectedName === null ? undefined : rowRefs.current.get(selectedName)
+    if (!list || !row) return
+    list.scrollTop = scrollTopToReveal(row.offsetTop, row.offsetHeight, list.scrollTop, list.clientHeight)
+  }, [selectedName, shown])
+
+  /**
+   * The listing's keyboard, live while the list has focus (a click on a row gives it focus).
+   * Everything handled here is also STOPPED here: bubbling on, an arrow reaches React Flow's node
+   * wrapper — which moves the selected node — and a letter or Backspace reaches the canvas
+   * dispatcher, where Backspace means "delete the selected nodes".
+   */
+  const onListKeyDown = useCallback(
+    (e: React.KeyboardEvent) => {
+      if (e.defaultPrevented || e.nativeEvent.isComposing) return
+      const claim = (): void => {
+        e.preventDefault()
+        e.stopPropagation()
+      }
+      const action = listKeyAction(
+        { key: e.key, alt: e.altKey, meta: e.metaKey, ctrl: e.ctrlKey },
+        selIndex,
+        shown.length
+      )
+      if (action) {
+        claim()
+        if (action.kind === 'select') select(shown[action.index].name)
+        else if (action.kind === 'open') open(shown[action.index])
+        else if (cwd && cwd !== '/') navigate(parentDir(cwd))
+        return
+      }
+      if (e.altKey || e.metaKey || e.ctrlKey) return
+      // An arrow with nowhere to go (empty folder, first/last row) still belongs to the list.
+      if (e.key.startsWith('Arrow') || e.key === 'Home' || e.key === 'End') {
+        claim()
+        return
+      }
+      // Type-ahead: any printable character. Space is left alone — it is not how names are found,
+      // and the canvas takes it (capture phase) as hold-to-pan before it gets here anyway.
+      if (e.key.length !== 1 || e.key === ' ') return
+      claim()
+      const res = typeAhead(typeRef.current, e.key, Date.now(), shown.map((x) => x.name), selIndex)
+      typeRef.current = res.state
+      if (res.index >= 0) select(shown[res.index].name)
+    },
+    [selIndex, shown, select, open, cwd, navigate]
+  )
   const crumbs = useMemo(() => breadcrumbs(cwd), [cwd])
 
   return (
+    <>
     <div className={`files-node${selected ? ' selected' : ''}${collapsed ? ' collapsed' : ''}`}>
-      <NodeResizer
-        minWidth={NODE_MIN_SIZES.files.width}
-        minHeight={NODE_MIN_SIZES.files.height}
-        isVisible={selected && !collapsed}
-        color={data.color as string}
-      />
-
+      {/* Paint only: the old resize box in its old place (see .nt-resize-ghost in styles.css). */}
+      <NodeResizer isVisible={selected && !collapsed} color={data.color as string} lineClassName="nt-resize-ghost" handleClassName="nt-resize-ghost" />
       <div className="files-node__header" style={{ background: `${data.color}22` }}>
         <button className="term-node__collapse" title={collapsed ? 'Expand' : 'Collapse'} onClick={toggleCollapse}>
           {collapsed ? '▸' : '▾'}
@@ -460,6 +519,7 @@ export function FilesNode({ id, data, selected }: NodeProps<CanvasNode>) {
         >
           ⟳
         </button>
+        {!collapsed && <MaximizeButton id={id} maximized={!!data.premaxRect} />}
         <button className="term-node__close" title="Close" onClick={() => deleteElements({ nodes: [{ id }] })}>
           ×
         </button>
@@ -495,7 +555,10 @@ export function FilesNode({ id, data, selected }: NodeProps<CanvasNode>) {
           />
 
           <div
+            ref={listRef}
             className="files-node__list nodrag nowheel"
+            tabIndex={0}
+            onKeyDown={onListKeyDown}
             onContextMenu={(e) => openMenu(e, null)}
           >
             {/* Four distinct states, kept distinct. "Still loading", "could not read", "the
@@ -514,10 +577,23 @@ export function FilesNode({ id, data, selected }: NodeProps<CanvasNode>) {
               shown.map((entry) => (
                 <div
                   key={entry.name}
-                  className={`files-node__row${entry.ignored ? ' is-ignored' : ''}`}
+                  ref={(el) => {
+                    if (el) rowRefs.current.set(entry.name, el)
+                    else rowRefs.current.delete(entry.name)
+                  }}
+                  className={`files-node__row${entry.ignored ? ' is-ignored' : ''}${
+                    entry.name === selectedName ? ' is-selected' : ''
+                  }`}
                   title={childPath(cwd, entry.name)}
-                  onClick={() => open(entry)}
-                  onContextMenu={(e) => openMenu(e, entry)}
+                  // Click selects, double-click opens (a folder navigates into itself) — the
+                  // desktop file-manager contract, and what makes the keyboard usable: a single
+                  // click that opened could never leave a selection for the arrows to move.
+                  onClick={() => select(entry.name)}
+                  onDoubleClick={() => open(entry)}
+                  onContextMenu={(e) => {
+                    select(entry.name)
+                    openMenu(e, entry)
+                  }}
                 >
                   <EntryGlyph dir={entry.dir} />
                   <span className="files-node__name">{entry.name}</span>
@@ -537,5 +613,17 @@ export function FilesNode({ id, data, selected }: NodeProps<CanvasNode>) {
         <ContextMenu x={menu.x} y={menu.y} items={menu.items} onClose={() => setMenu(null)} />
       )}
     </div>
+    {/* Sibling of the root, not a child: under Liquid Glass the root has a backdrop-filter,
+        which makes it the containing block for these absolute edges, so they were clipped and
+        covered (only the top edge stayed grabbable). Out here they sit on the node wrapper.
+        AFTER the root, never before it: focus mode reparents the root out of this wrapper, and
+        React inserting a control "before the root" would then throw NotFoundError. */}
+    <NodeResizer
+      minWidth={NODE_MIN_SIZES.files.width}
+      minHeight={NODE_MIN_SIZES.files.height}
+      isVisible={selected && !collapsed}
+      color={data.color as string}
+    />
+    </>
   )
 }

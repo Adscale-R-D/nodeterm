@@ -14,6 +14,7 @@ import { createHostChat, mirrorChatSendRefusal, type HostChatDeps } from './host
 import { setCustomAgentBaseResolver } from '../../shared/agents/config'
 import type { ChatTranscriptResult } from '../../shared/types'
 import type { HeldPermissionIo } from '../../core/agents/permission-decision'
+import { readChatTranscript, type ChatReadQuery } from '../../core/transcript-ipc'
 
 const RESULT: ChatTranscriptResult = { messages: [], found: true, olderCursor: null, unmatchedResults: [], model: 'm' }
 const RSTATUS = { state: 'done' as const, held: null, hibernated: false, paused: false, dropped: false, sessionEnded: false }
@@ -67,7 +68,7 @@ describe('host-chat page', () => {
     await expect(createHostChat(d).page('n1', {})).rejects.toThrow()
   })
   it('serves only chat-capable agents (resolved through the base harness), and reads nothing otherwise', async () => {
-    for (const agentId of ['codex', 'gemini', undefined]) {
+    for (const agentId of ['antigravity', undefined]) {
       const d = deps({ lookupNode: () => ({ agentId, sessionId: 'sid-1' }) })
       expect(await createHostChat(d).page('n1', {})).toBe('unsupported')
       expect(d.readTranscript).not.toHaveBeenCalled()
@@ -79,6 +80,49 @@ describe('host-chat page', () => {
     } finally {
       setCustomAgentBaseResolver(null)
     }
+  })
+  it('serves gemini, handing its OWN agent id to the reader (which routes it off claude\'s resolver)', async () => {
+    const d = deps({ lookupNode: () => ({ agentId: 'gemini', sessionId: 'sid-1' }) })
+    expect(await createHostChat(d).page('n1', {})).toMatchObject({ version: 1 })
+    expect(d.readTranscript).toHaveBeenCalledWith(expect.objectContaining({ agentId: 'gemini', sessionId: 'sid-1' }), {})
+  })
+  it('serves a codex node, passing its own agent id so core routes it to the codex reader', async () => {
+    const d = deps({ lookupNode: () => ({ cwd: '/srv/app', agentId: 'codex', sessionId: 'sid-1', remote: true }) })
+    expect(await createHostChat(d).page('n1', {})).toMatchObject({ version: 1 })
+    expect(d.readTranscript).toHaveBeenCalledWith(expect.objectContaining({ agentId: 'codex', remoteOnly: true }), {})
+  })
+  it('serves an opencode node through the REAL reader: its own export locally, refused remote', async () => {
+    // The phone gets opencode for free once the desktop parses it: `page` gates on canChat, and the
+    // real `readChatTranscript` routes opencode to `opencode export <id>` (core/opencode-chat.ts).
+    const SID = 'ses_0a1b2c3d4ffeSynthetic000001'
+    const stdout = JSON.stringify({
+      info: { id: SID },
+      messages: [{ info: { id: 'msg_1', sessionID: SID, role: 'user', time: { created: 1 } }, parts: [{ type: 'text', text: 'hi from opencode' }] }]
+    })
+    const opencodeExport = vi.fn(async () => ({ ok: true as const, stdout }))
+    const real = (q: ChatReadQuery, rawPage: unknown) => readChatTranscript(q, rawPage, { opencodeExport })
+    const local = deps({
+      lookupNode: () => ({ cwd: '/srv/app', agentId: 'opencode', sessionId: SID }),
+      readTranscript: vi.fn(real),
+      renderer: { ...deps().renderer, session: vi.fn(async () => ({ sessionId: SID })) }
+    })
+    expect(await createHostChat(local).page('n1', {})).toMatchObject({
+      version: 1,
+      sessionId: SID,
+      found: true,
+      olderCursor: null,
+      messages: [{ role: 'user', parts: [{ kind: 'text', text: 'hi from opencode' }] }]
+    })
+    // A relay page is a user-driven read, never a background refresh (the export gate spaces those).
+    expect(opencodeExport).toHaveBeenCalledWith(SID, { background: false })
+    opencodeExport.mockClear()
+    const remote = deps({
+      lookupNode: () => ({ cwd: '/srv/app', agentId: 'opencode', sessionId: SID, remote: true }),
+      readTranscript: vi.fn(real),
+      renderer: { ...deps().renderer, session: vi.fn(async () => ({ sessionId: SID })) }
+    })
+    await expect(createHostChat(remote).page('n1', {})).rejects.toThrow('Could not read the transcript.')
+    expect(opencodeExport).not.toHaveBeenCalled()
   })
   it('an absent page is the default paged tail, not the legacy read', async () => {
     const d = deps()
@@ -149,6 +193,32 @@ describe('host-chat status', () => {
   it('structuredAnswers is false with no held request', async () => {
     const d = deps({ isStructuredTicket: vi.fn(() => true) })
     expect((await createHostChat(d).status('n1'))?.structuredAnswers).toBe(false)
+  })
+  it('the `/` catalog rides ONLY when asked, re-checked, and its failure drops the field, not the status', async () => {
+    const catalog = vi.fn(async () => ({
+      version: 1 as const,
+      entries: [
+        { name: 'ok', description: 'a\u001bb', kind: 'command' as const, scope: 'project' as const },
+        { name: 'bad name', description: '', kind: 'command' as const, scope: 'project' as const }
+      ]
+    }))
+    const d = deps({ catalog })
+    // An older phone never asks: the old shape, and no catalog read at all.
+    expect(await createHostChat(d).status('n1')).not.toHaveProperty('catalog')
+    expect(catalog).not.toHaveBeenCalled()
+    const s = await createHostChat(d).status('n1', { catalog: true })
+    expect(catalog).toHaveBeenCalledWith({ nodeId: 'n1', agentId: 'claude', accountId: 'acc', cwd: '/srv/app' })
+    expect(s?.catalog).toEqual({ version: 1, entries: [{ name: 'ok', description: 'a b', kind: 'command', scope: 'project' }] })
+    const failing = deps({ catalog: vi.fn(async () => { throw new Error('host down') }) })
+    const s2 = await createHostChat(failing).status('n1', { catalog: true })
+    expect(s2).toMatchObject({ version: 1, state: 'done' })
+    expect(s2).not.toHaveProperty('catalog')
+  })
+  it('a catalog that does not answer in time is DROPPED — the status never waits on a half-dead master', async () => {
+    const d = deps({ catalog: vi.fn(() => new Promise<never>(() => {})), catalogTimeoutMs: 20 })
+    const s = await createHostChat(d).status('n1', { catalog: true })
+    expect(s).toMatchObject({ version: 1, state: 'done' })
+    expect(s).not.toHaveProperty('catalog')
   })
   it('unknown node ⇒ null, renderer never asked', async () => {
     const d = deps()

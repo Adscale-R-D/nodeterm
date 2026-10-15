@@ -3,7 +3,7 @@
 **Audience: the agent/manager coordinating work on this box.** What you can do now that you could
 not before, what is actually running, and what is known-broken so you do not chase it.
 
-Written **2026-09-23** (updated 2026-09-28 for sync #4), replacing the 2026-09-02 edition wholesale — most of what that one
+Written **2026-09-23** (updated 2026-09-28 for sync #4 and 2026-10-15 for sync #5), replacing the 2026-09-02 edition wholesale — most of what that one
 described has been retired (§4). Lives in `docs/fork/` (a path upstream never creates, so it adds
 no conflict surface); fork-local operational state, not upstream documentation.
 
@@ -15,7 +15,7 @@ no conflict surface); fork-local operational state, not upstream documentation.
 |---|---|
 | This checkout | `~/nodeterm` = **`Adscale-R-D/nodeterm`** (our fork), branch `main` |
 | Upstream | **`eneskirca/nodeterm`**, remote `upstream` |
-| Fork `main` | a merge of upstream `775c852b` (**v0.3.17**, sync #4, 2026-09-28), **0 behind upstream** |
+| Fork `main` | a merge of upstream `117eade8` (**v0.4.3**, sync #5, 2026-10-15), **0 behind upstream** |
 | What runs the server | a **second checkout**, `~/.nodeterm-server-app`, systemd `nodeterm-server` |
 
 The fork now carries **2 patches** upstream lacks (§4), down from 5.
@@ -34,12 +34,12 @@ Upstream rebuilt Server-Edition canvas control, and it replaced our implementati
   **No browser tab is required.**
 
 **It is tab-free but NARROWER, and that trade is the headline.** Our retired bridge served all 25
-verbs whenever a tab happened to be attached; the headless runtime serves **15**, always —
-upstream's 13, plus `board`/`assign`, which this fork adds (§4):
+verbs whenever a tab happened to be attached; the headless runtime serves **19**, always —
+upstream's 17, plus `board`/`assign`, which this fork adds (§4):
 
 | Served headless (Server Edition v1) | Refused headless (`control-unsupported-on-this-edition`) |
 |---|---|
-| `open-project` `open-terminal` `open-agent` `close` `link` `group` `rename` `color` `send` `reply` `notify` `sticky` `settings` **`board` `assign`** | `list` `verify` `spawn-team` `arrange` `align` `move` `ungroup` `open-claude` `open-worktree` `close-worktree` `branch` `write` `show-*` `open-browser` `browser` |
+| `open-project` `open-terminal` `open-agent` `close` `link` `group` `rename` `color` `send` `reply` `notify` `sticky` `settings` `run` `report-outcome` `issues` `prs` **`board` `assign`** | `list` `verify` `spawn-team` `arrange` `align` `move` `ungroup` `open-claude` `open-worktree` `close-worktree` `branch` `write` `show-*` `open-browser` `browser` |
 
 Consequences an orchestrator must plan around:
 - **`open-claude` is gone — use `open-agent --agent claude`** (v1 takes `claude|codex|gemini`).
@@ -186,8 +186,8 @@ boot factory, our canvas-control installer, and the agent-facing group-subtree `
 
 | | |
 |---|---|
-| `main` | sync #4 merge of upstream `775c852b` (v0.3.17), 2026-09-28 |
-| **Running** | same — deployed 2026-09-24 |
+| `main` | sync #5 merge of upstream `117eade8` (v0.4.3), 2026-10-15 |
+| **Running** | sync #4 (`8dfc7562`) until this merge is deployed |
 | Canvas-control flag | **ON**, via `/etc/systemd/system/nodeterm-server.service.d/canvas-control.conf` |
 
 Deploy sequence (deps change most syncs, so a bare rebuild is not enough):
@@ -215,18 +215,46 @@ Then **hard-reload the browser tab** (the renderer bundle changes every deploy).
 
 ## 7. Known-red tests (do not chase)
 
-**None** as of sync #4 (2026-09-28): **14,111 passing, 0 failing**, both typechecks clean.
-`src/core/tmux-paste.realtmux.test.ts` ("copy mode unframes the paste"), red at sync #3, passed this
-time; it is environment-sensitive real tmux, so if it reappears, check it on `upstream/main` alone
-before chasing it. One settings-section test can print an unhandled `window is not defined` from a
-coalesced save timer under full-suite load — a flake in a file the fork does not touch.
+**One** as of sync #5 (2026-10-15): `src/core/agents/hook-server-form.test.ts` → "reads windows-1252
+escapes instead of throwing" (a native-Windows-curl form body). It fails identically on
+`upstream/main` alone — verified in a throwaway worktree — so it is this box's environment, not the
+fork. Everything else is green: **22,291 passing**, both typechecks clean.
 
 `node_modules` here is real and patched. If `node-pty-patch.test.ts` goes red, the install is
 unpatched — not the code.
 
 ---
 
-## 8. Sync #4 (2026-09-28): what it brought (v0.3.10 → v0.3.17, 417 commits)
+## 8. Sync #5 (2026-10-15): what it brought (v0.3.17 → v0.4.3, 1,087 commits)
+
+All three patches survived again — upstream's server still refuses `board`/`assign`, still stubs
+`contextLink.info` in the browser, and still treats opus/sonnet as 1M. What changed for us:
+
+- **Pipeline reliability, headless:** `--after-success` + `report-outcome` (wait for a station to
+  REPORT success, not just end its turn); queued messages, outcome reports, the `--request-id` ledger
+  and `--after` holds now SURVIVE a service restart (`<dataDir>/orchestration-state/`); the opener is
+  told once when a station it opened errors, dies or sits blocked 15 min; `run` re-delivers a
+  retained launch; `issues`/`prs` read the board's GitHub lane. The server's creator-ownership rule
+  is still process-local — a restart still resets which nodes an agent may mutate.
+- **Hosted team relay** (opt-in, inert until `team bootstrap`): this core can host a team that
+  desktop apps join through nodeterm's relay (`wss://relay.nodeterm.dev`), E2EE, roles enforced
+  here. Phones still cannot pair with the server. Do NOT follow its guide's `install-server.sh` step
+  on this box (§6); the `team` CLI only needs the running service.
+- **The headless factory saves through `castAndSave`**: each write is cast as live canvas ops
+  BEFORE the save, then the persisted project is re-published. Our `assign` and the `close`
+  sweep now use it, so an open board updates live and a governed project keeps the write.
+- **Boards sync item by item** (`src/shared/kanban-ops.ts`). Its column sanitizer is an ALLOWLIST
+  and dropped `origin` — fixed in this merge (an agent column reached peers as a hand-made one).
+  `setProjectKanban` sweeps BEFORE it publishes, so peers receive the swept board.
+- **Card order is rank-based and an unanchored move lands at the TOP** of its column: `assign`
+  without `--before` now puts the card first, so the last card an agent filed reads first.
+- `defaultKanban(projectId)` now takes the project (default column ids are deterministic).
+- Agent brief fixed: upstream's issue contract said "the Server Edition has no `assign` verb"; here
+  it says self-assign is refused by the ownership rule, which is what actually happens.
+
+---
+
+## 8b. Sync #4 (2026-09-28): what it brought (v0.3.10 → v0.3.17, 417 commits)
 
 Our three patches all survived. Upstream still refuses `board`/`assign` headless, still stubs
 `contextLink.info`, and still treats opus/sonnet as 1M. What changed for us:
@@ -247,7 +275,7 @@ Our three patches all survived. Upstream still refuses `board`/`assign` headless
 
 ---
 
-## 9. Syncing again — what four syncs have taught
+## 9. Syncing again — what five syncs have taught
 
 1. **Check whether upstream already fixed it before resolving anything.** It has, every time:
    the armed-node bug (sync 2), then canvas control, messaging and the group `×` (sync 3). Carrying
@@ -268,3 +296,11 @@ Our three patches all survived. Upstream still refuses `board`/`assign` headless
 7. **When upstream extracts code out of a file we moved, apply the same extraction to our copy and
    diff the removed block against upstream's deletion** (sync 4, `kanban.ts` → `kanban-labels.ts`).
    Byte-identical means nothing of ours was lost in the cut.
+8. **Upstream's guard tests inventory what we add — read them, do not loosen them** (sync 5). Four
+   failed on our patches: the board-writer inventory (our sweep is a new writer), two relay-policy
+   guards (our browser `contextLink.info` uses a channel nobody had classified for relay guests),
+   and the publish pin (we publish the swept board). Each wanted a decision written down, and the
+   relay one caught a real gap: hosted-team guests could have called that channel unclassified.
+9. **`npm ci --ignore-scripts` removes the compiled node-pty**; every suite that loads it then fails
+   to START, which reads as dozens of failures. Run `node scripts/patch-node-pty.mjs && npm rebuild
+   node-pty` before judging a test run.

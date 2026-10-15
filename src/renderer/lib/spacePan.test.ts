@@ -18,6 +18,16 @@ describe('spacePanKeydown', () => {
     expect(spacePanKeydown({ key: ' ' }, el('BUTTON'))).toBe('engage')
   })
 
+  // The kanban board covers the canvas while it is up (the canvas stays MOUNTED underneath), so a
+  // pan there moves nothing anyone can see — and the capture-phase preventDefault used to swallow
+  // every space on the board: a focused board button could not be pressed with it, and the board's
+  // own Space ("open the focused card") never received it.
+  it('never engages while the canvas is covered by a board', () => {
+    expect(spacePanKeydown({ key: ' ' }, null, true)).toBe('ignore')
+    expect(spacePanKeydown({ key: ' ' }, el('BUTTON'), true)).toBe('ignore')
+    expect(spacePanKeydown({ key: ' ' }, null, false)).toBe('engage')
+  })
+
   it('NEVER takes a space that is being typed', () => {
     for (const target of [el('TEXTAREA'), el('INPUT'), el('DIV', true)]) {
       expect(spacePanKeydown({ key: ' ' }, target)).toBe('ignore')
@@ -85,5 +95,10 @@ describe("React Flow's built-in space-pan (#930)", () => {
     // canvas lock.
     const source = readFileSync('src/renderer/canvas/Canvas.tsx', 'utf8')
     expect(source).toContain('panActivationKeyCode={null}')
+  })
+
+  it('the canvas hands the covered-by-a-board fact to the decision (wiring pin)', () => {
+    const source = readFileSync('src/renderer/canvas/Canvas.tsx', 'utf8')
+    expect(source).toContain('spacePanKeydown(e, document.activeElement, covered)')
   })
 })

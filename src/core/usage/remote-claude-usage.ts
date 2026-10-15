@@ -214,6 +214,7 @@ export async function fetchRemoteUsage(
   if (out.reason === 'nocreds') return emptyUsage(out.email, now, 'unavailable')
   if (out.reason) return emptyUsage(out.email, now, 'error')
   if (out.httpCode === 401 || out.httpCode === 403) return emptyUsage(out.email, now, 'unavailable')
+  if (out.httpCode === 429) return { ...emptyUsage(out.email, now, 'error'), rateLimited: true }
   if (out.httpCode !== 200 || !out.body) return emptyUsage(out.email, now, 'error')
   try {
     return usageFromPayload(JSON.parse(out.body), out.email, now)

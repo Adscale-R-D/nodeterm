@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { MenuItem } from '../components/ContextMenu'
+import type { PathResolution } from './file-links'
 import {
   linkMenuItems,
   relativeInside,
@@ -29,6 +30,7 @@ function recorder(): { calls: string[]; act: LinkMenuActions } {
 const LOCAL_DESKTOP: LinkMenuContext = {
   route: 'none',
   localShell: true,
+  os: 'darwin',
   explorerRoot: '/home/me/proj',
   terminals: true,
   downloading: () => false
@@ -120,6 +122,14 @@ describe('linkMenuItems — file', () => {
     ])
   })
 
+  it('Windows desktop names File Explorer, distinct from the in-app Explorer drawer row', () => {
+    const target: LinkMenuTarget = { kind: 'file', abs: '/home/me/proj/a.csv', dir: false }
+    const items = labels(linkMenuItems(target, { ...LOCAL_DESKTOP, os: 'win32' }, recorder().act))
+    expect(items).toContain('Show in File Explorer')
+    expect(items).toContain('Reveal in Explorer')
+    expect(items).not.toContain('Reveal in Finder')
+  })
+
   it('Server Edition: the HTTP route has no "Download to…" and no OS reveal', () => {
     const ctx: LinkMenuContext = { ...LOCAL_DESKTOP, route: 'http', localShell: false }
     const items = linkMenuItems({ kind: 'file', abs: '/home/me/proj/a.csv', dir: false }, ctx, recorder().act)
@@ -190,6 +200,21 @@ describe('linkMenuItems — a path that does not exist', () => {
   })
 })
 
+describe('linkMenuItems — a path that could not be checked', () => {
+  it('does not claim absence, says why, and still lets the text be copied', () => {
+    const { calls, act } = recorder()
+    const items = linkMenuItems(
+      { kind: 'unverified', abs: '/home/me/proj/x.csv', reason: 'ssh down' },
+      LOCAL_DESKTOP,
+      act
+    )
+    expect(labels(items)).toEqual(["Couldn't check: ssh down", 'Copy path'])
+    expect(labels(items)).not.toContain('Not found')
+    click(items, 'Copy path')
+    expect(calls).toEqual(['copy /home/me/proj/x.csv'])
+  })
+})
+
 describe('relativeInside', () => {
   it('is the path below the root, or null', () => {
     expect(relativeInside('/a/b', '/a/b/c/d.ts')).toBe('c/d.ts')
@@ -206,19 +231,54 @@ describe('relativeInside', () => {
 })
 
 describe('resolveLinkTarget', () => {
+  const find = async (token: string): Promise<PathResolution> =>
+    token === 'd'
+      ? { found: true, abs: '/p/d', dir: true }
+      : token === 'f'
+        ? { found: true, abs: '/p/f', dir: false }
+        : { found: false, tried: ['/p/' + token] }
+
   it('passes a URL through and resolves a path by existence', async () => {
-    const lookup = async (abs: string) =>
-      abs === '/d' ? { exists: true, dir: true } : abs === '/f' ? { exists: true, dir: false } : { exists: false, dir: false }
-    expect(await resolveLinkTarget({ kind: 'url', url: 'https://x.io' }, lookup)).toEqual({ kind: 'url', url: 'https://x.io' })
-    expect(await resolveLinkTarget({ kind: 'path', abs: '/d' }, lookup)).toEqual({ kind: 'file', abs: '/d', dir: true })
-    expect(await resolveLinkTarget({ kind: 'path', abs: '/f' }, lookup)).toEqual({ kind: 'file', abs: '/f', dir: false })
-    expect(await resolveLinkTarget({ kind: 'path', abs: '/nope' }, lookup)).toEqual({ kind: 'missing', abs: '/nope' })
+    expect(await resolveLinkTarget({ kind: 'url', url: 'https://x.io' }, find)).toEqual({ kind: 'url', url: 'https://x.io' })
+    expect(await resolveLinkTarget({ kind: 'path', token: 'd', abs: '/p/d' }, find)).toEqual({ kind: 'file', abs: '/p/d', dir: true })
+    expect(await resolveLinkTarget({ kind: 'path', token: 'f', abs: '/p/f' }, find)).toEqual({ kind: 'file', abs: '/p/f', dir: false })
+    expect(await resolveLinkTarget({ kind: 'path', token: 'nope', abs: '/p/nope' }, find)).toEqual({ kind: 'missing', abs: '/p/nope' })
   })
 
-  it('reads a failed lookup (dead ControlMaster) as missing, never a throw', async () => {
-    const lookup = async (): Promise<{ exists: boolean; dir: boolean }> => {
+  it('takes the resolver\'s answer, which may come from the live cwd rather than hit.abs', async () => {
+    const live = async (): Promise<PathResolution> => ({ found: true, abs: '/live/var/x.sql', dir: false })
+    expect(await resolveLinkTarget({ kind: 'path', token: 'var/x.sql', abs: '/launch/var/x.sql' }, live)).toEqual({
+      kind: 'file',
+      abs: '/live/var/x.sql',
+      dir: false
+    })
+  })
+
+  it('falls back to the printed token when nothing anchored it', async () => {
+    expect(await resolveLinkTarget({ kind: 'path', token: 'var/x.sql', abs: null }, find)).toEqual({ kind: 'missing', abs: 'var/x.sql' })
+  })
+
+  it('reads a failed lookup (dead ControlMaster) as unverified, never missing and never a throw', async () => {
+    const boom = async (): Promise<PathResolution> => {
       throw new Error('ssh down')
     }
-    expect(await resolveLinkTarget({ kind: 'path', abs: '/x' }, lookup)).toEqual({ kind: 'missing', abs: '/x' })
+    expect(await resolveLinkTarget({ kind: 'path', token: 'x', abs: '/x' }, boom)).toEqual({
+      kind: 'unverified',
+      abs: '/x',
+      reason: 'ssh down'
+    })
+  })
+
+  it('reads a resolution with an unchecked candidate as unverified, naming that candidate', async () => {
+    const find = async (): Promise<PathResolution> => ({
+      found: false,
+      tried: ['/launch/x', '/live/x'],
+      unverified: [{ abs: '/live/x', reason: 'timeout' }]
+    })
+    expect(await resolveLinkTarget({ kind: 'path', token: 'x', abs: '/launch/x' }, find)).toEqual({
+      kind: 'unverified',
+      abs: '/live/x',
+      reason: 'timeout'
+    })
   })
 })

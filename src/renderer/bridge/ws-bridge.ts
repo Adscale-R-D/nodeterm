@@ -1,6 +1,16 @@
+import type { ChatCatalog } from '@shared/chat-catalog'
 import type { NormalizedAgentEvent } from '../../shared/agents/normalize'
 import { subscribeAgentReplay } from '../../shared/agent-replay-subscription'
 import type { DesktopWallpaper, WallpaperStill } from '../../shared/wallpaper'
+import type { AlertSoundSaveResult } from '../../shared/alert-sound'
+import type { RecentConversationsRequest, RecentConversationsResult } from '../../shared/recent-conversations'
+import type {
+  RunConfigApi,
+  RunDevicesResult,
+  RunEntriesResult,
+  RunStartResult,
+  RunStatus
+} from '../../shared/run-config'
 // WebSocket bridge that reconstructs `window.nodeTerminal` in the browser (Server Edition).
 //
 // Under Electron the preload already defines `window.nodeTerminal`; this module only runs when
@@ -17,6 +27,7 @@ import {
   type RpcMessage
 } from '../../shared/rpc'
 import { IPC } from '../../shared/ipc'
+import type { ChatPromptResult } from '../../shared/text-delivery'
 import type { GitHubControlApi, GitHubIssuesApi } from '../../shared/github-issues'
 import {
   UNKNOWN_CLAUDE_CLI_CAPS,
@@ -31,6 +42,9 @@ import {
   type ClaudeCliCaps,
   type GrokApi,
   type GrokCliCaps,
+  type HostedPending,
+  type HostedSelf,
+  type HostedSessionApi,
   type ClaudeSkillShareResult,
   type ClaudeSessionCopyResult,
   type CodexApi,
@@ -66,7 +80,20 @@ import {
 } from '../../shared/types'
 import type { PeerIdentity } from '../../shared/presence'
 import type { PaneOwner } from '../../shared/agents/pane-owner-predicate'
-import { buildStubApi } from './stubs'
+import type { LaunchIntentExecutionResult } from '../../shared/types'
+import { buildStubApi, unsupported } from './stubs'
+import { sanitizeStationNotices } from '@shared/station-notice'
+import { sanitizeOutcomeRecords } from '@shared/station-outcome'
+import { sanitizeHandoverRecords } from '@shared/station-handover'
+import type {
+  ControlChangeResult,
+  ControlSupport,
+  CreateWatchLinkResult,
+  RevokeAllOutcome,
+  WatchChatMessage,
+  WatchLinkNotice,
+  WatchLinkView
+} from '@shared/watch-link-types'
 import { mountPickerRoot, openDirectoryPicker } from './dialog-picker'
 import { encodePcmForWire } from './speech-encode'
 import { type FrameTransport, WebSocketFrameTransport } from './frame-transport'
@@ -230,6 +257,7 @@ export function buildRealApi(
   | 'projectSetup'
   | 'worktree'
   | 'settings'
+  | 'integrations'
   | 'agent'
   | 'userDataDir'
 > {
@@ -264,6 +292,8 @@ export function buildRealApi(
       client.request(IPC.ptyReadScrollback, persistKey) as Promise<string>,
     sendText: (persistKey, text, opts) =>
       client.request(IPC.ptySendText, persistKey, text, opts?.enter) as Promise<boolean>,
+    sendChatPrompt: (persistKey, text, agentId) =>
+      client.request(IPC.ptySendChatPrompt, persistKey, text, agentId) as Promise<ChatPromptResult>,
     // A failed read is unknown, never evidence that persistence is available.
     tmuxStatus: () =>
       client
@@ -273,13 +303,32 @@ export function buildRealApi(
     // shell yet" and gives up on its own deadline.
     paneCommand: (persistKey) =>
       client.request(IPC.ptyPaneCommand, persistKey).catch(() => null) as Promise<string | null>,
+    // Real: core registers it. Unknown (null) on failure — a relay host refuses it to a non-editor
+    // (EDITOR_ONLY), which reads as "no live cwd" and file links keep the node's launch cwd.
+    paneCwd: (persistKey) =>
+      client.request(IPC.ptyPaneCwd, persistKey).catch(() => null) as Promise<string | null>,
+    // Documented degrade (#925): the Server Edition starts nodes through its HeadlessNodeFactory,
+    // never through the browser renderer, so there is nothing for this to call.
+    launchHeadless: () => unsupported('pty.launchHeadless'),
     // A REAL implementation, not a stub: core registers the handler, so the server this browser is
     // served from answers it. The hibernation exit fails CLOSED on a null, so a stub here would
     // have silently switched Eco off for the whole Server Edition rather than degrade it.
     paneOwner: (persistKey) =>
       client.request(IPC.ptyPaneOwner, persistKey).catch(() => null) as Promise<PaneOwner | null>,
     terminateForeground: (persistKey, expectedAgentId) =>
-      client.request(IPC.ptyTerminateForeground, persistKey, expectedAgentId).catch(() => false) as Promise<boolean>,
+      client.request(IPC.ptyTerminateForeground, persistKey, expectedAgentId).catch(() => false) as Promise<boolean | 'unsupported'>,
+    // REAL: core registers it, so a server running on Windows answers with its own session host.
+    // On the Linux server every call answers `unsupported-shell` and the caller types its legacy
+    // line. A transport failure is `delivery-failed`, NOT a fallback: the reply may be what was
+    // lost, and typing the legacy line after a launch that did land would start the agent twice.
+    executeLaunch: (persistKey, request) =>
+      (client.request(IPC.ptyExecuteLaunch, persistKey, request) as Promise<LaunchIntentExecutionResult>).catch(
+        (): LaunchIntentExecutionResult => ({
+          ok: false,
+          reason: 'delivery-failed',
+          message: 'The agent launch could not be delivered to the terminal.'
+        })
+      ),
     // No server handler — the session-name poll degrades to no adopted name. A PRE-EXISTING gap,
     // and not any one agent's: `IPC.ptyReadSessionName` has never been registered server-side, so
     // claude's, grok's and gemini's read legs are equally stubbed here (the write leg works on both
@@ -330,7 +379,10 @@ export function buildRealApi(
     // REAL: Server Edition canvas control broadcasts its own persisted bridge/rope changes here —
     // wider than the node-only canvas:mut vocabulary, but ours, so they must not travel the
     // outside-edit channel and end up behind the conflict bar (see server/canvas-control.ts).
-    onServerChange: (cb) => client.subscribe(IPC.workspaceServerChange, cb as Listener)
+    onServerChange: (cb) => client.subscribe(IPC.workspaceServerChange, cb as Listener),
+    // Documented degrade: the quit / restart-to-update flush is a desktop main-process request.
+    // The server never quits on a tab's behalf, and the debounced autosave covers a browser.
+    onFlushRequest: () => () => {}
   }
 
   // REAL: WorkspaceStore (core) registers the project-settings:* channels too — same
@@ -399,6 +451,11 @@ export function buildRealApi(
     save: (s: Settings) => client.request(IPC.settingsSave, s) as Promise<void>
   }
 
+  // REAL: both shells boot the consent lifecycle (core/agent-integrations.ts) and register it.
+  const integrations: NodeTerminalApi['integrations'] = {
+    status: () => client.request(IPC.integrationsStatus) as ReturnType<NodeTerminalApi['integrations']['status']>
+  }
+
   const agent: NodeTerminalApi['agent'] = {
     // Deliberately NOT a request: the server registers no env-snapshot handler (a full host-env
     // dump answerable by any authenticated WS client is the PR #195 leak class at the RPC layer).
@@ -428,7 +485,7 @@ export function buildRealApi(
   // `/worktrees/…` at the filesystem root (the server usually runs as root, and git would create it).
   const userDataDir = (): Promise<string> => client.request(IPC.appUserDataDir) as Promise<string>
 
-  return { pty, workspace, projectSettings, projectSetup, worktree, settings, agent, userDataDir }
+  return { pty, workspace, projectSettings, projectSetup, worktree, settings, integrations, agent, userDataDir }
 }
 
 export function buildGitHubApi(
@@ -454,6 +511,18 @@ export function buildGitHubApi(
       >,
     clearCache: (projectId) =>
       client.request(IPC.githubIssuesClearCache, projectId) as Promise<void>,
+    pullStatus: (projectId) =>
+      client.request(IPC.githubIssuesPullStatus, projectId) as ReturnType<GitHubIssuesApi['pullStatus']>,
+    chasePulls: (projectId) =>
+      client.request(IPC.githubIssuesChasePulls, projectId) as Promise<boolean>,
+    pullChecks: (projectId, pullNumber) =>
+      client.request(IPC.githubIssuesPullChecks, projectId, pullNumber) as ReturnType<
+        GitHubIssuesApi['pullChecks']
+      >,
+    claimPullAutoMove: (request) =>
+      client.request(IPC.githubIssuesClaimPullAutoMove, request) as Promise<boolean>,
+    notePullWaits: (request) =>
+      client.request(IPC.githubIssuesNotePullWaits, request) as Promise<number>,
     projectAvatar: (projectId) =>
       client.request(IPC.githubProjectAvatar, projectId) as ReturnType<
         GitHubIssuesApi['projectAvatar']
@@ -604,7 +673,14 @@ export function buildFilesApi(
     saveCanvasImage: (projectId, name, dataBase64) =>
       client.request(IPC.filesSaveCanvasImage, projectId, name, dataBase64) as Promise<
         string | null
-      >
+      >,
+    // Real: the browser holds the picked sound's bytes and the data dir is the server's, so the
+    // server stores it and serves it back by kind (issue #289). The browser's own path never leaves
+    // the browser — a host-local path would not exist on the server anyway.
+    saveAlertSound: (kind, name, dataBase64) =>
+      client.request(IPC.filesSaveAlertSound, kind, name, dataBase64) as Promise<AlertSoundSaveResult>,
+    readAlertSound: (kind) => client.request(IPC.filesReadAlertSound, kind) as Promise<string | null>,
+    clearAlertSound: (kind) => client.request(IPC.filesClearAlertSound, kind) as Promise<boolean>
   }
 
   const context: ContextApi = {
@@ -650,6 +726,71 @@ export function buildFilesApi(
 }
 
 /**
+ * The Server Edition's station-failure notices — REAL, because the server's canvas-control runtime
+ * opens stations headlessly and its monitor is the one that decides (src/core/agents/
+ * station-notice.ts). Kept OUT of `buildAgentApi` on purpose: that builder is spread into relay
+ * tabs too, and a relay tab's stations are the host's to report, never this browser's.
+ */
+export function buildStationNoticeApi(
+  client: RpcClient
+): Pick<NodeTerminalApi, 'stationNotice' | 'boardDispatch'> {
+  return {
+    // Same host-only class as the DROPPED report beside it: this tab's own dispatcher state, read by
+    // the server's `issues` control verb (core/board-dispatch-report.ts). Never spread into a relay tab.
+    boardDispatch: {
+      report: (entries) => {
+        void client.request(IPC.boardDispatchReport, entries).catch(() => undefined)
+      }
+    },
+    stationNotice: {
+      list: () =>
+        (client.request(IPC.stationNoticeList) as Promise<unknown>).then(sanitizeStationNotices, () => []),
+      onChanged: (cb) =>
+        client.subscribe(IPC.stationNoticeChanged, ((views: unknown) =>
+          cb(sanitizeStationNotices(views))) as Listener),
+      reportDropped: (nodeId, dropped) => {
+        void client.request(IPC.stationNoticeDropped, nodeId, dropped).catch(() => undefined)
+      }
+    }
+  }
+}
+
+/**
+ * The Server Edition's station task outcomes — REAL, for the same reason as station notices: the
+ * server's canvas-control runtime records `report-outcome` and honours `--after-success` headlessly,
+ * and a browser tab's QUEUED badge and `list` must say what the server knows. Kept out of
+ * `buildAgentApi`, which relay tabs share. The hand-over list (src/core/station-handover.ts) is real
+ * for the same reason: the server's headless factory honours plain `--after` with it, and `list`
+ * names it.
+ */
+export function buildStationHandoverApi(client: RpcClient): Pick<NodeTerminalApi, 'stationHandover'> {
+  return {
+    stationHandover: {
+      list: () =>
+        (client.request(IPC.stationHandoverList) as Promise<unknown>).then(sanitizeHandoverRecords, () => []),
+      onChanged: (cb) =>
+        client.subscribe(IPC.stationHandoverChanged, ((records: unknown) =>
+          cb(sanitizeHandoverRecords(records))) as Listener)
+    }
+  }
+}
+
+/**
+ * The Server Edition's station task outcomes — the real bridge, see `buildStationHandoverApi`'s note.
+ */
+export function buildStationOutcomeApi(client: RpcClient): Pick<NodeTerminalApi, 'stationOutcome'> {
+  return {
+    stationOutcome: {
+      list: () =>
+        (client.request(IPC.stationOutcomeList) as Promise<unknown>).then(sanitizeOutcomeRecords, () => []),
+      onChanged: (cb) =>
+        client.subscribe(IPC.stationOutcomeChanged, ((records: unknown) =>
+          cb(sanitizeOutcomeRecords(records))) as Listener)
+    }
+  }
+}
+
+/**
  * Build the top-level agent-event subscriptions (`onAgentStatus` / `onSubagentActivity`) over an
  * RpcClient. These mirror the preload's `.on(channel, …)` → `client.subscribe(channel, …)` split:
  * each takes a listener and returns an unsubscribe. Declared against its `NodeTerminalApi` slice so
@@ -665,6 +806,7 @@ export function buildAgentApi(
   | 'answerPermission'
   | 'ackDone'
   | 'reportHibernated'
+  | 'seedAgentIdentity'
   | 'onAgentWake'
   | 'onRemoteViewers'
   | 'onAgentRefreshNode'
@@ -679,6 +821,10 @@ export function buildAgentApi(
     // over its SSH browse path — a browser canvas hibernating a node must reach that file too.
     reportHibernated: (nodeId, on) => {
       void client.request(IPC.agentHibernated, { nodeId, on }).catch(() => undefined)
+    },
+    // REAL forward, same reason: the server's mirror is what a phone browsing that host reads.
+    seedAgentIdentity: (entries) => {
+      void client.request(IPC.agentSeedIdentity, entries).catch(() => undefined)
     },
     // Deliberate no-op subscriptions, not stubs-by-accident: both signals originate in the phone
     // RELAY host, which lives only in the desktop main process — the Server Edition serves no
@@ -749,6 +895,27 @@ export function buildCanvasApi(client: RpcClient): Pick<NodeTerminalApi, 'canvas
 }
 
 /**
+ * Build the `canvasAuthority` namespace over an RpcClient: a REAL implementation for the Server
+ * Edition browser, whose core may run the canvas authority (docs/hosted-team-relay.md). A server
+ * that does not answer (an older one, a failure) governs nothing, so the tab keeps the solo gate
+ * rather than rejecting. Deliberately NOT part of `buildCanvasApi`, which the relay tab shares: a
+ * relay tab answers from its own connection (relay-api.ts) and never asks the host over the wire.
+ */
+export function buildCanvasAuthorityApi(client: RpcClient): Pick<NodeTerminalApi, 'canvasAuthority'> {
+  const ids = (v: unknown): string[] =>
+    Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []
+  return {
+    canvasAuthority: {
+      // A Server Edition core governs the projects its hosted team shares, and says which only when
+      // asked: until it answers, a client publishes for every project (collab-sync `followGoverned`).
+      assumeAllUntilAnswered: true,
+      governed: () => client.request(IPC.canvasAuthority).then(ids, () => []),
+      onChanged: (listener) => client.subscribe(IPC.canvasAuthorityChanged, ((v: unknown) => listener(ids(v))) as Listener)
+    }
+  }
+}
+
+/**
  * Build the `presence` namespace over an RpcClient, mirroring the preload's invoke(→request) /
  * send(→cast) / on(→subscribe) split member-for-member: `hello` is the only request (its response
  * is how a client learns its OWN clientId), cursor/focus/chat/project are casts, and the two event
@@ -768,6 +935,29 @@ export function buildPresenceApi(client: RpcClient): Pick<NodeTerminalApi, 'pres
     onPeer: (listener) => client.subscribe(IPC.presencePeer, listener as Listener)
   }
   return { presence }
+}
+
+/**
+ * Build the hosted-team verbs of ONE relay session (`NodeTerminalApi.hosted`). Only a relay tab
+ * joined by a `nodeterm://join` code spreads this (relay-api.ts, `{ hosted: true }`): a Server
+ * Edition browser never joins a relay host, and a Team Access relay tab (desktop to desktop) talks
+ * to a host that answers none of these, so both leave `hosted` absent. The host core answers every
+ * request itself (src/core/relay/hosted-service.ts) and judges the caller's role: `self` is open to
+ * any member, the rest are owner-only. `peer-pending` / `pending-closed` reach connected OWNERS only;
+ * `shared-changed` (the team's whole shared set) reaches every connected member, viewers included.
+ */
+export function buildHostedApi(client: RpcClient): Required<Pick<NodeTerminalApi, 'hosted'>> {
+  const hosted: HostedSessionApi = {
+    self: () => client.request(IPC.relayHostedSelf) as Promise<HostedSelf>,
+    pending: () => client.request(IPC.relayHostedPending) as Promise<HostedPending[]>,
+    inviteCode: () => client.request(IPC.relayHostedInviteCode) as Promise<string | null>,
+    approve: (pendingId, role) => client.request(IPC.relayHostedApprove, pendingId, role) as Promise<boolean>,
+    deny: (pendingId) => client.request(IPC.relayHostedDeny, pendingId) as Promise<boolean>,
+    onPeerPending: (listener) => client.subscribe(IPC.relayHostedPeerPending, listener as Listener),
+    onPendingClosed: (listener) => client.subscribe(IPC.relayHostedPendingClosed, listener as Listener),
+    onSharedChanged: (listener) => client.subscribe(IPC.relayHostedSharedChanged, listener as Listener)
+  }
+  return { hosted }
 }
 
 /**
@@ -791,6 +981,8 @@ export function buildSpeechApi(client: RpcClient): Pick<NodeTerminalApi, 'speech
     deleteModel: (id) => client.request(IPC.speechModelDelete, { id }) as Promise<void>,
     onProgress: (cb) => client.subscribe(IPC.speechProgress, cb as Listener),
     micConsent: () => Promise.resolve(true)
+    // `openMicSettings` is deliberately ABSENT: a browser's mic permission is its own site
+    // setting, and the dictation overlay hides its "Open microphone settings" button without it.
   }
   return { speech }
 }
@@ -869,6 +1061,50 @@ export function buildTriggersApi(client: RpcClient): Pick<NodeTerminalApi, 'trig
   }
 }
 
+/**
+ * The Server Edition's live links — the REAL bridge, backed by the same core service the desktop
+ * registers (src/core/watch-link/service.ts). Its browser tabs are the server's own user (owner
+ * clients), so the host-only `watchLink:` prefix does not refuse them. Until that edition has a license
+ * layer the service answers create `unsupported` and list `[]` (R43). Kept OUT of every builder a relay
+ * tab spreads (and out of the scoped-guest / access-policy BUILDERS lists): a relay tab shows another
+ * machine's terminals, which are not this browser's to publish — relay-api.ts takes the inert stub.
+ * A dropped socket answers create `network`; revoke and revokeAll reject, so the UI can say the stop
+ * did not reach the server.
+ */
+export function buildWatchLinkApi(client: RpcClient): Pick<NodeTerminalApi, 'watchLink'> {
+  return {
+    watchLink: {
+      create: (req) =>
+        (client.request(IPC.watchLinkCreate, req) as Promise<CreateWatchLinkResult>).catch(
+          (): CreateWatchLinkResult => ({ ok: false, error: 'network' })
+        ),
+      list: () => (client.request(IPC.watchLinkList) as Promise<WatchLinkView[]>).catch(() => []),
+      revoke: async (linkId) => {
+        await client.request(IPC.watchLinkRevoke, linkId)
+      },
+      // Rejects on a dropped socket, like revoke: the server half did not happen and the UI must say so.
+      revokeAll: () => client.request(IPC.watchLinkRevokeAll) as Promise<RevokeAllOutcome>,
+      kick: (linkId, viewerId) =>
+        (client.request(IPC.watchLinkKick, linkId, viewerId) as Promise<boolean>).catch(() => false),
+      sendChat: (linkId, text) =>
+        (client.request(IPC.watchLinkChatSend, linkId, text) as Promise<WatchChatMessage | null>).catch(() => null),
+      chatHistory: (linkId) =>
+        (client.request(IPC.watchLinkChatHistory, linkId) as Promise<WatchChatMessage[]>).catch(() => []),
+      setControl: (linkId, enabled) =>
+        (client.request(IPC.watchLinkSetControl, linkId, enabled) as Promise<ControlChangeResult>).catch(() => false),
+      setPassword: (linkId, password) =>
+        (client.request(IPC.watchLinkSetPassword, linkId, password) as Promise<ControlChangeResult>).catch(() => false),
+      allowControl: (linkId) => (client.request(IPC.watchLinkAllowControl, linkId) as Promise<boolean>).catch(() => false),
+      controlSupport: (nodeId) =>
+        (client.request(IPC.watchLinkControlSupport, nodeId) as Promise<ControlSupport>).catch((): ControlSupport => 'unknown'),
+      onState: (cb) => client.subscribe(IPC.watchLinkState, ((links: WatchLinkView[]) => cb(links)) as Listener),
+      onChat: (cb) =>
+        client.subscribe(IPC.watchLinkChat, ((linkId: string, msg: WatchChatMessage) => cb(linkId, msg)) as Listener),
+      onNotice: (cb) => client.subscribe(IPC.watchLinkNotice, ((n: WatchLinkNotice) => cb(n)) as Listener)
+    }
+  }
+}
+
 export function buildSessionMemoryApi(client: RpcClient): Pick<NodeTerminalApi, 'sessionMemory'> {
   return {
     sessionMemory: {
@@ -876,6 +1112,19 @@ export function buildSessionMemoryApi(client: RpcClient): Pick<NodeTerminalApi, 
         client.request(IPC.sessionMemory, q) as Promise<SessionMemoryReport>,
       host: (q?: SessionMemoryQuery) =>
         client.request(IPC.sessionMemoryHost, q) as Promise<MemInfo | null>
+    }
+  }
+}
+
+/** The server lists ITS OWN host's history — the machine the browser's sessions run on. A failed
+ *  request is `{ok:false}`, never an empty list. */
+export function buildRecentConversationsApi(client: RpcClient): Pick<NodeTerminalApi, 'recentConversations'> {
+  return {
+    recentConversations: {
+      list: (req?: RecentConversationsRequest) =>
+        (client.request(IPC.recentConversationsList, req) as Promise<RecentConversationsResult>).catch(
+          () => ({ ok: false as const, reason: 'failed' as const })
+        )
     }
   }
 }
@@ -888,6 +1137,24 @@ export function buildWallpaperApi(client: RpcClient): Pick<NodeTerminalApi, 'wal
       importImage: (p: string) => client.request(IPC.wallpaperImport, p) as Promise<DesktopWallpaper>
     }
   }
+}
+
+/** The run node's host side. Real on the Server Edition (`registerRunConfigIpc` runs in the
+ *  server shell): the run happens on the server, so its launch.json, devices and processes are the
+ *  server's — which is the machine the node's terminal runs on. */
+export function buildRunConfigApi(client: RpcClient): Pick<NodeTerminalApi, 'runConfig'> {
+  const r: RunConfigApi = {
+    entries: (dir) => client.request(IPC.runEntries, dir) as Promise<RunEntriesResult>,
+    devices: (refresh) => client.request(IPC.runDevices, refresh) as Promise<RunDevicesResult>,
+    bootDevice: (udid) => client.request(IPC.runBootDevice, udid) as Promise<boolean>,
+    discoverProjects: (dir) => client.request(IPC.runDiscover, dir) as Promise<string[]>,
+    start: (nodeId, config) => client.request(IPC.runStart, nodeId, config) as Promise<RunStartResult>,
+    status: (nodeId) => client.request(IPC.runStatus, nodeId) as Promise<RunStatus>,
+    stop: (nodeId, force) => client.request(IPC.runStop, nodeId, force) as Promise<boolean>,
+    signal: (nodeId, kind) => client.request(IPC.runSignal, nodeId, kind) as Promise<boolean>,
+    watch: (nodeId, dir) => client.request(IPC.runWatch, nodeId, dir) as Promise<void>
+  }
+  return { runConfig: r }
 }
 
 /**
@@ -987,7 +1254,11 @@ export function buildTranscriptApi(
             accountId,
             nodeId
           ) as Promise<TranscriptPresence>
-        ).catch(() => 'unknown' as const)
+        ).catch(() => 'unknown' as const),
+      // REAL: the server registers `registerChatCatalogIpc` and runs on the machine whose command
+      // and skill folders these are. The reply is re-checked in the composer (sanitizeChatCatalog).
+      catalog: (nodeId, agentId, accountId, cwd) =>
+        client.request(IPC.chatCatalog, nodeId, agentId, accountId, cwd) as Promise<ChatCatalog>
     },
     claudeReadTranscript: (sessionId, cwd, accountId, nodeId) =>
       client.request(
@@ -1169,15 +1440,22 @@ export async function installWsBridge(): Promise<boolean> {
     ...buildRealApi(client),
     ...buildFilesApi(client),
     ...buildAgentApi(client),
+    ...buildStationNoticeApi(client),
+    ...buildStationOutcomeApi(client),
+    ...buildStationHandoverApi(client),
     ...buildCanvasApi(client),
     // Only in the BROWSER assembly, never the relay one: the shim path this returns is a path on
     // the machine running core, which over a relay is somebody else's disk.
     ...buildContextLinkApi(client, stubApi.contextLink),
+    ...buildCanvasAuthorityApi(client),
     ...buildPresenceApi(client),
     ...buildSpeechApi(client),
     ...buildUsageApi(client),
     ...buildSessionMemoryApi(client),
+    ...buildWatchLinkApi(client),
+    ...buildRecentConversationsApi(client),
     ...buildWallpaperApi(client),
+    ...buildRunConfigApi(client),
     ...buildTriggersApi(client),
     ...buildGitHubApi(client),
     ...buildClaudeAccountsApi(client),

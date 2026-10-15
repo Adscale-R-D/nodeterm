@@ -80,6 +80,11 @@ export function licenseSentence(detail: LicenseDetail | null): string {
     // subscription, and a user who wants to know when it renews has only one place to look.
     return `Pro on ${thisMachine()} comes from the App Store subscription on your paired phone, so there is no license key or device count to show here. That subscription is managed by Apple, not by nodeterm: to see when it renews or to cancel it, open the App Store on that phone and go to Subscriptions in your account.`
   }
+  if (detail.source === 'google') {
+    // The Play twin of the App Store branch above, for the same reasons: the zeros are "not
+    // applicable", and the term is managed by Google — we cannot renew, extend or cancel it.
+    return `Pro on ${thisMachine()} comes from the Google Play subscription on your paired phone, so there is no license key or device count to show here. That subscription is managed by Google, not by nodeterm: to see when it renews or to cancel it, open the Play Store on that phone and go to Payments & subscriptions → Subscriptions.`
+  }
   if (detail.source === 'free') {
     // A defensive value. Say only what is certain — where it came from is not.
     return 'Pro on this device is not backed by a license key.'
@@ -136,6 +141,19 @@ export function proStatusLine(status: LicenseStatus, now: number = Date.now()): 
  */
 export function canReleaseDevices(detail: LicenseDetail | null): boolean {
   return detail?.source === 'keygen'
+}
+
+/**
+ * Whether to offer the Stripe billing page (invoices, payment method, cancel) beside an active Pro.
+ *
+ * Deliberately the INVERSE of `canReleaseDevices`: hidden only for a STATED store source, shown for
+ * a null one. The release gate hides on doubt because the server can only refuse that action; this
+ * link can only open a sign-in page, and the users who need it most carry a null source — a renewal
+ * whose card failed reads back as `inactive`, and every error reply states no source. An App Store
+ * or Play subscriber has nothing on Stripe, and their sentence already says where the term lives.
+ */
+export function offersBillingPortal(detail: LicenseDetail | null): boolean {
+  return detail?.source !== 'apple' && detail?.source !== 'google'
 }
 
 /**

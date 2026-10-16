@@ -10,12 +10,14 @@ import {
   IconMarkdown,
   IconMaximize,
   IconMic,
+  IconMore,
   IconRestoreSize,
   IconSearch,
   IconSmiley,
   IconTrash
 } from '../icons'
-import { ContextMenu } from '../ContextMenu'
+import { ContextMenu, type MenuItem } from '../ContextMenu'
+import { closeThen } from './closeThen'
 import { NodeIconView } from '../NodeIcon'
 import { nodeIconDialog } from '../NodeIconPicker'
 import { applyIconChoice } from '../../lib/nodeIconChoice'
@@ -137,6 +139,10 @@ interface CardModalProps {
    *  row uses, so the header ✦ and the menu row cannot disagree: it reports a failure, asks the
    *  card's OWN core, and drives the shared per-node naming spinner. */
   onAiName?: () => void
+  /** Session-management rows for the header ⋯ button (Canvas: `BOARD_MODAL_ACTION_IDS`). Called
+   *  each time the menu renders, so the rows are fresh; every runnable row closes the modal before
+   *  it acts (`closeThen`). Terminal cards only. Absent = no button. */
+  sessionActions?: () => MenuItem[]
   /** ▶ on the header's QUEUED chip (the card's held launch). Absent = chip without ▶. */
   onRunQueued?: () => void
 }
@@ -145,7 +151,7 @@ interface CardModalProps {
  *  canvas under it) stay mounted. Terminal cards carry the node header's actions too:
  *  search / dictate / AI-name / the ⌘M view — ChatPanel or the output markdown, the same face the
  *  canvas node shows (the node itself is hidden under the board). */
-export function CardModal({ session, projectId, projectName, projectColor, columnTitle, board, onChangeBoard, onClose, portsProjectId, onOpenCanvas, onRename, onEditSticky, onBrowserNav, onSetIcon, onOpenIssue, mentionables, team, onTravel, initialView, onSetColor, onDelete, onAiName, onRunQueued }: CardModalProps) {
+export function CardModal({ session, projectId, projectName, projectColor, columnTitle, board, onChangeBoard, onClose, portsProjectId, onOpenCanvas, onRename, onEditSticky, onBrowserNav, onSetIcon, onOpenIssue, mentionables, team, onTravel, initialView, onSetColor, onDelete, onAiName, sessionActions, onRunQueued }: CardModalProps) {
   const { api, source: coreSource } = useSession()
   // The header slot decides "icon or smiley" on the NORMALIZED value, the answer NodeIconView
   // itself gives — on the raw one, an invalid stored icon drew an empty, un-muted slot.
@@ -194,11 +200,19 @@ export function CardModal({ session, projectId, projectName, projectColor, colum
   // would recolor the card the modal moved TO, not the one the menu was opened for.
   const [colorMenu, setColorMenu] = useState<{ x: number; y: number; id: string } | null>(null)
   const colorMenuOpen = colorMenu !== null && colorMenu.id === session.id
+  // The header ⋯ session-actions menu, keyed by node id for the same reason as the swatches: rows
+  // opened for one card must never act on the card a J/K step moved to.
+  const [actionsMenu, setActionsMenu] = useState<{ x: number; y: number; id: string } | null>(null)
+  const actionsMenuOpen = actionsMenu !== null && actionsMenu.id === session.id
   // Comments & activity panel: OPEN by default in the modal; the header 💬 collapses it. The
   // choice is remembered (localStorage) — once collapsed, later cards open collapsed too.
   const panelOpen = useCardPanel((s) => s.open)
   const togglePanel = useCardPanel((s) => s.toggle)
   const isTerminal = session.kind === 'terminal'
+  // Built every render so the rows are always current. A card with no session rows (a plain shell,
+  // an agent we cannot quit and resume) gets NO button: an empty menu would be a dead click.
+  const sessionRows = isTerminal && sessionActions ? sessionActions() : []
+  const hasSessionRows = sessionRows.some((r) => r.type !== 'separator')
   const isBrowser = session.kind === 'browser'
 
   // ── The ⌘M view (board parity with the canvas node's markdown / chat face) ─────────────────
@@ -347,6 +361,16 @@ export function CardModal({ session, projectId, projectName, projectColor, colum
   useEffect(() => {
     colorMenuOpenRef.current = colorMenuOpen
   }, [colorMenuOpen])
+  // A J/K step drops both header menus. Keying them by id hides them on the next card, but without
+  // this a step back to the card they were opened for would show them again.
+  useEffect(() => {
+    setColorMenu(null)
+    setActionsMenu(null)
+  }, [session.id])
+  const actionsMenuOpenRef = useRef(false)
+  useEffect(() => {
+    actionsMenuOpenRef.current = actionsMenuOpen
+  }, [actionsMenuOpen])
   // Ref mirrors: the capture-phase listener below closes over stale state otherwise.
   const editingTitleRef = useRef(false)
   useEffect(() => {
@@ -375,6 +399,13 @@ export function CardModal({ session, projectId, projectName, projectColor, colum
         e.preventDefault()
         e.stopPropagation()
         setColorMenu(null)
+        return
+      }
+      // …and so does the ⋯ session-actions menu.
+      if (actionsMenuOpenRef.current) {
+        e.preventDefault()
+        e.stopPropagation()
+        setActionsMenu(null)
         return
       }
       // A rename in progress owns Esc first (cancel the edit, not the modal).
@@ -633,6 +664,20 @@ export function CardModal({ session, projectId, projectName, projectColor, colum
               >
                 <IconBroadcast />
               </button>
+              {hasSessionRows && (
+                <button
+                  className="kanban-modal__action"
+                  data-action="session-actions"
+                  title="Session actions"
+                  aria-label="Session actions"
+                  onClick={(e) => {
+                    const r = e.currentTarget.getBoundingClientRect()
+                    setActionsMenu({ x: r.left, y: r.bottom, id: session.id })
+                  }}
+                >
+                  <IconMore />
+                </button>
+              )}
             </>
           )}
           {onSetColor && (
@@ -691,6 +736,15 @@ export function CardModal({ session, projectId, projectName, projectColor, colum
             zIndex={65}
             items={[{ type: 'colors', onPick: onSetColor }]}
             onClose={() => setColorMenu(null)}
+          />
+        )}
+        {actionsMenu && actionsMenuOpen && hasSessionRows && (
+          <ContextMenu
+            x={actionsMenu.x}
+            y={actionsMenu.y}
+            zIndex={65}
+            items={closeThen(sessionRows, onClose)}
+            onClose={() => setActionsMenu(null)}
           />
         )}
         <CardMetaBar nodeId={session.id} board={board} onChange={onChangeBoard} />

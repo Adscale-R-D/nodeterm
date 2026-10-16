@@ -132,6 +132,7 @@ import {
   type NodeWrites
 } from '../lib/nodeWriteRouter'
 import {
+  BOARD_MODAL_ACTION_IDS,
   BOARD_NODE_ACTION_IDS,
   buildNodeActionItems,
   offCanvasNodeActionCtx,
@@ -10424,6 +10425,8 @@ export function Canvas() {
       nodes: nodesRef.current as CanvasNode[],
       sessionSource: session.source,
       attached: (nodeId) => !!agentRestartFn(nodeId),
+      // Held by React Flow — true while its terminal is released off screen, unlike `attached`.
+      onCanvas: (nodeId) => nodesRef.current.some((n) => n.id === nodeId),
       agentIdOf,
       gatewayModels,
       gatewayStatus,
@@ -10577,6 +10580,18 @@ export function Canvas() {
   const activeBoardNodeActionItems = useCallback(
     (nodeId: string): MenuItem[] => boardNodeActionItems(nodeId, activeProjectId),
     [boardNodeActionItems, activeProjectId]
+  )
+  // The card modal's session rows (restart / switch model / account / pause), for a node of
+  // `projectId`. Refresh is not offered there: the modal's terminal has its own.
+  const boardSessionActionItems = useCallback(
+    (nodeId: string, projectId: string): MenuItem[] =>
+      buildNodeActionItems([nodeId], undefined, nodeActionCtxFor(projectId), { allow: BOARD_MODAL_ACTION_IDS }),
+    [nodeActionCtxFor]
+  )
+  // Stable identity for the memoized per-project board, same reason as above.
+  const activeBoardSessionActionItems = useCallback(
+    (nodeId: string): MenuItem[] => boardSessionActionItems(nodeId, activeProjectId),
+    [boardSessionActionItems, activeProjectId]
   )
 
   /** "New <agent>" creation entries shared by the pane, sidebar and group context menus.
@@ -18938,6 +18953,7 @@ export function Canvas() {
           live={globalKanbanLive}
           onModalNodeChange={setKanbanModalNode}
           nodeActionItems={boardNodeActionItems}
+          sessionActionItems={boardSessionActionItems}
           onAiName={aiNameFromKanban}
           onSetColor={setCardColor}
           onRunQueued={runQueuedFromOmni}
@@ -18956,6 +18972,7 @@ export function Canvas() {
           onBrowserNav={browserNavFromKanban}
           onSetIcon={setActiveCardIcon}
           nodeActionItems={activeBoardNodeActionItems}
+          sessionActionItems={activeBoardSessionActionItems}
           onAiName={aiNameFromActiveKanban}
           onSetColor={setActiveCardColor}
           onRunQueued={runActiveQueuedFromBoard}

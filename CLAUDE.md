@@ -10016,7 +10016,15 @@ hooks never fired and every agent message to it expired as `targetStatusStale`.
   carries the node's actions (search / dictate / AI-name / comments), accepts file drops
   (`terminal/file-drop.ts`), renders browser webviews (`BrowserSurface`), and its cards support
   right-click actions + `+ New`. When you touch a node's UI, ask "does the board need this too?"
-  and wire it through `KanbanView`/`SessionCard`/`CardModal` in the SAME change. Node menu rows live in ONE builder, `renderer/lib/nodeActionItems.tsx` (canvas menu, sessions sidebar, both boards' card menus via `kanban/cardMenu.tsx`); a card takes only `BOARD_NODE_ACTION_IDS` and writes through `nodeWritesFor(projectId)`, because the Omni board acts on nodes of projects that are not on the canvas. Kanban itself is
+  and wire it through `KanbanView`/`SessionCard`/`CardModal` in the SAME change. Node menu rows live in ONE builder, `renderer/lib/nodeActionItems.tsx` (canvas menu, sessions sidebar, both boards' card menus via `kanban/cardMenu.tsx`); a card takes only `BOARD_NODE_ACTION_IDS` and writes through `nodeWritesFor(projectId)`, because the Omni board acts on nodes of projects that are not on the canvas.
+  The card modal's ⋯ menu takes `BOARD_MODAL_ACTION_IDS` and closes the modal before any action
+  runs, because restart-and-shell, switch model, account switch and pause-and-end recycle the tmux
+  session its terminal is attached to; a card of a project the canvas does not hold shows these
+  rows disabled with 'This terminal is not attached right now.', and a card with no session row
+  (a plain shell, a non-resumable agent) gets no ⋯ button at all. A node the canvas holds but
+  whose terminal was released while off screen is a different case (`NodeActionCtx.onCanvas`
+  true, `attached` false): Refresh stays enabled, since its respawn is what revives the node,
+  and the session rows say the terminal was released (`RELEASED_HINT`). Kanban itself is
   desktop+Server-Edition (pure renderer + `workspace.save`); the iOS board is a separate read/move
   mirror (`nodeterm-ios`, `KanbanGrouping`/`ProjectBoardView`).
 

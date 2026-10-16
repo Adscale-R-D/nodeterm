@@ -1100,8 +1100,9 @@ Lifecycle, by intent:
   restart nothing can hibernate and deferring would make Eco a memory regression). Eco is
   structurally inert for sessions with no turn in the current app run, and that is now a DECISION,
   not a follow-up: the persisted `agentStatus.lastSeen` clock (see **Status-grouped sessions**) is
-  deliberately never an idle proof — see "A restored clock is not an idle proof" in
-  `terminal/hibernation-policy.ts`.
+  deliberately never an idle proof FOR ECO — see "A restored clock is not an idle proof" in
+  `terminal/hibernation-policy.ts`. (A user-confirmed bulk pause is the one place it is read as weak
+  evidence; see **Bulk pause** and the `lastSeen` rules under **Status-grouped sessions**.)
   The deferral is also unaware of `paused`: a deep-paused node's freshly recycled shell keeps its
   xterm alive until the hard cap, waiting for a hibernation that (being already exited, or having
   no CLI to exit) can never come — a second documented follow-up.
@@ -1127,6 +1128,63 @@ Lifecycle, by intent:
   on the manual path, closed here on the automatic one. Node menu only today (canvas right-click +
   the sessions sidebar row menu, which shares the same `selectionItems` builder, plus a read-only
   kanban card badge and a clickable one in the card modal); no command palette entry.
+- **Bulk pause** (tab menu and sessions-sidebar project menu: *Pause project* / *Cancel pending
+  pauses* / *Resume all*; group frame menu: *Pause group*; a multi-selection of ≥2 agents: *Pause N
+  sessions*; a count badge on the tab) → the shallow "Pause session" above, applied to many nodes
+  at once, and it works on nodes that are NOT mounted (a project that is not on screen has no
+  `TerminalNode`, so no registered pause closure). It never recycles a tmux session. Rules a
+  refactor must not undo:
+  (1) **Typing into a pane by node id is ONE primitive, `PtyManager.sendPaneKeys(persistKey, data)`**
+  (`pty:send-pane-keys`, `HOST_ONLY`, classified `EDITOR_ONLY` in the relay access policy and
+  `SCOPED_REFUSED` for a scoped guest). Keys go over stdin to `tmux source-file -` through the
+  existing `controlInputPlan` / `remoteControlInputPlan`, never argv, to the exact `=nt-<id>:`.
+  (2) **An SSH-project node is never read or typed into on the local socket.** `paneRemoteRef`
+  resolves an unmounted SSH node through `remoteNodeOwner` (the machine-local index); a
+  disconnected master, or a stray LIVE local session for an SSH-project node, is `not-connected` /
+  unreachable, never a local fallback. `paneCommand` / `paneOwner` take an opt-in
+  `{ resolveUnmounted: true }` and **the default stays the legacy live-only path ON PURPOSE**:
+  agent messaging and `terminateForeground` also call them, and if they resolved an unmounted
+  remote node they would prove an owner on the HOST and then act on the LOCAL socket. Zellij, the
+  Windows session host, a native Windows pane and a plain shell answer `unsupported-backend`.
+  (3) **`planBulkPause` (`lib/bulkPause.ts`) is the whole decision**: `now` (idle `done`, or an
+  UNKNOWN state whose persisted `agentStatus.lastSeen.state` is `done` — `idleForPause`),
+  `whenDone` (working / waiting / blocked, or a held question/approval ticket — typing `/exit` into
+  those would answer a prompt), `alreadyExited` (hibernated by Eco: nothing to type, just mark it
+  paused), and named skips, exactly the `BulkPauseSkip` reasons: `not-agent`, `no-session-id`,
+  `not-resumable` (also an agent with no `exitSequence`, e.g. antigravity: resumable, but nothing
+  can ask it to quit), `already-paused`, `relay`, `dropped`, `ended`, `state-unknown`. The
+  unknown-state rule exists because state is transient: right after an app restart every node reads
+  unknown, and an idle CLI and one mid-turn look the same — typing an exit into a running turn
+  abandons it. `lastSeen` is the one clock that survives the restart, so a node last seen `done` is
+  paused and every other unknown node is skipped, never guessed at (the runner re-asks the same
+  rule at fire time). A skipped node says why; nothing is silently dropped, and the result line
+  (`bulkPauseResultText`) counts EVERY outcome — paused, pending, unreachable, `unverified`, not
+  eligible, still running, skipped — so a batch against a disconnected host never reads "Paused 0".
+  (4) **`whenDone` is `state/pendingPause.ts`, TRANSIENT** (never persisted: after a restart nothing
+  is watched, so a stored mark would lie). It fires on a CLEAN `done` edge only (not errored,
+  interrupted or held), the mark is removed BEFORE the fire so a second edge cannot double it, and
+  Resume, Cancel, node delete or the fire clear it, and the watcher also drops a mark when the node
+  is paused elsewhere or its status disappears. **A mark is bound to the session it was planned
+  against** (`BulkPauseTarget.sessionId`): the watcher drops it unfired when the node's session id
+  changes, the runner refuses a mismatch, and every Canvas funnel that replaces the CLI —
+  `restartAgentNode` (restart, fresh shell, model switch, reopen as), the Claude and Codex account
+  switches, the bulk idle restart and both `transport.recycle` sites — removes it, or a mark taken
+  for one turn would quit the NEW session on its first turn end.
+  (5) **Every exit holds `guardConcurrentRestart(nodeId, …)`** (the Eco / Pause / restart set) and
+  runs through ONE `createHostLimiter(BULK_PAUSE_HOST_CAP = 3)` per host key, shared by the batch
+  and the pending fires; owner reads are bounded. The host key is `local` or the **SSH project id**,
+  not the host: ControlMasters are per project, so the cap bounds channels per master.
+  `pauseNodeHeadless` (`terminal/headless-pause.ts`) is `performExitPhase` over `sendPaneKeys`, with
+  the menu restart's late window (`RESTART_LATE_EXIT_MS`) so a CLI that quits just after the base
+  6 s is paused rather than reported "still running"; a failed key write ends that wait at once
+  (`unreachable`). A pane owner that cannot be read before the exit (no live ControlMaster, a hung
+  read) is `unverified`, distinct from `not-eligible` (read and refused): nothing is typed in
+  either case.
+  (6) **Resume all is the active project only**: waking is the mounted node's `wakeHibernatedNode`,
+  so elsewhere the row is disabled with `Open the project to resume`.
+  Surfaces: Desktop full (local + SSH); Server Edition has the core primitive and a real ws-bridge
+  leg, but pending fires need an open browser tab (the watcher is the renderer's); relay tabs are
+  refused; the kanban card menus inherit the rows through `nodeActionItems`; Mobile: follow-up.
 
 The node id is the `persistKey` (passed to `transport.create`), so it must stay stable.
 If tmux is unavailable, `PtyManager` falls back to a plain shell (no cross-restart
@@ -3854,6 +3912,13 @@ command-bearing opens; this does not add a human-confirm dialog or change mobile
     prompt after boot would not be enough: the background-task stamp and the subagent cards Eco
     also needs are transient and cannot be rebuilt after a restart, and `/exit` kills both
     silently. A session becomes a candidate again from its next live `done`.
+  - **Bulk pause is the ONE reader that acts on it** (`idleForPause`, `lib/bulkPause.ts`): an
+    unknown-state session is pausable only when `lastSeen.state === 'done'`. The difference from Eco
+    is consent and proof, not the clock: a person confirmed the pause, the runner still proves the
+    agent owns its pane before typing, and without it every session after a restart would be
+    unpausable exactly when memory is tightest. The residual is stated there: a session last seen
+    idle that started a turn while the app was closed (cron, loop, task notification) can be
+    interrupted. Nothing automatic may read it.
   - **Its own key, so the main table's write cadence is unchanged.** State events still write
     nothing to `nodeterm.agentStatus`. That matters twice: the main table carries `loop.items` (up to
     100 × 4000 chars per loop node — 428 KB and ~2.1 ms per stringify with one full loop, measured in
@@ -6474,7 +6539,8 @@ about which machine they describe. Reading + parsing is `core/session-memory.ts`
   "end the tmux session too" was not built. The control is NOT a third depth: it calls
   `pauseAgentNode(id, false)` — the same "Pause session" the node menu offers, the same
   `performExitPhase`, the same PAUSED chip and the same Resume — because a panel-only "hibernate"
-  would be a third concept for the user and a second exit path to keep in step with Eco's. Which
+  would be a third concept for the user and a second exit path to keep in step with Eco's. To pause
+  many rows at once, use **Bulk pause** (Terminal session continuity), not a loop over this control. Which
   rows may offer it is the pure `renderer/lib/sessionPause.ts`, and its two directions are
   deliberate: a row that could NEVER be paused (an orphan, a plain terminal, an agent we cannot
   quit-and-resume) renders **nothing** — a dead control on most rows of a machine-wide list is

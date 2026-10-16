@@ -504,6 +504,22 @@ import {
 } from '../lib/explorerPinHint'
 import { sameSshEndpoint, setKanbanPublishHook, setStoredCanvasPublishHook, useProjects } from '../state/projects'
 import { useAgentStatus, recordsTurnInterrupt } from '../state/agentStatus'
+import { usePendingPause, startPendingPauseWatcher } from '../state/pendingPause'
+import {
+  planBulkPause,
+  bulkPauseConfirmText,
+  bulkPauseResultText,
+  describeSkips,
+  paneRouteProjectId,
+  type BulkPauseTarget
+} from '../lib/bulkPause'
+import {
+  pauseNodeHeadless,
+  createHostLimiter,
+  BULK_PAUSE_HOST_CAP,
+  type HeadlessPauseDeps
+} from '../terminal/headless-pause'
+import { binariesFor } from '@shared/agents/pane-owner-predicate'
 import { hostChatSend, hostChatSession, hostChatStatus } from '../lib/hostChatQuery'
 import { chatPaneRefusal } from '../lib/chatPaneGate'
 import { runQueuedNotice } from '../lib/boardRunQueued'
@@ -519,6 +535,7 @@ import type { NormalizedAgentEvent } from '@shared/agents/normalize'
 import {
   computeWorktreePath,
   resolveWorktreePath,
+  descendantIds,
   displacedByWorktree,
   effectiveWorktreeBaseRef,
   effectiveWorktreeTemplate,
@@ -1016,6 +1033,11 @@ type ControlReply = { ok: boolean; message?: string; result?: unknown; error?: s
 type LinkOpen = Extract<OpenLinkAcceptResult, { ok: true }>['open']
 /** An accepted link waiting for its project to load is dropped after this (see pendingLinkRef). */
 const PENDING_LINK_MAX_MS = 30_000
+
+/** The ONE bulk-pause limiter: the batch path and the pending-pause watcher both run their exits
+ *  through it, so the per-host cap (BULK_PAUSE_HOST_CAP) holds across the two. Module-level
+ *  because the canvas is mounted once. */
+const hostLimiter = createHostLimiter(BULK_PAUSE_HOST_CAP)
 
 /** The confirm dialogs, named so their setters can be wrapped in a synchronous open-guard (see
  *  `confirmFlags`): ONE confirm at a time, decided at call time rather than at the next render. */
@@ -6967,7 +6989,10 @@ export function Canvas() {
           // RECYCLE, not DESTROY: the node is NOT deleted — it stays on the canvas (here and on
           // every co-viewer's) and respawns into the fallback cwd. `destroy` would cast "closed
           // by <name>" to co-viewers, permanently bricking their still-present node.
-          if (n.type === 'terminal') transport.recycle(n.id)
+          if (n.type === 'terminal') {
+            transport.recycle(n.id)
+            usePendingPause.getState().remove([n.id]) // the recycled session's CLI is gone with it
+          }
         }
       }
       setNodes((ns) =>
@@ -7179,6 +7204,8 @@ export function Canvas() {
   const deleteNodes = useCallback(
     (ids: string[], opts?: { record?: boolean }) => {
       const set = new Set(ids)
+      // A pending "pause after this turn" has nothing left to pause.
+      usePendingPause.getState().remove(ids)
       if (opts?.record !== false) {
         const deletedAt = Date.now()
         // Keyed by node id, not by array position: `closedEntries` and `snapshots` below each run
@@ -8160,6 +8187,7 @@ export function Canvas() {
     // would be bricked until they deleted and re-added it. `recycle` tells them to restart onto the
     // replacement session instead, so they follow the node into its new cwd.
     transport.recycle(id)
+    usePendingPause.getState().remove([id]) // the recycled session's CLI is gone with it
     setNodes((ns) =>
       ns.map((n) =>
         n.id === id
@@ -8267,6 +8295,9 @@ export function Canvas() {
           : targetAgentId
             ? 'Reopen'
             : 'Restart'
+    // A restart (any variant: model switch, reopen as, fresh shell) replaces the CLI the pending
+    // "pause after this turn" mark was taken against.
+    usePendingPause.getState().remove([nodeId])
     let outcome: RestartOutcome
     try {
       outcome = await fn(targetAgentId, targetModel, restartShell, clearEnv)
@@ -8453,11 +8484,294 @@ export function Canvas() {
       })
       return
     }
+    // A Resume overrides a queued "pause after this turn" — the user wants it running.
+    usePendingPause.getState().remove([nodeId])
     wakeHibernatedNode(nodeId)
     // The trigger is fire-and-forget (it owns its own retries and clears `hibernated`/`paused` on
     // a confirmed resume), so this is deliberately a status line, not a result.
     setNotice({ kind: 'info', text: 'Resuming…' })
   }, [])
+
+  // ---- Bulk pause (a project, a group frame, a multi-selection) ----
+  // One path for mounted AND unmounted nodes: `headless-pause.ts` drives the same
+  // `performExitPhase` the node menu and Eco use, over `pty.sendPaneKeys` by node id, under the
+  // same `guardConcurrentRestart` lock single Pause, Eco and wake hold. Shallow only — the tmux
+  // pane and its scrollback stay. Busy sessions are never typed into: they get a transient
+  // "pause after this turn" mark the watcher below fires on their next clean `done`.
+  /** The project that owns a node: the one React Flow holds when the node is on the live canvas
+   *  (its stored copy lags), else the stored owner. */
+  const owningProjectOf = useCallback(
+    (id: string) => {
+      const projects = useProjects.getState().projects
+      const live = nodesRef.current.some((n) => n.id === id)
+      return live && nodesProjectIdRef.current
+        ? projects.find((x) => x.id === nodesProjectIdRef.current)
+        : nodeOwner(projects, id)
+    },
+    [nodesRef, nodesProjectIdRef]
+  )
+  // Core-bound `pty` comes from the node's OWNING project's session (grep gate), not the global.
+  // No owner, or a relay owner, means no route at all (`paneRouteProjectId`): never a guess at the
+  // active project, which could be a relay tab whose session types into another machine's pane.
+  const ptyFor = useCallback(
+    (id: string) => {
+      const projectId = paneRouteProjectId(owningProjectOf(id))
+      return projectId === null ? null : sessionForProject(projectId).api.pty
+    },
+    [owningProjectOf]
+  )
+  const headlessPauseDeps = useMemo<HeadlessPauseDeps>(
+    () => ({
+      sendPaneKeys: async (id, d) =>
+        (await ptyFor(id)?.sendPaneKeys(id, d)) ?? { ok: false, reason: 'not-connected' },
+      // `resolveUnmounted`: the default answers only for a node with a LIVE pty client, and most
+      // nodes a project-wide pause reaches are not mounted (another project, offscreen-released).
+      // No route answers null, which the runner reports as "couldn't verify the agent in its pane".
+      paneCommand: async (id) => (await ptyFor(id)?.paneCommand(id, { resolveUnmounted: true })) ?? null,
+      paneOwner: async (id) => (await ptyFor(id)?.paneOwner(id, { resolveUnmounted: true })) ?? null,
+      status: (id) => useAgentStatus.getState().byId[id],
+      binaries: (agentId) => binariesFor(agentId, useSettings.getState().settings.customAgents),
+      // Gone from BOTH the live canvas and the stored projects. For the project React Flow holds,
+      // the live array is the truth: its stored copy lags a delete until the next commit.
+      stillExists: (id) => {
+        if (nodesRef.current.some((n) => n.id === id)) return true
+        const owner = nodeOwner(useProjects.getState().projects, id)
+        return !!owner && owner.id !== nodesProjectIdRef.current
+      },
+      // Mirrors the mounted shallow-pause closure (TerminalNode `registerAgentPause`): an exit we
+      // performed records the wake context + `hibernated`; an already-exited (Eco) node only gains
+      // `paused` — its recorded wake context is already right and must survive.
+      markPaused: (id, { alreadyExited, wake }) => {
+        const s = useAgentStatus.getState()
+        if (!alreadyExited) {
+          s.setHibernatedContext(id, wake)
+          s.setHibernated(id, true)
+        }
+        s.setPaused(id, true)
+      }
+    }),
+    [nodesRef, nodesProjectIdRef, ptyFor]
+  )
+
+  /** Terminal nodes as bulk-pause targets, each with the project that owns it (relay tabs are
+   *  refused by the planner; SSH projects get their own host-cap key). */
+  const bulkPauseTargets = useCallback(
+    (ids: readonly string[]): BulkPauseTarget[] => {
+      const byId = useAgentStatus.getState().byId
+      return ids.flatMap((id): BulkPauseTarget[] => {
+        const live = nodesRef.current.find((n) => n.id === id)
+        const p = owningProjectOf(id)
+        const stored = live ? undefined : p?.nodes.find((n) => n.id === id)
+        const isTerminal = live ? live.type === 'terminal' : stored?.kind === 'terminal'
+        if (!isTerminal) return []
+        const agentId =
+          (live ? (live.data?.agentId as string | undefined) : stored?.agentId) ?? byId[id]?.agentId
+        return [{ nodeId: id, agentId, relay: !!p?.remote, hostKey: p?.ssh ? p.id : 'local' }]
+      })
+    },
+    [nodesRef, owningProjectOf]
+  )
+
+  /** A promise over Canvas's one ConfirmDialog. A dialog already up (an agent's destructive
+   *  verb, a removal) is never replaced: the bulk pause answers "not now" instead. */
+  const confirmBulkPause = useCallback(
+    (message: string): Promise<boolean> =>
+      new Promise((resolve) => {
+        if (confirmBusy()) {
+          setNotice({ kind: 'error', text: 'Another confirmation is open — answer it, then pause again.' })
+          resolve(false)
+          return
+        }
+        setConfirm({
+          message,
+          confirmLabel: 'Pause',
+          onConfirm: () => {
+            setConfirm(null)
+            resolve(true)
+          },
+          onCancel: () => resolve(false)
+        })
+      }),
+    [confirmBusy, setConfirm]
+  )
+
+  const pauseNodes = useCallback(
+    async (ids: readonly string[], scopeLabel: string): Promise<void> => {
+      const plan = planBulkPause(bulkPauseTargets(ids), (id) => useAgentStatus.getState().byId[id])
+      const actionable = plan.now.length + plan.alreadyExited.length + plan.whenDone.length
+      if (actionable === 0) {
+        setNotice({
+          kind: 'info',
+          text: plan.skip.length
+            ? `Nothing to pause in ${scopeLabel} (${describeSkips(plan.skip)}).`
+            : `Nothing to pause in ${scopeLabel}.`
+        })
+        return
+      }
+      const ok = await confirmBulkPause(bulkPauseConfirmText(scopeLabel, plan))
+      if (!ok) return
+      usePendingPause.getState().add(plan.whenDone)
+      // EVERY outcome is counted: a node that is neither paused nor pending must still reach the
+      // summary, or a batch against a disconnected SSH host reads as "Paused 0" and nothing else.
+      const counts = {
+        paused: 0, deferred: 0, unreachable: 0, unverified: 0, notEligible: 0, timeout: 0, failed: 0
+      }
+      await Promise.all(
+        [
+          ...plan.alreadyExited.map((t) => [t, true] as const),
+          ...plan.now.map((t) => [t, false] as const)
+        ].map(([t, exited]) =>
+          hostLimiter
+            .run(t.hostKey, () => pauseNodeHeadless(t, exited, headlessPauseDeps))
+            .then((o) => {
+              if (o === 'paused') counts.paused++
+              else if (o === 'exit-timeout') counts.timeout++
+              else if (o === 'unreachable') counts.unreachable++
+              else if (o === 'unverified') counts.unverified++
+              else if (o === 'not-eligible') counts.notEligible++
+              else if (o === 'deferred') {
+                // Became busy between the plan and its turn in the queue: pause after this turn.
+                counts.deferred++
+                usePendingPause.getState().add([t])
+              }
+            })
+            .catch(() => {
+              counts.failed++
+            })
+        )
+      )
+      setNotice(
+        bulkPauseResultText({
+          paused: counts.paused,
+          pending: plan.whenDone.length + counts.deferred,
+          unreachable: counts.unreachable,
+          unverified: counts.unverified,
+          notEligible: counts.notEligible,
+          timeout: counts.timeout,
+          failed: counts.failed,
+          skipped: plan.skip.length
+        })
+      )
+    },
+    [bulkPauseTargets, confirmBulkPause, headlessPauseDeps]
+  )
+
+  // The ONE watcher for "pause after this turn" marks, for the life of the canvas: a node whose
+  // turn ends cleanly is exited headlessly; one that turned busy again in between is re-queued.
+  useEffect(
+    () =>
+      startPendingPauseWatcher((t) => {
+        // Through the SAME limiter as the batch: a burst of turns ending together must not put
+        // more than BULK_PAUSE_HOST_CAP exits in flight on one host.
+        void hostLimiter
+          .run(t.hostKey, () => pauseNodeHeadless(t, false, headlessPauseDeps))
+          .then((o) => {
+            if (o === 'deferred') usePendingPause.getState().add([t])
+          })
+          .catch(() => {})
+      }),
+    [headlessPauseDeps]
+  )
+
+  /** A project's terminal node ids: the live array for the project React Flow holds, else the
+   *  stored copy. */
+  const projectTerminalIds = useCallback(
+    (projectId: string): string[] =>
+      projectId === nodesProjectIdRef.current
+        ? nodesRef.current.filter((n) => n.type === 'terminal').map((n) => n.id)
+        : (useProjects.getState().getProject(projectId)?.nodes ?? [])
+            .filter((n) => n.kind === 'terminal')
+            .map((n) => n.id),
+    [nodesRef, nodesProjectIdRef]
+  )
+
+  const projectScopeLabel = (projectId: string): string =>
+    `project "${useProjects.getState().getProject(projectId)?.name ?? projectId}"`
+
+  const cancelPendingPauses = useCallback(
+    (projectId: string) => {
+      const ids = projectTerminalIds(projectId).filter((id) => id in usePendingPause.getState().byId)
+      usePendingPause.getState().remove(ids)
+      setNotice({
+        kind: 'info',
+        text: `Cancelled ${ids.length} pending ${ids.length === 1 ? 'pause' : 'pauses'}.`
+      })
+    },
+    [projectTerminalIds]
+  )
+
+  /** Resume every PAUSED session of the active project through the same `resumeAgentNode` a single
+   *  Resume uses. Each wake is fire-and-forget (the trigger owns its retries and the
+   *  guardConcurrentRestart lock), so this starts them all and does not wait. Only the active
+   *  project: resume types into a MOUNTED terminal (echo-verified, input buffered), and only that
+   *  project's nodes are mounted. Each call raises its own "Resuming…" line; the summary below is
+   *  set after the loop, so it is the one left on screen. */
+  const resumeAllInActiveProject = useCallback(() => {
+    if (useProjects.getState().activeProjectId !== nodesProjectIdRef.current) {
+      // Mid-switch: the live array still holds the outgoing project's nodes.
+      setNotice({ kind: 'error', text: 'Resume all skipped: the project is still loading — try again.' })
+      return
+    }
+    const byId = useAgentStatus.getState().byId
+    const paused = nodesRef.current.filter((n) => n.type === 'terminal' && byId[n.id]?.paused)
+    let resumed = 0
+    let detached = 0
+    for (const n of paused) {
+      if (!agentHibernateFns(n.id)) {
+        detached++
+        continue
+      }
+      resumeAgentNode(n.id)
+      resumed++
+    }
+    setNotice({
+      kind: detached ? 'error' : 'info',
+      text:
+        paused.length === 0
+          ? 'Nothing is paused in this project.'
+          : `Resuming ${resumed}` +
+            (detached ? ` · ${detached} not attached (bring them into view, then Resume)` : '')
+    })
+  }, [nodesRef, nodesProjectIdRef, resumeAgentNode])
+
+  const resumeAllProject = useCallback(
+    (projectId: string) => {
+      if (projectId === useProjects.getState().activeProjectId) resumeAllInActiveProject()
+    },
+    [resumeAllInActiveProject]
+  )
+
+  /** The three project rows, for the sessions-sidebar project menu (the tab bar draws its own). */
+  const projectPauseItems = useCallback(
+    (projectId: string): MenuItem[] => {
+      const pending = projectTerminalIds(projectId).some((id) => id in usePendingPause.getState().byId)
+      const active = projectId === useProjects.getState().activeProjectId
+      return [
+        {
+          label: 'Pause project',
+          icon: <IconPower />,
+          onClick: () => void pauseNodes(projectTerminalIds(projectId), projectScopeLabel(projectId))
+        },
+        ...(pending
+          ? [
+              {
+                label: 'Cancel pending pauses',
+                icon: <IconPower />,
+                onClick: () => cancelPendingPauses(projectId)
+              } as MenuItem
+            ]
+          : []),
+        {
+          label: 'Resume all',
+          icon: <IconPower />,
+          disabled: !active,
+          ...(active ? {} : { hint: 'Open the project to resume' }),
+          onClick: () => resumeAllProject(projectId)
+        }
+      ]
+    },
+    [projectTerminalIds, pauseNodes, cancelPendingPauses, resumeAllProject]
+  )
 
   // S6 §3.5 — originate an owner-authorized Codex account SWITCH for a running node, then recycle
   // its pane onto the target account. The renderer is NOT the security boundary: PR 5's three-phase
@@ -8557,6 +8871,7 @@ export function Canvas() {
           })
           return
         }
+        usePendingPause.getState().remove([nodeId]) // the switch restarts the CLI
         const fn = agentRestartFn(nodeId)
         // The rebind rides the closure's own node update (`beforeRecycle`), so the respawn is
         // guaranteed to launch under the target account — a separate setNodes in the same tick can
@@ -8614,6 +8929,7 @@ export function Canvas() {
           )
         )
         markDirty()
+        usePendingPause.getState().remove([nodeId]) // the switch restarts the CLI
         const fn = agentRestartFn(nodeId)
         const outcome = fn ? await settleRestart(() => fn(undefined, undefined, true)) : 'not-eligible'
         await codexApi.finishSwitch(token)
@@ -8687,6 +9003,7 @@ export function Canvas() {
         if (!projectId) return { kind: 'refused', reason: 'no-connection' }
         ctx = { projectId }
       }
+      usePendingPause.getState().remove([nodeId]) // the switch restarts the CLI
       const fn = agentRestartFn(nodeId)
       if (!fn) return { kind: 'refused', reason: 'not-attached' }
       const { plan } = decision
@@ -8862,6 +9179,7 @@ export function Canvas() {
               id,
               hostKey: nodeHostKey,
               run: async () => {
+                usePendingPause.getState().remove([id]) // a restart replaces the CLI a mark waited on
                 const fn = agentRestartFn(id)
                 return fn ? await settleRestart(fn) : 'not-eligible'
               }
@@ -10551,6 +10869,7 @@ export function Canvas() {
       transferConversation,
       restartAgentNode,
       pauseAgentNode,
+      pauseNodes: (ids) => void pauseNodes(ids, `${ids.length} sessions`),
       resumeAgentNode,
       switchClaudeAccountNode,
       switchCodexAccountNode,
@@ -10577,6 +10896,7 @@ export function Canvas() {
       transferConversation,
       restartAgentNode,
       pauseAgentNode,
+      pauseNodes,
       resumeAgentNode,
       switchClaudeAccountNode,
       switchCodexAccountNode,
@@ -10934,6 +11254,18 @@ export function Canvas() {
           hint: lineageRefusal ?? 'One row per level: who opened whom, top to bottom.',
           onClick: () => arrangeGroupAction(groupId, 'lineage')
         },
+        {
+          // Every agent session inside the frame, nested frames included (the planner skips
+          // non-agents and says so in the confirm).
+          label: 'Pause group',
+          icon: <IconPower />,
+          hint: 'Quits each agent CLI in this group; busy ones pause after their current turn.',
+          onClick: () =>
+            void pauseNodes(
+              [...descendantIds(nodesRef.current, groupId)],
+              `group "${String(nodesRef.current.find((n) => n.id === groupId)?.data?.title ?? 'group')}"`
+            )
+        },
         { type: 'separator' },
         ...(isHidden('colors', useSettings.getState().settings.hiddenNodeMenuItems)
           ? []
@@ -10973,7 +11305,8 @@ export function Canvas() {
       addToExistingGroup,
       groupSelection,
       groupArrangeHint,
-      arrangeGroupAction
+      arrangeGroupAction,
+      pauseNodes
     ]
   )
 
@@ -15897,6 +16230,7 @@ export function Canvas() {
     (projectId: string, ids: readonly string[]) => {
       const store = useProjects.getState()
       const nodes = store.getProject(projectId)?.nodes ?? []
+      usePendingPause.getState().remove([...ids])
       for (const id of ids) {
         // A deleted frame's children SURVIVE it (deleteNodes frees them to absolute positions).
         // `moveNodeToGroup(…, null)` is the serialized twin of that conversion — without it the
@@ -17514,6 +17848,8 @@ export function Canvas() {
               })()
             : []),
           { type: 'separator' },
+          ...projectPauseItems(projectId),
+          { type: 'separator' },
           { type: 'colors', onPick: (color) => setProjectColor(projectId, color) },
           { type: 'separator' },
           {
@@ -17534,7 +17870,8 @@ export function Canvas() {
       closeProject,
       openProjectSettings,
       shareBlockedReason,
-      openShareWithTeam
+      openShareWithTeam,
+      projectPauseItems
     ]
   )
 
@@ -18831,6 +19168,9 @@ export function Canvas() {
         onOpenProjectSettings={openProjectSettings}
         onShareWithTeam={openShareWithTeam}
         shareBlockedReason={shareBlockedReason}
+        onPauseProject={(id) => void pauseNodes(projectTerminalIds(id), projectScopeLabel(id))}
+        onCancelPendingPauses={cancelPendingPauses}
+        onResumeAllProject={resumeAllProject}
       />
 
       <div className="top-banners">

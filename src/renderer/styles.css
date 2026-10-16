@@ -636,6 +636,16 @@ body,
   background: none;
 }
 
+/* Bulk pause: "⏸ 3 · 1 pending" after the tab name. Muted text, no fill — a paused project is a
+   resting state, not something asking for attention like the unread badge beside it. */
+.tab__paused {
+  flex-shrink: 0;
+  color: var(--muted);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
 /* Unread-completion count badge on a project tab. */
 .tab__badge {
   display: inline-flex;
@@ -799,6 +809,17 @@ body,
 .tab-menu button:disabled {
   color: var(--muted);
   cursor: not-allowed;
+}
+
+/* A menu row whose disabled reason lives on a wrapper: a disabled button takes no pointer events
+   in Chromium, so neither its own `title` nor the cursor would ever show. */
+.tab-menu__reason {
+  display: block;
+  cursor: not-allowed;
+}
+
+.tab-menu__reason > button:disabled {
+  pointer-events: none;
 }
 
 .tab-menu button.danger:hover:not(:disabled) {

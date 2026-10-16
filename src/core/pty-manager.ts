@@ -14,6 +14,7 @@ import { xtermScrollback } from '../shared/scrollback'
 import {
   DEFAULT_SETTINGS,
   type PaneCursor,
+  type PaneKeysResult,
   type PtyCreateOptions,
   type PtyCreateResult,
   type PtyRecycleTarget,
@@ -2201,11 +2202,16 @@ export class PtyManager {
       this.sendToEmptyPrompt(persistKey, text, typeof agentId === 'string' ? agentId : '')
     )
     platform().handle(IPC.ptyTmuxStatus, () => this.tmuxStatus())
-    platform().handle(IPC.ptyPaneCommand, (persistKey: string) => this.paneCommand(persistKey))
+    platform().handle(IPC.ptyPaneCommand, (persistKey: string, opts?: { resolveUnmounted?: boolean }) =>
+      this.paneCommand(persistKey, opts?.resolveUnmounted === true ? { resolveUnmounted: true } : undefined)
+    )
+    platform().handle(IPC.ptySendPaneKeys, (persistKey: string, data: string) => this.sendPaneKeys(persistKey, data))
     platform().handle(IPC.ptyPaneCwd, (persistKey: string) => this.paneCwd(persistKey))
     // Registered HERE, beside its name-only sibling, rather than in either shell: core owns both
     // reads, so the desktop and the Server Edition are served by one line and cannot drift.
-    platform().handle(IPC.ptyPaneOwner, (persistKey: string) => this.paneOwner(persistKey))
+    platform().handle(IPC.ptyPaneOwner, (persistKey: string, opts?: { resolveUnmounted?: boolean }) =>
+      this.paneOwner(persistKey, opts?.resolveUnmounted === true ? { resolveUnmounted: true } : undefined)
+    )
     platform().handle(IPC.ptyTerminateForeground, (persistKey: string, expectedAgentId?: string) =>
       this.terminateForeground(persistKey, expectedAgentId)
     )
@@ -6528,6 +6534,66 @@ export class PtyManager {
   }
 
   /**
+   * Where a node's pane lives when asked BY NODE ID. A live session's own master wins; with nothing
+   * attached, the persisted index decides (`setRemoteNodeOwner`). An SSH-project node whose project
+   * has no live master answers 'unreachable' — never the local socket, which is the wrong machine.
+   */
+  private paneRemoteRef(
+    persistKey: string,
+    live: Session | undefined
+  ): { kind: 'local' } | { kind: 'remote'; conn: SshConnection; controlPath: string } | { kind: 'unreachable' } {
+    if (live?.sshRemote) return { kind: 'remote', conn: live.sshRemote.conn, controlPath: live.sshRemote.controlPath }
+    const owner = this.remoteNodeOwner?.(persistKey) ?? null
+    // A node the persisted index places in an SSH project is NEVER local — not even when a live
+    // LOCAL session exists for its id (that is the stray the local-fallback bug leaves behind).
+    if (!owner) return { kind: 'local' }
+    if (live) return { kind: 'unreachable' }
+    return owner.remote
+      ? { kind: 'remote', conn: owner.remote.conn, controlPath: owner.remote.controlPath }
+      : { kind: 'unreachable' }
+  }
+
+  /**
+   * Type raw keys into a node's tmux pane by node id — no mounted terminal needed. Same stdin-only
+   * `source-file -` plan a live-link controller uses (bytes never ride argv; exact target
+   * `=nt-<id>:`), local or over the owning project's ControlMaster. Never rejects.
+   */
+  async sendPaneKeys(persistKey: string, data: string): Promise<PaneKeysResult> {
+    if (typeof persistKey !== 'string' || typeof data !== 'string' || data.length === 0) {
+      return { ok: false, reason: 'failed' }
+    }
+    const live = this.liveSessionForPersistKey(persistKey)
+    if (this.isZellij(persistKey, live)) return { ok: false, reason: 'unsupported-backend' }
+    if (live && (live.sessionHost || live.nativeWindowsPane || !live.tmuxBacked)) {
+      return { ok: false, reason: 'unsupported-backend' }
+    }
+    const ref = this.paneRemoteRef(persistKey, live)
+    if (ref.kind === 'unreachable') return { ok: false, reason: 'not-connected' }
+    const target = sessionName(persistKey)
+    const chunk = { kind: 'keys' as const, data }
+    try {
+      if (ref.kind === 'remote') {
+        const ssh = findSsh()
+        if (!ssh) return { ok: false, reason: 'no-ssh' }
+        const plan = remoteControlInputPlan(ref.conn, ref.controlPath, target, chunk)
+        if (!plan) return { ok: false, reason: 'failed' }
+        return (await runPasteDelivery(plan, (a, i) => runWithStdin(ssh, a, i)))
+          ? { ok: true }
+          : { ok: false, reason: 'failed' }
+      }
+      const tmuxPath = this.tmuxPath
+      if (!tmuxPath) return { ok: false, reason: 'unsupported-backend' }
+      const plan = controlInputPlan(TMUX_SOCKET, target, chunk)
+      if (!plan) return { ok: false, reason: 'failed' }
+      return (await runPasteDelivery(plan, (a, i) => runWithStdin(tmuxPath, a, i)))
+        ? { ok: true }
+        : { ok: false, reason: 'failed' }
+    } catch {
+      return { ok: false, reason: 'failed' }
+    }
+  }
+
+  /**
    * Write `text` + Enter into an agent's composer ONLY when that composer is empty — the app's own
    * unsolicited notes (the context-link discovery note, a sticky note pushed over a note link).
    * Issue #1144: those were `sendText` calls gated on nothing but `state !== 'working'`, so a note
@@ -6576,11 +6642,20 @@ export class PtyManager {
    * session registered with `sshRemote` is queried on the REMOTE tmux over the project's
    * ControlMaster (`remotePaneCommandArgs`); everything else asks the local socket.
    */
-  async paneCommand(persistKey: string): Promise<string | null> {
+  async paneCommand(persistKey: string, opts?: { resolveUnmounted?: boolean }): Promise<string | null> {
     const target = sessionName(persistKey)
     const live = this.liveSessionForPersistKey(persistKey)
     if (this.isZellij(persistKey, live)) return this.zellijPaneCommand(target)
-    const sshRemote = live?.sshRemote
+    // Legacy (default): the live session's own master, else local. `resolveUnmounted` (bulk pause)
+    // opts in to the persisted-index resolution; other callers (messaging, terminateForeground)
+    // still act on the live session's route only, so they must not be told a host owner they
+    // cannot then write to.
+    let sshRemote: { conn: SshConnection; controlPath: string } | undefined = live?.sshRemote
+    if (opts?.resolveUnmounted === true) {
+      const ref = this.paneRemoteRef(persistKey, live)
+      if (ref.kind === 'unreachable') return null
+      sshRemote = ref.kind === 'remote' ? { conn: ref.conn, controlPath: ref.controlPath } : undefined
+    }
     if (sshRemote) {
       const ssh = findSsh()
       if (!ssh) return null
@@ -6869,14 +6944,23 @@ export class PtyManager {
    * sibling builder does. That is safe only because `sessionName()` sanitises to `[A-Za-z0-9_-]`
    * before it ever gets here — the guarantee lives THERE, not in this call.
    */
-  async paneOwner(persistKey: string): Promise<PaneOwner | null> {
+  async paneOwner(persistKey: string, opts?: { resolveUnmounted?: boolean }): Promise<PaneOwner | null> {
     const target = sessionName(persistKey)
     const live = this.liveSessionForPersistKey(persistKey)
     // Agent messaging is refused into a Zellij pane (ZELLIJ_BACKEND_GAPS): null = "could not
     // prove the owner", which every messaging gate already reads as a refusal.
     if (this.isZellij(persistKey, live)) return null
     if (live?.nativeWindowsPane) return live.nativeWindowsPane.owner()
-    const sshRemote = live?.sshRemote
+    // Legacy (default): the live session's own master, else local. `resolveUnmounted` (bulk pause)
+    // opts in to the persisted-index resolution; other callers (messaging, terminateForeground)
+    // still act on the live session's route only, so they must not be told a host owner they
+    // cannot then write to.
+    let sshRemote: { conn: SshConnection; controlPath: string } | undefined = live?.sshRemote
+    if (opts?.resolveUnmounted === true) {
+      const ref = this.paneRemoteRef(persistKey, live)
+      if (ref.kind === 'unreachable') return null
+      sshRemote = ref.kind === 'remote' ? { conn: ref.conn, controlPath: ref.controlPath } : undefined
+    }
     try {
       if (sshRemote) {
         // ONE round-trip, not two (issue #460): under a saturated or dead ControlMaster every

@@ -243,6 +243,11 @@ export interface PaneCursor {
   visible: boolean
 }
 
+/** Outcome of typing keys into a node's pane by id (`PtyApi.sendPaneKeys`). Never a rejection. */
+export type PaneKeysResult =
+  | { ok: true }
+  | { ok: false; reason: 'not-connected' | 'unsupported-backend' | 'no-ssh' | 'failed' }
+
 /**
  * Result of creating a PTY session. `fresh` distinguishes a tmux session that had to be
  * created anew (cold start — e.g. after a machine reboot killed the tmux server) from a
@@ -1381,11 +1386,13 @@ export interface PtyApi {
   /** The command currently in the foreground of a node's tmux pane (e.g. 'claude', 'zsh'), by
    *  node persistKey. null when it is unknown — no session, no tmux, or the query failed — which
    *  callers must read as "not observed", never as evidence of a particular command. */
-  paneCommand(persistKey: string): Promise<string | null>
+  paneCommand(persistKey: string, opts?: { resolveUnmounted?: boolean }): Promise<string | null>
   /** The live working directory of a node's pane (`#{pane_current_path}`). null when unknown —
    *  no session, no tmux, the session-host backend, a failed query, or a surface that does not
    *  serve it (relay tabs) — and never a rejection. Used as the second cwd for file links. */
   paneCwd(persistKey: string): Promise<string | null>
+  /** Type raw keys into a node's tmux pane by node id; no mounted terminal needed. Never rejects. */
+  sendPaneKeys(nodeId: string, data: string): Promise<PaneKeysResult>
   /**
    * Desktop only (#925). Spawn-or-attach a node's session with no viewer and deliver `command`
    * through the echo-verified writer, then release the synthetic client (the tmux session keeps
@@ -1400,7 +1407,7 @@ export interface PtyApi {
    *  foreground process group — so a caller can ask WHO owns the pane rather than what tmux calls
    *  it. `null` is "could not read", never evidence that the pane is free (see `isAgentPane`'s
    *  three-valued verdict, which is what consumers should decide on). */
-  paneOwner(persistKey: string): Promise<PaneOwner | null>
+  paneOwner(persistKey: string, opts?: { resolveUnmounted?: boolean }): Promise<PaneOwner | null>
   /**
    * Execute a semantic agent launch in a node's live LOCAL Windows session-host pane: the core
    * encodes it for the pane's own shell (pwsh / Windows PowerShell / cmd) and the host types it

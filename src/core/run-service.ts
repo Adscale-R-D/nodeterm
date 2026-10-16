@@ -31,7 +31,8 @@ import {
   type RunEntriesResult,
   type RunStartResult,
   type RunStatus,
-  type TaskDef
+  type TaskDef,
+  embedsFlutterWeb
 } from '../shared/run-config'
 import { shellSingleQuote } from '../shared/shell-quote'
 import { findInLoginPath, resolveShellEnvVar, resolveShellPath } from './exec-path'
@@ -126,8 +127,24 @@ async function shellEnv(): Promise<NodeJS.ProcessEnv> {
   return p ? { ...process.env, PATH: p } : process.env
 }
 
-async function listSimulators(): Promise<RunDevice[]> {
-  if (process.platform !== 'darwin') return []
+/** What `xcrun simctl` printed (or threw) when it could not run at all, as the fix the user needs.
+ *  Null for any other failure: only a missing / unselected Xcode has an answer we can give. */
+export function simctlSetupError(e: unknown): string | null {
+  const err = e as { code?: unknown; message?: unknown; stderr?: unknown }
+  const text = `${String(err?.message ?? '')}\n${String(err?.stderr ?? '')}`.toLowerCase()
+  if (err?.code === 'ENOENT' || (text.includes('unable to find utility') && text.includes('simctl')) || text.includes('not a developer tool') || text.includes('requires xcode')) {
+    return 'Xcode\'s simulator tools are not available. Install Xcode, open it once, then select it with: sudo xcode-select --switch /Applications/Xcode.app/Contents/Developer'
+  }
+  return null
+}
+
+export async function listSimulators(): Promise<RunDevice[]> {
+  return (await listSimulatorsChecked()).devices
+}
+
+/** `listSimulators`, plus why the list is empty when simctl itself could not run. */
+export async function listSimulatorsChecked(): Promise<{ devices: RunDevice[]; error?: string }> {
+  if (process.platform !== 'darwin') return { devices: [] }
   try {
     const { stdout } = await run('/usr/bin/xcrun', ['simctl', 'list', 'devices', 'available', '-j'], {
       timeout: 15_000,
@@ -149,11 +166,14 @@ async function listSimulators(): Promise<RunDevice[]> {
         })
       }
     }
-    return out.sort((a, b) =>
-      a.state === b.state ? a.name.localeCompare(b.name) : a.state === 'booted' ? -1 : 1
-    )
-  } catch {
-    return []
+    return {
+      devices: out.sort((a, b) =>
+        a.state === b.state ? a.name.localeCompare(b.name) : a.state === 'booted' ? -1 : 1
+      )
+    }
+  } catch (e) {
+    const error = simctlSetupError(e)
+    return error ? { devices: [], error } : { devices: [] }
   }
 }
 
@@ -211,16 +231,41 @@ export async function listDevices(refresh = false): Promise<RunDevicesResult> {
   return devicesInFlight
 }
 
-export async function bootSimulator(udid: unknown): Promise<boolean> {
-  if (process.platform !== 'darwin' || typeof udid !== 'string' || !SIMULATOR_UDID.test(udid)) return false
+type BootExec = (file: string, args: string[], opts: { timeout: number }) => Promise<unknown>
+
+export interface BootOptions {
+  /** Open Simulator.app once the device is booted — what a run node's Boot has always done, so a
+   *  user without a Simulator node still sees the device. A Simulator node boots WITHOUT it: it is
+   *  the device's screen itself, and MEASURED (Xcode 27) a device takes input only from its FIRST
+   *  HID client, so a window showing it would take touch input away from the node. Default true. */
+  openWindow?: boolean
+}
+
+export async function bootSimulator(udid: unknown, opts: BootOptions = {}): Promise<boolean> {
+  if (process.platform !== 'darwin') return false
+  return bootSimulatorWith(udid, opts, run)
+}
+
+/** `bootSimulator` minus the platform gate, with the process runner injected (tests). */
+export async function bootSimulatorWith(udid: unknown, opts: BootOptions, exec: BootExec): Promise<boolean> {
+  return (await bootSimulatorReport(udid, opts, exec)) !== null
+}
+
+/** Boot, and say whether THIS call booted the device ('booted') or found it already running
+ *  ('already-booted'); null = could not boot. Only a 'booted' device is one the caller may later shut
+ *  down on the user's behalf — one that was already running belongs to whoever started it. */
+export async function bootSimulatorReport(udid: unknown, opts: BootOptions, exec: BootExec = run): Promise<'booted' | 'already-booted' | null> {
+  if (typeof udid !== 'string' || !SIMULATOR_UDID.test(udid)) return null
+  let result: 'booted' | 'already-booted' = 'booted'
   try {
-    await run('/usr/bin/xcrun', ['simctl', 'boot', udid], { timeout: 60_000 })
+    await exec('/usr/bin/xcrun', ['simctl', 'boot', udid], { timeout: 60_000 })
   } catch (e) {
-    if (!/current state: Booted/i.test(String((e as { stderr?: string }).stderr ?? (e as Error).message))) return false
+    if (!/current state: Booted/i.test(String((e as { stderr?: string }).stderr ?? (e as Error).message))) return null
+    result = 'already-booted'
   }
   devicesCache = null
-  await openSimulatorApp()
-  return true
+  if (opts.openWindow !== false) await openSimulatorApp(exec)
+  return result
 }
 
 /**
@@ -229,16 +274,16 @@ export async function bootSimulator(udid: unknown): Promise<boolean> {
  * "Unable to find application named 'Simulator'") the bundle inside the active Xcode is tried. A
  * machine with neither runs its simulators headless, which is fine: the app runs either way.
  */
-async function openSimulatorApp(): Promise<void> {
+async function openSimulatorApp(exec: BootExec): Promise<void> {
   try {
-    await run('/usr/bin/open', ['-a', 'Simulator'], { timeout: 15_000 })
+    await exec('/usr/bin/open', ['-a', 'Simulator'], { timeout: 15_000 })
     return
   } catch {
     /* try the active Xcode's own copy */
   }
   try {
-    const { stdout } = await run('/usr/bin/xcode-select', ['-p'], { timeout: 5_000 })
-    await run('/usr/bin/open', [path.join(stdout.trim(), 'Applications', 'Simulator.app')], { timeout: 15_000 })
+    const { stdout } = (await exec('/usr/bin/xcode-select', ['-p'], { timeout: 5_000 })) as { stdout: string }
+    await exec('/usr/bin/open', [path.join(String(stdout).trim(), 'Applications', 'Simulator.app')], { timeout: 15_000 })
   } catch {
     /* headless simulators — nothing to show */
   }
@@ -460,6 +505,7 @@ export async function startRun(nodeId: unknown, rawConfig: unknown, rawOpts?: un
     pythonPath,
     deviceId: config.deviceId,
     extraArgs: config.extraArgs,
+    webServer: embedsFlutterWeb(config),
     flutterPidFile: flutterPidFile(nodeId),
     tasks
   }, { attach, debugUrl })

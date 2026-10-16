@@ -374,6 +374,9 @@ import { codexCliCaps, registerCodexCliIpc } from '../core/codex-cli'
 import { registerWallpaperIpc, setWallpaperImageOps } from '../core/wallpaper'
 import { nativeImageWallpaperOps } from './wallpaper-native-image'
 import { registerRunConfigIpc, stopAllRunWatches } from '../core/run-service'
+import { registerSimulatorIpc, setSimulatorNodeRefusal, shutdownOwnedSimulators, stopAllSimulators } from '../core/simulator/simulator-service'
+import { SIMULATOR_SSH_HINT } from '../shared/simulator'
+import { stopAllRecordings } from '../core/simulator/simulator-actions'
 import {
   bindCodexThreadIdentity,
   setCodexThreadIdentityAuthSecret,
@@ -1726,6 +1729,9 @@ app.whenReady().then(async () => {
   if (process.platform === 'win32') setWallpaperImageOps(nativeImageWallpaperOps)
   registerWallpaperIpc(settingsStore)
   registerRunConfigIpc()
+  registerSimulatorIpc()
+  // A node of an SSH project would show THIS machine's devices inside another machine's project.
+  setSimulatorNodeRefusal((nodeId) => (workspaceStore.sshProjectIdForNode(nodeId) !== undefined ? `${SIMULATOR_SSH_HINT}.` : null))
   // Warm the `claude --version` probe now (it spawns a login shell + node, ~sub-second) so the
   // renderer's first `claude.cliCaps()` — awaited on the launch path of a cold-restored agent
   // node — resolves from cache instead of racing the probe into a conservative "no auto".
@@ -4271,6 +4277,9 @@ app.whenReady().then(async () => {
     revokeAllBrowser(browserRevocation, { userStopped: false })
     // Reload-on-save watchers die with the app; the runs themselves live on in tmux.
     stopAllRunWatches()
+    // Simulator views' helpers exit with their stdin; end them explicitly at quit.
+    stopAllSimulators()
+    stopAllRecordings()
   })
   ipcMain.on(
     IPC.agentControlResult,
@@ -5462,6 +5471,10 @@ app.on('before-quit', (e) => {
   // restart-to-update flushes earlier, in the updater — on macOS its windows are gone by now.
   // The renderer's save can itself queue a throttled SSH mirror write AFTER the first remote
   // flush took its snapshot, so the remote flush runs again once the renderer answered.
+  // Simulators a Simulator node booted run headless, so nothing would show them after we quit:
+  // shut those down (and only those). Started now so it overlaps the flush; it bounds itself
+  // (OWNED_SHUTDOWN_TIMEOUT_MS) and never throws, so quit is never held by a device.
+  const simulatorsDown = shutdownOwnedSimulators()
   const flush = Promise.allSettled([
     requestRendererFlush(getMainWindow()?.webContents, ipcMain).then(() => remoteWorkspaceIO.flush()),
     remoteWorkspaceIO.flush(),
@@ -5474,6 +5487,7 @@ app.on('before-quit', (e) => {
     // Napi::ThreadSafeFunction::CallJS) — see SpeechService.shutdown. It needs its own budget
     // because the 1500ms cap above is shorter than a transcription, and it costs nothing at
     // all when dictation is idle, which is nearly always.
+    .then(() => simulatorsDown)
     .then(() => speechService.shutdown())
     .finally(() => app.quit())
 })

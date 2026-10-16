@@ -69,6 +69,10 @@ export const HOST_ONLY_CHANNEL_PREFIXES: readonly string[] = [
   // Agent-integration consent status: paths in the host's home it kept or wrote. The consent itself
   // is in settings (already host-only).
   'integrations:',
+  // Simulator node: the host's iOS simulators / Android emulators — boot, erase, install, input.
+  // A relay tab never offers the node (relay-api keeps the namespace local), so a peer sending one
+  // of these is asking to drive the host's devices.
+  'simulator:',
   // `nodeterm://` links: a link clicked on THIS machine opens a node here after THIS machine's user
   // approves it. Raw ipcMain handlers (no peer reaches them); listed so a move onto the platform
   // table cannot quietly open them.

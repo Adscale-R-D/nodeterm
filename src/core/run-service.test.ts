@@ -6,12 +6,14 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { fakePlatform } from './platform-fake'
 import { initPlatform, resetPlatformForTests } from './platform'
 import {
+  bootSimulatorWith,
   discoverProjects,
   flutterPidFile,
   launcherPath,
   listEntries,
   runStatus,
   setWatch,
+  simctlSetupError,
   signalRun,
   startRun,
   stopAllRunWatches,
@@ -313,5 +315,45 @@ describe('run-service', () => {
     write('app/lib/c.dart', 'void c() {}')
     await new Promise((r) => setTimeout(r, 700))
     expect(out.match(/RELOAD/g)).toHaveLength(1)
+  })
+})
+
+describe('bootSimulatorWith', () => {
+  const UDID = '12345678-1234-1234-1234-123456789ABC'
+  function recorder(fail?: string) {
+    const calls: string[] = []
+    const exec = async (file: string, args: string[]) => {
+      calls.push([file, ...args].join(' '))
+      if (fail) throw Object.assign(new Error('x'), { stderr: fail })
+    }
+    return { calls, exec }
+  }
+
+  it('opens Simulator.app after booting, as a run node always has', async () => {
+    const r = recorder()
+    expect(await bootSimulatorWith(UDID, {}, r.exec)).toBe(true)
+    expect(r.calls).toEqual([`/usr/bin/xcrun simctl boot ${UDID}`, '/usr/bin/open -a Simulator'])
+  })
+
+  it('stays headless when the caller is the Simulator node itself', async () => {
+    const r = recorder()
+    expect(await bootSimulatorWith(UDID, { openWindow: false }, r.exec)).toBe(true)
+    expect(r.calls).toEqual([`/usr/bin/xcrun simctl boot ${UDID}`])
+  })
+
+  it('refuses an id that is not a UDID, and a boot that failed', async () => {
+    const r = recorder()
+    expect(await bootSimulatorWith('../x', {}, r.exec)).toBe(false)
+    expect(r.calls).toEqual([])
+    expect(await bootSimulatorWith(UDID, {}, recorder('No such device').exec)).toBe(false)
+  })
+})
+
+describe('simctlSetupError', () => {
+  it('turns a missing or unselected Xcode into the fix, and nothing else', () => {
+    expect(simctlSetupError(Object.assign(new Error('spawn /usr/bin/xcrun ENOENT'), { code: 'ENOENT' }))).toMatch(/xcode-select --switch/)
+    expect(simctlSetupError({ message: 'Command failed', stderr: 'xcrun: error: unable to find utility "simctl", not a developer tool or in PATH' })).toMatch(/Install Xcode/)
+    expect(simctlSetupError({ message: 'Command failed', stderr: 'xcode-select: error: tool \'xcrun\' requires Xcode, but active developer directory is a command line tools instance' })).toMatch(/xcode-select/)
+    expect(simctlSetupError({ message: 'timeout' })).toBeNull()
   })
 })

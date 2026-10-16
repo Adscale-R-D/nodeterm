@@ -63,6 +63,9 @@ Do not replace that read with a stored `agentId` or the restart heuristic's deep
 An interpreter such as `node` is named by its script's package `bin` entry, never as `node`, so
 npm-installed CLIs such as Codex are recognized. A session released by park expiry or offscreen
 release is still messageable: existence and routing ask the backend, not the attached client.
+Both Windows owner reads (session host and direct ConPTY) shell out to PowerShell and take ~2.4 s, so
+they get their own `WINDOWS_PANE_PROBE_TIMEOUT_MS` through `PtyManager.paneProbeTimeoutMs`; ssh and
+tmux keep the 2 s bound. A shell that wires agent messaging must forward that optional dep.
 Never put the submitting Enter in the same write as a message paste: `core/settled-submit.ts`
 pastes, waits for the envelope to render, then submits separately, on every backend.
 The persistent session-host transport has its own versioned messaging extension: the host checks
@@ -525,6 +528,10 @@ anything else. Board-level fields survive every transform — `pullLinks` is one
   only used cells; an xterm buffer (the renderer, the Windows session host's headless emulator,
   `NativeWindowsPane`) allocates every line at full width. Size them with `xtermScrollback` from
   `src/shared/scrollback.ts` (≤ 10k), so the host never keeps history the renderer cannot show.
+- **The app's own environment is not the panes' environment.** Whatever launched nodeterm (often an
+  agent CLI's shell) leaves markers in `process.env` that describe THAT session. `buildPtyEnv` strips
+  an explicit list (`TMUX`, `NESTED_AGENT_ENV_STRIP`); add a name there, with its measurement, rather
+  than a prefix sweep — `CLAUDE_CONFIG_DIR`/`CODEX_HOME` select managed accounts and must survive.
 
 - **A new session-host push frame must be negotiated at `hello`, never just sent.** An older
   `SessionHostClient` treats EVERY push frame whose `type` is not `data` as an exit, and a

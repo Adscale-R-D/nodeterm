@@ -399,9 +399,12 @@ function logicalLaunch(
   const sessionArgs: string[] = [];
   if (intent.newSessionId !== undefined) {
     if (!mintsSessionId(config.id)) fail("invalid-intent");
-    // `withSessionId`'s grammar: copilot's verified contract is `--session-id=<uuid>` (1.0.80).
+    // `withSessionId`'s grammar: copilot's verified contract is `--session-id=<uuid>` (1.0.80);
+    // cursor mints by resuming an id that does not exist yet (see withSessionId in shared/agents/launch).
     if (config.id === "copilot")
       sessionArgs.push(`--session-id=${intent.newSessionId}`);
+    else if (config.id === "cursor")
+      sessionArgs.push("--resume", intent.newSessionId);
     else sessionArgs.push("--session-id", intent.newSessionId);
   }
 

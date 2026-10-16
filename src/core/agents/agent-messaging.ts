@@ -143,7 +143,7 @@ export interface AgentMessagingDeps {
   /** Per-target pane-read budget; see `DeliveryDeps.paneProbeTimeoutMs`. Optional — absent keeps
    *  the 2s default for every target, i.e. exactly the pre-existing behaviour. */
   paneProbeTimeoutMs?(nodeId: string): number
-  sendEnvelope(nodeId: string, envelope: string, expected?: PaneOwner): Promise<boolean>
+  sendEnvelope(nodeId: string, envelope: string, expected?: PaneOwner): Promise<boolean | 'dialog'>
   envelopePasteReady?(nodeId: string): Promise<boolean>
   /**
    * Does a session exist for this node at all — attached in this process OR held by a backend

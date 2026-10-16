@@ -30,6 +30,7 @@ function fakeCtx(nodes: CanvasNode[], over: Partial<NodeActionCtx> = {}): NodeAc
     gatewayStatus: 'idle',
     gatewayError: '',
     grokModels: () => [],
+    cursorModels: () => [],
     addToExistingGroup: noop,
     groupSelection: noop,
     removeFromGroup: noop,

@@ -197,6 +197,11 @@ export function skillRootsFor(
       return [path.join(copilotHomeDir(), 'skills')]
     case 'opencode':
       return [path.join(opencodeConfigDir(), 'skills')]
+    // cursor-agent's bundle loads `~/.cursor/skills` before `~/.claude/skills` (docs/cursor-agent.md),
+    // so its own dir keeps canvas control working when claude is declined, and ahead of the tail
+    // its long-skill-list truncation drops.
+    case 'cursor':
+      return [path.join(home, '.cursor', 'skills')]
     default:
       return []
   }
@@ -245,7 +250,8 @@ const HOOK_SCRIPTS: Partial<Record<IntegrationAgentId, string[]>> = {
   gemini: ['gemini.sh', 'gemini-hook.cmd'],
   grok: ['grok.sh', 'grok-hook.cmd'],
   copilot: ['copilot.sh', 'copilot-hook.cmd'],
-  antigravity: ['antigravity.sh', 'antigravity-hook.cmd']
+  antigravity: ['antigravity.sh', 'antigravity-hook.cmd'],
+  cursor: ['cursor.sh']
 }
 
 export interface IntegrationLifecycle {

@@ -1791,7 +1791,9 @@ number: change the table in that one module, never in one emulator.
   of a text field elsewhere; a lazy-loading or disabled composer takes it when it mounts/enables,
   and an exit cancels the request); leaving it restores focus
   only if the terminal had it on entry AND focus is now nowhere or still inside this node
-  (`terminal/useMdModeFocus.ts`). While the view is open, every "take the keyboard" path (hover
+  (`terminal/useMdModeFocus.ts`). The open view is PERSISTED (`CanvasNodeState.mdMode`, written only
+  when open), so a project switch or a reload brings the node back on the view it was left on.
+  While the view is open, every "take the keyboard" path (hover
   dwell, click, sidebar/notification jump) goes through `focusXtermUnlessCovered` and leaves the
   hidden xterm unfocused — the overlay sits inside the node body, so a dwell over it used to route
   keystrokes into a pane nobody could see. The body's file DROP / file PASTE handlers (which focus

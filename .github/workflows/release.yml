@@ -386,8 +386,16 @@ jobs:
           check() {
             f="$1"; level="$2"; got=""
             while :; do
+              # `|| true` is load-bearing: GitHub runs this step under `bash -eo pipefail`, so a
+              # mirror that 404s makes `curl -f` exit non-zero, pipefail hands that to the
+              # assignment and `-e` kills the whole step on the FIRST attempt — no retry, no
+              # ::error::, no ::warning::, exit 22 and an empty log. A MISSING file is the case this
+              # job was written for (latest.yml 404'd on the mirror for v0.4.3) and the one the
+              # '<missing>' default below was always meant to report; advisory also has to mean
+              # advisory when the file is absent, not just when it is stale. It covers the EPIPE
+              # from `head -n 1` closing the pipe early for the same reason.
               got=$(curl -fsSL --max-time 20 "$FEED/$f" 2>/dev/null \
-                | sed -n 's/^version:[[:space:]]*//p' | head -n 1 | tr -d "\"' \r")
+                | sed -n 's/^version:[[:space:]]*//p' | head -n 1 | tr -d "\"' \r" || true)
               if [ "$got" = "$want" ]; then
                 echo "$FEED/$f serves $got"
                 return 0

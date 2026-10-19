@@ -30,6 +30,9 @@ Run `npm run rebuild`. node-pty 1.1.0 leaks a pty device per spawn on macOS
 conhost alive per killed session (its exit thread deletes the ConPTY baton without closing the
 HPCON); we patch both sources before `electron-rebuild` compiles them, and that test guards the
 patches surviving upgrades.
+After the rebuild, `scripts/stage-conpty-dll.mjs` copies node-pty's bundled `conpty.dll` +
+`OpenConsole.exe` back beside `build/Release/conpty.node` on Windows (the rebuild deletes them);
+without them Windows terminals fall back to the inbox ConPTY, where a fullscreen TUI cannot scroll.
 
 ## Where code goes
 

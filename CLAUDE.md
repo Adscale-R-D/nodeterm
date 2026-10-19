@@ -52,6 +52,13 @@ means — and what you may assume when writing a feature — is three tiers, not
   `gateEntriesForPlatform` marks those entries unsupported with `RUN_WINDOWS_REASON` (browser
   configs and browser-only compounds still run), and the add menu / Dock disable the row (the palette hides it)
   from the core's own platform (`useCoreIsWindows`). A pwsh launcher is the follow-up.
+- **Windows terminals run on node-pty's BUNDLED ConPTY when it is installed**
+  (`windowsConptySpawnOptions`, `src/core/windows-conpty-dll.ts`, spread into both `pty.spawn`
+  sites). Windows 10's inbox ConPTY swallows mouse-tracking and alternate-screen modes, so a
+  fullscreen TUI could not be scrolled. The DLL is looked up exactly where node-pty's native loader
+  looks (beside the loaded `conpty.node`), restaged after `electron-rebuild` wipes `build/`
+  (`scripts/stage-conpty-dll.mjs`), and missing ⇒ the inbox ConPTY. Details + device checklist:
+  docs/windows-session-host.md, "Which ConPTY".
 - **New code is platform-neutral by default.** Do not hardcode POSIX assumptions. Publish files
   through `renameAtomic`/`writeFileAtomic` (`src/core/fs-atomic.ts`), not a bare `fs.rename` — the
   guard test (`fs-atomic.guard.test.ts`) enforces this. Resolve path separators / absolute-path

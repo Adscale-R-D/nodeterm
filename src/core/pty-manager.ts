@@ -69,6 +69,7 @@ import {
 import { RemoteSessionIndex, type SessionVerdict } from './remote-ssh/remote-session-index'
 import { isSshProgram, nativeExecFileAsync, nativeMux, resolveSshProgram, useNativeSsh } from './remote-ssh/native/native-runtime'
 import { NativeSshPty } from './remote-ssh/native/native-pty'
+import { windowsConptySpawnOptions } from './windows-conpty-dll'
 import { remotePtySpawnGate, type SpawnSlot } from './remote-ssh/pty-spawn-gate'
 import type { SshConnection } from '../shared/ssh'
 import { recordPendingRemoteKill, type PendingRemoteKill } from './pending-remote-kills'
@@ -4926,7 +4927,10 @@ export class PtyManager {
                 cols: options.cols,
                 rows: options.rows,
                 cwd: spawnCwd,
-                env
+                env,
+                // Win32 only: node-pty's bundled ConPTY when present (see windows-conpty-dll.ts);
+                // `{}` on every other platform, so the options are byte-identical there.
+                ...windowsConptySpawnOptions()
               })
       } catch (err) {
         // node-pty surfaces the underlying failure as a bare "posix_spawnp failed." with no errno.

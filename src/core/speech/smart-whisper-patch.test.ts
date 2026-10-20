@@ -14,14 +14,15 @@ import { testTmpDir } from '../test-tmp'
  */
 const PKG = path.resolve(__dirname, '../../../node_modules/smart-whisper')
 const installed = fs.existsSync(path.join(PKG, 'binding.gyp'))
-/** Pristine smart-whisper 0.8.1 binding.gyp + the loader lines of its dist/index.js. */
+/** Pristine smart-whisper 0.8.1 binding.gyp + the loader lines of its dist/index.js (dist-index.js). */
 const FIXTURE = path.resolve(__dirname, '__fixtures__/smart-whisper-0.8.1')
 
 function copyPackage(): string {
   const dir = testTmpDir('sw-patch-')
   fs.mkdirSync(path.join(dir, 'dist'), { recursive: true })
   fs.copyFileSync(path.join(FIXTURE, 'binding.gyp'), path.join(dir, 'binding.gyp'))
-  fs.copyFileSync(path.join(FIXTURE, 'dist', 'index.js'), path.join(dir, 'dist', 'index.js'))
+  // Stored flat: the repo's .gitignore drops every dist/ directory.
+  fs.copyFileSync(path.join(FIXTURE, 'dist-index.js'), path.join(dir, 'dist', 'index.js'))
   return dir
 }
 

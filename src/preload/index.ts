@@ -4,6 +4,7 @@ import { IPC } from '../shared/ipc'
 import type { AlertSoundKind } from '../shared/alert-sound'
 import { resolveUiScale } from '../shared/ui-scale'
 import type { RecentConversationsRequest } from '../shared/recent-conversations'
+import type { OpenLinkChoice, OpenLinkPrompt } from '../shared/open-link'
 import type {
   CanvasMutation,
   CanvasState,
@@ -112,11 +113,14 @@ const api: NodeTerminalApi = {
       ipcRenderer.invoke(IPC.ptySendText, persistKey, text, opts?.enter),
     sendChatPrompt: (persistKey, text, agentId) =>
       ipcRenderer.invoke(IPC.ptySendChatPrompt, persistKey, text, agentId),
+    sendToEmptyPrompt: (persistKey, text, agentId) =>
+      ipcRenderer.invoke(IPC.ptySendToEmptyPrompt, persistKey, text, agentId),
     tmuxStatus: () => ipcRenderer.invoke(IPC.ptyTmuxStatus),
-    paneCommand: (persistKey) => ipcRenderer.invoke(IPC.ptyPaneCommand, persistKey),
+    paneCommand: (persistKey, opts) => ipcRenderer.invoke(IPC.ptyPaneCommand, persistKey, opts),
     paneCwd: (persistKey) => ipcRenderer.invoke(IPC.ptyPaneCwd, persistKey),
+    sendPaneKeys: (nodeId, data) => ipcRenderer.invoke(IPC.ptySendPaneKeys, nodeId, data),
     launchHeadless: (req) => ipcRenderer.invoke(IPC.ptyLaunchHeadless, req),
-    paneOwner: (persistKey) => ipcRenderer.invoke(IPC.ptyPaneOwner, persistKey),
+    paneOwner: (persistKey, opts) => ipcRenderer.invoke(IPC.ptyPaneOwner, persistKey, opts),
     executeLaunch: (persistKey, request) => ipcRenderer.invoke(IPC.ptyExecuteLaunch, persistKey, request),
     terminateForeground: (persistKey, expectedAgentId) =>
       ipcRenderer.invoke(IPC.ptyTerminateForeground, persistKey, expectedAgentId),
@@ -162,6 +166,8 @@ const api: NodeTerminalApi = {
   workspace: {
     load: () => ipcRenderer.invoke(IPC.workspaceLoad),
     save: (workspace: Workspace, opts?: WorkspaceSaveOptions) => ipcRenderer.invoke(IPC.workspaceSave, workspace, opts),
+    claimLaunch: (nodeId: string, command: string, manual: boolean) =>
+      ipcRenderer.invoke(IPC.workspaceClaimLaunch, nodeId, command, manual),
     probeFolder: (folder: string) => ipcRenderer.invoke(IPC.workspaceProbeFolder, folder),
     projectFileState: (folder: string) => ipcRenderer.invoke(IPC.workspaceProjectFileState, folder),
     onMigrated: (cb: (kind: WorkspaceMigrationKind) => void) => {
@@ -580,12 +586,38 @@ const api: NodeTerminalApi = {
     load: (w) => ipcRenderer.invoke(IPC.wallpaperLoad, w),
     importImage: (p) => ipcRenderer.invoke(IPC.wallpaperImport, p)
   },
+  simulator: {
+    devices: (refresh) => ipcRenderer.invoke(IPC.simulatorDevices, refresh === true),
+    boot: (id) => ipcRenderer.invoke(IPC.simulatorBoot, id),
+    start: (nodeId, udid) => ipcRenderer.invoke(IPC.simulatorStart, nodeId, udid),
+    stop: (nodeId) => ipcRenderer.invoke(IPC.simulatorStop, nodeId),
+    input: (nodeId, cmd) => ipcRenderer.invoke(IPC.simulatorInput, nodeId, cmd),
+    shutdown: (udid) => ipcRenderer.invoke(IPC.simulatorShutdown, udid),
+    action: (udid, action) => ipcRenderer.invoke(IPC.simulatorAction, udid, action),
+    state: (udid) => ipcRenderer.invoke(IPC.simulatorState, udid),
+    screenshot: (udid, screenID, target, name) => ipcRenderer.invoke(IPC.simulatorScreenshot, udid, screenID, target, name),
+    startRecording: (udid, screenID, name) => ipcRenderer.invoke(IPC.simulatorRecordStart, udid, screenID, name),
+    stopRecording: (udid) => ipcRenderer.invoke(IPC.simulatorRecordStop, udid),
+    isRecording: (udid) => ipcRenderer.invoke(IPC.simulatorRecording, udid),
+    onFrame: (nodeId, listener) => {
+      const channel = IPC.simulatorFrame(nodeId)
+      const handler = (_e: unknown, frame: import('../shared/simulator').SimulatorFrame) => listener(frame)
+      ipcRenderer.on(channel, handler)
+      return () => ipcRenderer.removeListener(channel, handler)
+    },
+    onStatus: (nodeId, listener) => {
+      const channel = IPC.simulatorStatus(nodeId)
+      const handler = (_e: unknown, event: import('../shared/simulator').SimulatorStatusEvent) => listener(event)
+      ipcRenderer.on(channel, handler)
+      return () => ipcRenderer.removeListener(channel, handler)
+    }
+  },
   runConfig: {
     entries: (dir) => ipcRenderer.invoke(IPC.runEntries, dir),
     devices: (refresh) => ipcRenderer.invoke(IPC.runDevices, refresh),
     bootDevice: (udid) => ipcRenderer.invoke(IPC.runBootDevice, udid),
     discoverProjects: (dir) => ipcRenderer.invoke(IPC.runDiscover, dir),
-    start: (nodeId, config) => ipcRenderer.invoke(IPC.runStart, nodeId, config),
+    start: (nodeId, config, opts) => ipcRenderer.invoke(IPC.runStart, nodeId, config, opts),
     status: (nodeId) => ipcRenderer.invoke(IPC.runStatus, nodeId),
     stop: (nodeId, force) => ipcRenderer.invoke(IPC.runStop, nodeId, force),
     signal: (nodeId, kind) => ipcRenderer.invoke(IPC.runSignal, nodeId, kind),
@@ -648,6 +680,9 @@ const api: NodeTerminalApi = {
   grok: {
     cliCaps: () => ipcRenderer.invoke(IPC.grokCliCaps),
     takenSessionIds: (cwd) => ipcRenderer.invoke(IPC.grokTakenSessionIds, cwd)
+  },
+  cursor: {
+    cliCaps: () => ipcRenderer.invoke(IPC.cursorCliCaps)
   },
   agent: {
     envSnapshot: () => ipcRenderer.invoke(IPC.envSnapshot),
@@ -851,6 +886,16 @@ const api: NodeTerminalApi = {
     // far side: main starts at "not focused" and the three page-death resets return it there, so a
     // report that never arrives costs the terminal-first policy, not the app's shortcuts.
     setTerminalFocused: (focused: boolean) => ipcRenderer.send(IPC.uiTerminalFocus, focused)
+  },
+  // `nodeterm://` links (main/open-link.ts). `ready` tells main to deliver links that arrived
+  // before the renderer was listening (a link that cold-started the app).
+  openLink: {
+    ready: () => ipcRenderer.send(IPC.openLinkReady),
+    onRequest: subscribe<[OpenLinkPrompt]>(IPC.openLinkRequest),
+    onPair: subscribe<[{ kind: 'pair' | 'join'; url: string }]>(IPC.openLinkPair),
+    onNotice: subscribe<[{ text: string }]>(IPC.openLinkNotice),
+    accept: (id: string, choice: OpenLinkChoice) => ipcRenderer.invoke(IPC.openLinkAccept, { id, choice }),
+    cancel: (id: string) => ipcRenderer.send(IPC.openLinkCancel, id)
   },
   onMarkdownToggle: subscribe(IPC.appToggleMarkdown),
   onCloseNode: subscribe(IPC.appCloseNode),

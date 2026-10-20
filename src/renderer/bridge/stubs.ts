@@ -17,6 +17,7 @@
 import {
   UNKNOWN_CLAUDE_CLI_CAPS,
   UNKNOWN_GROK_CLI_CAPS,
+  UNKNOWN_CURSOR_CLI_CAPS,
   UNKNOWN_CODEX_IDENTITY_CAPS,
   UNKNOWN_CODEX_CLI_CAPS,
   type ClaudeUsage,
@@ -353,6 +354,25 @@ export function buildStubApi(): Omit<
       load: () => Promise.resolve(null),
       importImage: U('wallpaper.importImage')
     },
+    simulator: {
+      devices: () => Promise.resolve({ devices: [] }),
+      boot: () => Promise.resolve({ ok: false as const, error: 'Simulator views are only available in the desktop app.' }),
+      // DESKTOP only, deliberately not bridged: the helper talks to the simulator frameworks
+      // of the machine it runs on, and a Server Edition / relay tab's canvas is on another one. The
+      // node is not offered there; these say why if reached anyway.
+      start: () => Promise.resolve({ ok: false as const, error: 'Simulator views are only available in the desktop app.' }),
+      stop: () => Promise.resolve(),
+      input: () => Promise.resolve(false),
+      shutdown: () => Promise.resolve(false),
+      action: () => Promise.resolve({ ok: false as const, error: 'Simulator views are only available in the desktop app.' }),
+      state: () => Promise.resolve({}),
+      screenshot: () => Promise.resolve({ ok: false as const, error: 'Simulator views are only available in the desktop app.' }),
+      startRecording: () => Promise.resolve({ ok: false as const, error: 'Simulator views are only available in the desktop app.' }),
+      stopRecording: () => Promise.resolve({ ok: false as const, error: 'Not recording.' }),
+      isRecording: () => Promise.resolve(false),
+      onFrame: () => () => {},
+      onStatus: () => () => {}
+    },
     runConfig: {
       // Superseded by the real WS-backed namespace in ws-bridge (registerRunConfigIpc runs in the
       // server shell). A RELAY tab keeps this: its terminals run on the PEER, so this machine's
@@ -406,6 +426,10 @@ export function buildStubApi(): Omit<
       // Nothing taken is the honest answer where no shell can look, and it degrades to today's
       // behaviour: mint freely. Overridden by the real WS-backed namespace in ws-bridge.
       takenSessionIds: () => Promise.resolve([])
+    },
+    cursor: {
+      // Overridden by the real WS-backed namespace in ws-bridge. Never rejects: empty = no picker.
+      cliCaps: () => Promise.resolve(UNKNOWN_CURSOR_CLI_CAPS)
     },
     agent: {
       // No env snapshot outside the desktop window: the stub (and ws-bridge, identically) answers
@@ -561,6 +585,16 @@ export function buildStubApi(): Omit<
       // stand down. The policy itself still works in the browser — it is enforced by the
       // renderer's own dispatcher (`keyDispatchContextFor`), which reads focus directly.
       setTerminalFocused: noop
+    },
+    // Deliberate degrade: `nodeterm://` links are an OS URL-scheme registration, which only the
+    // desktop app has. Nothing ever fires here; accept refuses.
+    openLink: {
+      ready: noop,
+      onRequest: noopUnsub,
+      onPair: noopUnsub,
+      onNotice: noopUnsub,
+      accept: U('openLink.accept'),
+      cancel: noop
     },
     // REAL, not a stub: a browser tab has no main process to intercept ⌘/Ctrl+M, so the chord is
     // matched by a window keydown listener here (bindings, terminal-first stand-down and focus all

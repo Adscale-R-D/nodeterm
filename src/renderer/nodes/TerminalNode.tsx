@@ -1,6 +1,7 @@
 import { elementOnScreen } from '../terminal/on-screen'
 import { useContextEnsure } from '../terminal/useContextEnsure'
 import { canPlainApprove, sendHeaderAnswer } from '../lib/approveGate'
+import { isLocalOnSshCanvas } from '../lib/localOnSshCanvas'
 import { FIND_DECORATIONS } from '../lib/palette'
 import { ptyRefusal } from '@shared/pty-refusal'
 
@@ -126,6 +127,7 @@ import {
 } from '../terminal/window-backgrounded'
 import { quantizeCharSize } from '../terminal/char-size-quantize'
 import { resyncDomRendererSpacing } from '../terminal/dom-renderer-spacing'
+import { patchViewportScrollSync } from '../terminal/viewport-scroll-sync'
 import {
   parkCap,
   parkWindowMs,
@@ -274,7 +276,7 @@ import { useCodexIdentity, codexSharedIdentity, codexFallbackText } from '../sta
 import { ensureCodexLaunchCaps } from '../state/codexCli'
 import { useAgentStatus, agentStatusForApi, inferInterruptAfterSettle } from '../state/agentStatus'
 import { useLaunchDelivery } from '../state/launchDelivery'
-import { erroredDeps, handedOverDeps, holdReason, interruptedDeps, launchTooltip } from '../lib/pendingLaunch'
+import { erroredDeps, firstOpenInFlight as isFirstOpenInFlight, handedOverDeps, holdReason, interruptedDeps, launchTooltip } from '../lib/pendingLaunch'
 import { useStationHandovers } from '../state/stationHandovers'
 import { useSuccessWait } from '../lib/useSuccessWait'
 import { StationFailedChip } from '../components/StationFailedChip'
@@ -2140,18 +2142,9 @@ export function TerminalNode({
   // A headless start (#925) is typing this node's launch from core: the badge says so, without the
   // warning, and ▶ stands aside — a click would splice a second copy into the pane.
   const startingNow = launchDelivery?.kind === 'starting'
-  // A node's own first-open launch is in flight: the live `initialCommand` alias is still set
-  // (it is cleared on every outcome) and nothing holds it. Its `pendingLaunch` is only the durable
-  // write-ahead record — and it carries `manualOnly` from the claim until Enter lands — so showing
-  // the chip here painted "⚠ QUEUED" on EVERY freshly opened agent for the length of its delivery.
-  // A real hold (deps, setup script) or a reported failure/stall still shows.
-  const firstOpenInFlight =
-    !!data.initialCommand &&
-    !observedLaunchDelivery &&
-    !(pendingLaunch?.after?.length) &&
-    !pendingLaunch?.awaitSetupGroup &&
-    !pendingLaunch?.afterPr &&
-    !pendingLaunch?.afterSuccess
+  // A node's own first-open launch still in flight hides the chip (lib/pendingLaunch — the board
+  // card asks the same predicate).
+  const firstOpenInFlight = isFirstOpenInFlight(!!data.initialCommand, pendingLaunch, observedLaunchDelivery)
   // `--after-success`: where the wait stands (lib/useSuccessWait — the hold through the shape rule,
   // its stations, and the tooltip, which flips to EXPIRED on its own deadline tick).
   const successWait = useSuccessWait(
@@ -3226,6 +3219,7 @@ export function TerminalNode({
       if (term.element) container.appendChild(term.element)
       // A link tooltip showing when the terminal parked would otherwise reappear where it was.
       if (term.element) hideLinkHints(term.element)
+      patchViewportScrollSync(term)
       applyFit()
     } else {
       term.loadAddon(fit)
@@ -3235,6 +3229,7 @@ export function TerminalNode({
       // Renderer-parity: quantize the char measurement to the device-pixel grid, so a budget
       // grant/release swaps renderers without the text visibly reflowing (see the helper).
       quantizeCharSize(term)
+      patchViewportScrollSync(term)
       applyFit()
       // Reads the STORE, not the component's focusedRef: a parked terminal keeps the closure
       // from the instance that created it, and a ref from a dead instance never updates — the
@@ -3497,6 +3492,13 @@ export function TerminalNode({
     // to the still-live session on first mount); everything below that pushes here is gated on
     // `!parked` so nothing is wired twice.
     const cleanups: Array<() => void> = parked ? parked.cleanups : []
+    // nodeterm itself just delivered this node's resume/relaunch line (in-place restart, wake from
+    // Pause/Eco, and the cold-restore relaunch a model switch or "restart agent and shell" recycles
+    // into). The exit our own quit recorded (`sessionEnded`) no longer describes the pane. Claude
+    // would clear it on its SessionStart anyway; cursor fires none on `--resume`, so without this the
+    // chat composer and the phone keep refusing a running CLI as "exited" until its next turn.
+    // note: a sessionEnd POST that lands after the relaunch re-sets it; none has been observed.
+    const markRelaunched = (): void => useAgentStatus.getState().setSessionEnded(id, false)
 
     // Copy-on-select (issue #759). REGISTERED ONCE, at construction, and disposed WITH THE TERMINAL
     // — the OSC 52 handler's lifecycle, not a per-mount one: its only persistent listener lives on
@@ -3644,7 +3646,10 @@ export function TerminalNode({
           sshRemote,
           // Belt AND braces: the guard above cannot see a `ssh` executable that has gone missing,
           // which is core's other route into the local branch.
-          requireRemote: sshRemoteTmux
+          requireRemote: sshRemoteTmux,
+          // The one local terminal an SSH project's canvas may hold (issue #1186): core refuses
+          // every other local spawn owned by an SSH project. In-memory mark, never node data.
+          ...(isLocalOnSshCanvas(id) ? { localOnSshCanvas: true } : {})
         })
         .then(
         async ({
@@ -4058,6 +4063,7 @@ export function TerminalNode({
                   if (outcome === 'line-too-long') {
                     setCo(termKey, { launchTooLongBytes: lineBytes(cmd) })
                   }
+                  if (outcome === 'submitted') markRelaunched()
                 },
                 { killLine: getTerminalKillLine() }
               )
@@ -4622,7 +4628,8 @@ export function TerminalNode({
           onDelivery: (cancel) => {
             if (life.dead) cancel()
             else cleanups.push(cancel)
-          }
+          },
+          onResumed: markRelaunched
         })
       })
     )
@@ -4808,7 +4815,8 @@ export function TerminalNode({
           onDelivery: (cancel) => {
             if (life.dead) cancel()
             else cleanups.push(cancel)
-          }
+          },
+          onResumed: markRelaunched
         })
       })
     })
@@ -6649,7 +6657,7 @@ export function TerminalNode({
           sessions only — a relay tab's or an SSH node's terminal runs on another machine, whose
           checkouts and devices this one cannot see. */}
       {data.runConfig && session.source === 'local' && !data.ssh && !data.sshRemoteTmux && (
-        <RunBar nodeId={id} config={data.runConfig} autoStart={!!data.runAutoStart} />
+        <RunBar nodeId={id} config={data.runConfig} autoStart={!!data.runAutoStart} simulator={data.runSimulator} browser={data.runBrowser} />
       )}
 
       {/* Body always mounted (keeps xterm alive); hidden via CSS when collapsed. */}

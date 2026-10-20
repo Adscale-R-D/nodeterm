@@ -1,4 +1,6 @@
 import { registerUpdatePrepIpc } from './update-prep'
+import { installOpenLinks } from './open-link-wiring'
+import { nodetermUrlFromArgv } from '../shared/open-link'
 import { createRemoteContextEnsure } from '../core/remote-context-ensure'
 import { isKnownRemoteCodexAccount } from '../core/remote-ssh/codex-home'
 import { createRemoteCodexContext, type RemoteCodexContextTarget } from '../core/remote-ssh/codex-context'
@@ -81,6 +83,7 @@ import {
   isDeliverRequest,
   messagingEnabledVia,
   onMessagingAgentEvent,
+  ptyPaneProbeDeps,
   setDeliveryQueue,
   type AgentMessagingDeps
 } from '../core/agents/agent-messaging'
@@ -277,18 +280,21 @@ import { createBackgroundTray, type BackgroundTray } from './tray'
 import { normalizeUnread, trayIconPath, type TrayState } from './tray-model'
 import { planBadge, rasterizeBadge } from './taskbar-badge'
 import { createSubagentTail } from '../core/subagent-tail'
+import { createCursorSubagentTracker } from '../core/cursor-subagents'
 import { ClaudeSubagentLifecycle } from '../core/claude-subagent-lifecycle'
 import { claudeSubagentTranscriptPath, isClaudeAgentId } from '../shared/agents/claude-subagents'
 import { createContextTail, type TaskNotification } from '../core/context-tail'
 import { registerContextEnsureIpc } from '../core/context-ensure'
 import { grokContextParse, GROK_SIGNALS_FILE } from '../core/grok-signals'
+import { applyCursorRaw, cursorContextParse, readCursorContextSource, releaseCursorRaw } from '../core/cursor-chat'
 import { GROK_CHAT_HISTORY_FILE } from '../core/agents/grok-paths'
 import { createGrokSubagentFormatter } from '../core/grok-subagent-format'
 import { geminiContextParse } from '../core/gemini-session'
+import { antigravityContextParse, rememberAntigravityModel } from '../core/antigravity-session'
 import { codexContextParse, codexContextModel } from '../core/codex-session'
 import { createCodexSubagentFormatter } from '../core/codex-subagent-format'
 import { codexHome } from '../core/usage/codex-usage'
-import { isAsyncSubagentLaunch, grokRawFields, type NormalizedAgentEvent } from '../shared/agents/normalize'
+import { isAsyncSubagentLaunch, isCursorPayload, grokRawFields, type NormalizedAgentEvent } from '../shared/agents/normalize'
 import { applyGrokHookSession } from '../core/grok-hook-session'
 import { agentAccountColor } from '../shared/agents/account-color'
 import { capabilityAgentId } from '../shared/agents/config'
@@ -336,10 +342,11 @@ import { sessionName } from '../core/tmux-naming'
 import { posixQuote, sshHostKey, type SshConnection } from '../shared/ssh'
 import { buildHandoff, type HandoffRemote } from './handoff'
 import { contextLinkShimPath, initContextLink, setNodeTranscript } from '../core/context-link'
+import { wireClaudePaneOrigin } from '../core/agents/claude-pane-origin'
 import { transcriptPathOf } from '../core/context-link-core'
 import { initCanvasControl, canvasControlShimPath } from './canvas-control'
 import { DRY_RUN_VERBS, dryRunRequested, dryRunRefusal } from '../shared/control-verbs'
-import { issueFlagRefusal } from '../core/canvas-control-core'
+import { browserFlagRefusal, issueFlagRefusal } from '../core/canvas-control-core'
 import { afterPrFlagRefusal } from '../shared/pr-wait'
 import { arrangeArgsRefusal } from '../shared/arrange-verb'
 import { CONTROL_REQUEST_TIMEOUT_MS } from '../shared/control-confirm'
@@ -365,11 +372,15 @@ import { initCodexAccounts } from './codex-accounts'
 import { claudeCliCaps, registerClaudeCliIpc, type ClaudeCliCaps } from '../core/claude-cli'
 import type { CodexCliCaps } from '../shared/types'
 import { registerGrokCliIpc } from '../core/grok-cli'
+import { registerCursorCliIpc } from '../core/cursor-cli'
 import { refreshCodexIdentityCaps, registerCodexIdentityIpc } from '../core/codex-identity-caps'
 import { codexCliCaps, registerCodexCliIpc } from '../core/codex-cli'
 import { registerWallpaperIpc, setWallpaperImageOps } from '../core/wallpaper'
 import { nativeImageWallpaperOps } from './wallpaper-native-image'
 import { registerRunConfigIpc, stopAllRunWatches } from '../core/run-service'
+import { registerSimulatorIpc, setSimulatorNodeRefusal, shutdownOwnedSimulators, stopAllSimulators } from '../core/simulator/simulator-service'
+import { SIMULATOR_SSH_HINT } from '../shared/simulator'
+import { stopAllRecordings } from '../core/simulator/simulator-actions'
 import {
   bindCodexThreadIdentity,
   setCodexThreadIdentityAuthSecret,
@@ -536,6 +547,9 @@ let terminalFocused = false
 const clearRendererKeyState = (): void => {
   shortcutRecording = false
   terminalFocused = false
+  // The same page death ends the `nodeterm://` link listener: hold links again until the next page
+  // says it is ready (a link must not be sent into a renderer that is not there to show it).
+  openLinks.notReady()
   // The menu leg follows the same state, so it must follow it here too — otherwise a crash or a
   // reload while stood down would leave Window ▸ Minimize disabled with nothing left to re-enable
   // it, i.e. ⌘M dead app-wide. Safe before any window exists: it no-ops without a menu.
@@ -660,6 +674,10 @@ ptyManager.setRemoteNodeOwner((nodeId) => {
     remote: ref ? { conn: ref.conn, controlPath: ref.controlPath } : undefined
   }
 })
+// The core half of "a remote node is never spawned locally" for a node whose OWN fields do not say
+// it is remote (issue #1186): those fields arrive through the SSH project's shared file, which the
+// host's desktop also writes. The owning project's index entry is the machine-local fact.
+ptyManager.setSshProjectCheck((projectId) => workspaceStore.sshProjectIds().includes(projectId))
 // WHERE a phone's relay `pty.attach` runs, and with what env — decided in core
 // (`PtyManager.prepareRelayAttach` / `core/relay-attach-plan.ts`) from THIS machine's records, never
 // from the phone's words. Before this the relay attach ran `tmux new-session -A` on the LOCAL socket
@@ -927,15 +945,65 @@ const nodeSubagents = new Map<string, Set<string>>() // nodeId → active subage
 // "[detached (from session ...)]" dead terminals. Bail out and focus the existing window
 // instead. (This guards against a stray real GUI launch.)
 const gotSingleInstanceLock = NT_MULTI || app.requestSingleInstanceLock()
+
+/** Bring the window forward because the USER launched us again: a second launch, or a click on a
+ *  `nodeterm://` link (which reaches us as a second launch on Windows/Linux, `open-url` on macOS).
+ *  The one raise both share — see window-raise.guard.test.ts. */
+function raiseForUserLaunch(): void {
+  const win = getMainWindow()
+  if (!win) return
+  if (win.isMinimized()) win.restore()
+  win.show()
+  win.focus()
+}
+
+// `nodeterm://` links (main/open-link.ts). Created before `ready` so a link that cold-starts the app
+// is held until the renderer says it is listening. NT_MULTI dev sandboxes take links only when
+// asked (NODETERM_DEV_PROTOCOL=1, for a live test beside the installed app) and never register the
+// scheme: it belongs to the real app.
+const openLinks = installOpenLinks({
+  userDataDir: () => app.getPath('userData'),
+  indexEntries: () => workspaceStore.linkProjectEntries(),
+  loadIndex: () => workspaceStore.load({ sideline: false }),
+  raise: raiseForUserLaunch,
+  enabled: () => settingsStore.get().allowOpenLinks === true
+})
+const linksEnabled = !NT_MULTI || process.env.NODETERM_DEV_PROTOCOL === '1'
+if (linksEnabled) {
+  // macOS delivers a clicked link as `open-url`, including the one that launched the app — which
+  // is why the listener goes on in `will-finish-launching`, before `ready`.
+  app.on('will-finish-launching', () => {
+    app.on('open-url', (event, url) => {
+      event.preventDefault()
+      openLinks.receive(url)
+    })
+  })
+  // Windows/Linux: the link that launched us is on our own argv.
+  const coldLink = nodetermUrlFromArgv(process.argv)
+  if (coldLink) openLinks.receive(coldLink)
+  // Register as the scheme's handler. A packaged build always; a dev run only when asked
+  // (NODETERM_DEV_PROTOCOL=1), because registering the bare Electron binary would take the scheme
+  // away from the installed app until it next launches.
+  if (app.isPackaged) {
+    app.setAsDefaultProtocolClient('nodeterm')
+  } else if (!NT_MULTI && process.env.NODETERM_DEV_PROTOCOL === '1' && process.argv[1]) {
+    app.setAsDefaultProtocolClient('nodeterm', process.execPath, [resolve(process.argv[1])])
+  }
+}
+
 if (!gotSingleInstanceLock) {
   app.quit()
 } else {
-  app.on('second-instance', () => {
-    const win = getMainWindow()
-    if (!win) return
-    if (win.isMinimized()) win.restore()
-    win.show()
-    win.focus()
+  app.on('second-instance', (_event, argv) => {
+    // Windows/Linux: a link clicked while we run starts a second instance carrying it. The link
+    // service raises the window itself when it has something to show, so a rate-limited link (or
+    // one while links are off) does not pull the window forward.
+    const url = nodetermUrlFromArgv(argv)
+    if (url && linksEnabled) {
+      openLinks.receive(url)
+      return
+    }
+    if (!url) raiseForUserLaunch()
   })
 }
 
@@ -1596,8 +1664,9 @@ app.whenReady().then(async () => {
     console.warn('[model-gateway] could not migrate the legacy API key to secret storage', error)
   }
   // Agent-integration consent (issue #744): an install from before this feature (our own hook
-  // scripts / shims are on disk) is grandfathered as enabled, so nobody's badges or canvas control
-  // silently stop on upgrade. Decided BEFORE the renderer can load settings and before any install.
+  // scripts are on disk) is grandfathered as enabled, so nobody's badges or canvas control silently
+  // stop on upgrade. Decided BEFORE the renderer can load settings and before any install, and once
+  // per install: a first boot without evidence is marked fresh and never grandfathered later (#1149).
   try {
     const grandfathered = resolveIntegrationConsentAtBoot(
       settingsStore.get(),
@@ -1655,6 +1724,7 @@ app.whenReady().then(async () => {
   // Invariant 11 for probes: registered in BOTH shells, or session-id minting silently works on
   // the desktop and not in the browser, with nothing to say which.
   registerGrokCliIpc()
+  registerCursorCliIpc()
   registerCodexIdentityIpc()
   // What THIS machine's codex accepts for `--ask-for-approval`. Lazy + memoized inside the probe,
   // so registering it costs nothing until the first Codex launch line asks.
@@ -1664,6 +1734,9 @@ app.whenReady().then(async () => {
   if (process.platform === 'win32') setWallpaperImageOps(nativeImageWallpaperOps)
   registerWallpaperIpc(settingsStore)
   registerRunConfigIpc()
+  registerSimulatorIpc()
+  // A node of an SSH project would show THIS machine's devices inside another machine's project.
+  setSimulatorNodeRefusal((nodeId) => (workspaceStore.sshProjectIdForNode(nodeId) !== undefined ? `${SIMULATOR_SSH_HINT}.` : null))
   // Warm the `claude --version` probe now (it spawns a login shell + node, ~sub-second) so the
   // renderer's first `claude.cliCaps()` — awaited on the launch path of a cold-restored agent
   // node — resolves from cache instead of racing the probe into a conservative "no auto".
@@ -2150,7 +2223,7 @@ app.whenReady().then(async () => {
   // here; everything that authorizes or performs the delivery reads MAIN's stores. See
   // src/core/agents/agent-messaging.ts for the whole map.
   const messagingDeps: AgentMessagingDeps = {
-    paneOwner: (id) => ptyManager.paneOwner(id),
+    ...ptyPaneProbeDeps(ptyManager),
     sendEnvelope: (id, envelope, expected) => ptyManager.sendEnvelope(id, envelope, expected),
     envelopePasteReady: (id) => ptyManager.envelopePasteReady(id),
     // Attached OR released-but-running: see AgentMessagingDeps.hasLiveSession.
@@ -2914,6 +2987,14 @@ app.whenReady().then(async () => {
     remoteSubagentTail.untrack(n.toolUseId)
     nodeSubagents.get(nodeId)?.delete(n.toolUseId)
   }
+  // Cursor's subagent END (its hooks never send one) and child tail; same tracker in the server.
+  const cursorSubagents = createCursorSubagentTracker({
+    tail: subagentTail,
+    emit: (ev) => {
+      sendToMain(IPC.agentStatus, ev)
+      recordAgentEvent(ev)
+    }
+  })
   // Every context tail pushes through here, so an agent's meter reaches the renderer, the Notch HUD
   // and the phone's context ring identically whichever CLI produced the numbers.
   const pushContextUpdate = (payload: unknown): void => {
@@ -2950,6 +3031,16 @@ app.whenReady().then(async () => {
   // Edition creates the same tail the same way in src/server/agent-status.ts.
   const grokContextTail = createContextTail(pushContextUpdate, {
     parse: grokContextParse,
+    wholeFile: true
+  })
+  // cursor's fourth tail. Its numbers are in a SQLite store, not a text file, so `readSource` replaces
+  // the byte read (stat-gated on the db + WAL). Same construction in both shells (invariant 11).
+  const cursorContextTail = createContextTail(pushContextUpdate, {
+    parse: cursorContextParse,
+    readSource: readCursorContextSource
+  })
+  const antigravityContextTail = createContextTail(pushContextUpdate, {
+    parse: antigravityContextParse,
     wholeFile: true
   })
   // Remote (SSH-project) counterparts: a node whose pty runs on a remote host has its Claude
@@ -3259,6 +3350,10 @@ app.whenReady().then(async () => {
           return codexContextTail
         case 'gemini':
           return geminiContextTail
+        case 'cursor':
+          return cursorContextTail
+        case 'antigravity':
+          return antigravityContextTail
         default:
           return undefined
       }
@@ -3353,6 +3448,8 @@ app.whenReady().then(async () => {
     }
   }
   hookServer.setListener(emitAgentStatus)
+  // Cursor NEEDS YOU: up to three pane reads per tool call still pending (core/agents/cursor-approval.ts).
+  hookServer.setPaneReader((nodeId) => ptyManager.captureSession(nodeId))
   // Deterministic hook-reply approvals (docs/hook-reply-approvals.md): the canvas Approve/Deny
   // buttons (and any relay client) answer a held Claude permission hook here. Route by the node's
   // project: an SSH project's hook runs on the REMOTE host (write over its ControlMaster), a local
@@ -3681,6 +3778,21 @@ app.whenReady().then(async () => {
   const SUBAGENT_TOOLS = new Set(['Agent', 'Task'])
   // Hook server validates session-env capacity and caller identity once for both shells.
   hookServer.setRawListener((agentId, nodeId, payload, _meta) => {
+    if (agentId === 'cursor') {
+      // One shared step (core/cursor-chat.ts `applyCursorRaw`): subagent cards, the meter, and the
+      // child-event guard. A remote node gets cards but no meter (its chat is on the host).
+      applyCursorRaw(
+        {
+          tail: cursorContextTail,
+          subagents: cursorSubagents,
+          nodeSession: nodeContextSession,
+          isRemote: (id) => !!(ptyManager.sshRemoteForNode(id) || workspaceStore.sshProjectIdForNode(id))
+        },
+        nodeId,
+        payload
+      )
+      return
+    }
     if (agentId === 'grok') {
       // This branch records two associations, neither of which grok's envelope states outright.
       // Everything the claude path does below hangs off `transcript_path`. Grok DOES send one --
@@ -3833,11 +3945,31 @@ app.whenReady().then(async () => {
       if (p.hook_event_name === 'SessionEnd' && p.session_id) tail.untrack(p.session_id)
       return
     }
+    if (agentId === 'antigravity') {
+      const p = payload as {
+        conversationId?: string
+        transcriptPath?: string
+        modelName?: string
+      }
+      rememberAntigravityModel(p.modelName)
+      const transcriptPath = safeTranscriptPath(p.transcriptPath)
+      if (p.conversationId && transcriptPath) {
+        antigravityContextTail.track(p.conversationId, transcriptPath)
+      }
+      if (nodeId && p.conversationId) nodeContextSession.set(nodeId, p.conversationId)
+      if (nodeId && p.conversationId && transcriptPath) {
+        setNodeTranscript(nodeId, p.conversationId, transcriptPath)
+      }
+      return
+    }
     if (agentId !== 'claude') return
     // Mirror the per-node "what it's doing now" activity line for the phone (mobile-usage-inbox).
     // Runs BEFORE the local/remote split so it covers remote (SSH) nodes too — it needs only
     // tool_name/tool_input, never the transcript path the split routes on.
     recordRawToolEvent(nodeId, payload)
+    // Cursor runs claude.sh too (Claude settings import), often with a CHILD's chat id: recording it
+    // here re-pointed the node's session, so the parent's cursor tail leaked past pty:destroy.
+    if (isCursorPayload(payload)) return
     // Claude's native subagent hooks, BEFORE the child-event gate below: that gate ignores every
     // agent_id-tagged payload, and these carry the CHILD's agent_id with the PARENT's
     // transcript_path. All they drive here is the child's own transcript tail, started at
@@ -3992,6 +4124,9 @@ app.whenReady().then(async () => {
   const releaseNodeTails = (nodeId: string): void => {
     claudeSubagents.forgetNode(nodeId)
     remoteCodexContext.release(nodeId)
+    cursorSubagents.release(nodeId)
+    releaseCursorRaw(nodeId)
+    hookServer.releaseCursorNode(nodeId)
     const sessionId = nodeContextSession.get(nodeId)
     if (sessionId) {
       // Untrack both tails — untracking a non-tracked session is a no-op, so this is safe
@@ -4004,6 +4139,8 @@ app.whenReady().then(async () => {
       geminiContextTail.untrack(sessionId)
       codexContextTail.untrack(sessionId)
       grokContextTail.untrack(sessionId)
+      cursorContextTail.untrack(sessionId)
+      antigravityContextTail.untrack(sessionId)
       remoteContextTail.untrack(sessionId)
       remoteTranscriptBySession.delete(sessionId)
       locatedTranscriptSessions.delete(sessionId)
@@ -4025,6 +4162,17 @@ app.whenReady().then(async () => {
   // host's tails too, instead of leaking them.
   corePlatform.on(IPC.ptyDestroy, (nodeId: string) => releaseNodeTails(nodeId))
   corePlatform.on(IPC.ptyRecycle, (nodeId: string) => releaseNodeTails(nodeId))
+  // Which claude may speak for a node (#1112, #1153): the pane tty from THIS shell's PtyManager.
+  // Same call as the Server Edition's (hook-verified-parity.test.ts).
+  wireClaudePaneOrigin({
+    hooks: hookServer,
+    paneOwner: (nodeId) => ptyManager.paneOwner(nodeId),
+    cannotRead: (nodeId) =>
+      !ptyManager.sshRemoteForNode(nodeId) && !!workspaceStore.sshProjectIdForNode(nodeId),
+    on: (channel, cb) => corePlatform.on(channel, cb),
+    destroyChannel: IPC.ptyDestroy,
+    recycleChannel: IPC.ptyRecycle
+  })
   // Agent canvas control: the spawned agent's `nodeterm` CLI POSTs a verb to the hook server,
   // which we forward to the renderer and await a reply. A pending-request map (keyed by a random
   // requestId) bridges the two async hops; both the reply and the timeout below clear the entry.
@@ -4198,6 +4346,9 @@ app.whenReady().then(async () => {
     revokeAllBrowser(browserRevocation, { userStopped: false })
     // Reload-on-save watchers die with the app; the runs themselves live on in tmux.
     stopAllRunWatches()
+    // Simulator views' helpers exit with their stdin; end them explicitly at quit.
+    stopAllSimulators()
+    stopAllRecordings()
   })
   ipcMain.on(
     IPC.agentControlResult,
@@ -4393,6 +4544,10 @@ app.whenReady().then(async () => {
     // renderer resolves `#N` against the project's repository and re-parses with the same grammar.
     const issueRefusal = issueFlagRefusal(verb, args)
     if (issueRefusal) return { ok: false, error: issueRefusal, message: issueRefusal }
+    // `browser` / `open-browser` unknown flags (#539): same placement, same reason — without it a
+    // desktop `open-browser --width 375` answered a normal `opened browser <id>`.
+    const browserRefusal = browserFlagRefusal(verb, args)
+    if (browserRefusal) return { ok: false, error: browserRefusal, message: browserRefusal }
     // `--after-pr` / `--pr-deadline`: same placement and same reason. Whether the pull request
     // exists in the board's repository is the renderer's question (`resolvePrWaitFor`).
     const afterPrRefusal = afterPrFlagRefusal(verb, args)
@@ -5385,6 +5540,10 @@ app.on('before-quit', (e) => {
   // restart-to-update flushes earlier, in the updater — on macOS its windows are gone by now.
   // The renderer's save can itself queue a throttled SSH mirror write AFTER the first remote
   // flush took its snapshot, so the remote flush runs again once the renderer answered.
+  // Simulators a Simulator node booted run headless, so nothing would show them after we quit:
+  // shut those down (and only those). Started now so it overlaps the flush; it bounds itself
+  // (OWNED_SHUTDOWN_TIMEOUT_MS) and never throws, so quit is never held by a device.
+  const simulatorsDown = shutdownOwnedSimulators()
   const flush = Promise.allSettled([
     requestRendererFlush(getMainWindow()?.webContents, ipcMain).then(() => remoteWorkspaceIO.flush()),
     remoteWorkspaceIO.flush(),
@@ -5397,6 +5556,7 @@ app.on('before-quit', (e) => {
     // Napi::ThreadSafeFunction::CallJS) — see SpeechService.shutdown. It needs its own budget
     // because the 1500ms cap above is shorter than a transcription, and it costs nothing at
     // all when dictation is idle, which is nearly always.
+    .then(() => simulatorsDown)
     .then(() => speechService.shutdown())
     .finally(() => app.quit())
 })

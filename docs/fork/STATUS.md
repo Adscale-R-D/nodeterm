@@ -3,7 +3,7 @@
 **Audience: the agent/manager coordinating work on this box.** What you can do now that you could
 not before, what is actually running, and what is known-broken so you do not chase it.
 
-Written **2026-09-23** (updated 2026-09-28 for sync #4 and 2026-10-15 for sync #5), replacing the 2026-09-02 edition wholesale — most of what that one
+Written **2026-09-23** (updated 2026-09-28 for sync #4, 2026-10-15 for sync #5 and 2026-10-20 for sync #6), replacing the 2026-09-02 edition wholesale — most of what that one
 described has been retired (§4). Lives in `docs/fork/` (a path upstream never creates, so it adds
 no conflict surface); fork-local operational state, not upstream documentation.
 
@@ -15,7 +15,7 @@ no conflict surface); fork-local operational state, not upstream documentation.
 |---|---|
 | This checkout | `~/nodeterm` = **`Adscale-R-D/nodeterm`** (our fork), branch `main` |
 | Upstream | **`eneskirca/nodeterm`**, remote `upstream` |
-| Fork `main` | a merge of upstream `117eade8` (**v0.4.3**, sync #5, 2026-10-15), **0 behind upstream** |
+| Fork `main` | a merge of upstream `6b03f579` (**v0.4.4+**, sync #6, 2026-10-20), **0 behind upstream** |
 | What runs the server | a **second checkout**, `~/.nodeterm-server-app`, systemd `nodeterm-server` |
 
 The fork now carries **2 patches** upstream lacks (§4), down from 5.
@@ -186,8 +186,8 @@ boot factory, our canvas-control installer, and the agent-facing group-subtree `
 
 | | |
 |---|---|
-| `main` | sync #5 merge of upstream `117eade8` (v0.4.3), 2026-10-15 |
-| **Running** | sync #4 (`8dfc7562`) until this merge is deployed |
+| `main` | sync #6 merge of upstream `6b03f579` (v0.4.4+), 2026-10-20 |
+| **Running** | sync #5 (`090327b4`) until this merge is deployed |
 | Canvas-control flag | **ON**, via `/etc/systemd/system/nodeterm-server.service.d/canvas-control.conf` |
 
 Deploy sequence (deps change most syncs, so a bare rebuild is not enough):
@@ -225,7 +225,21 @@ unpatched — not the code.
 
 ---
 
-## 8. Sync #5 (2026-10-15): what it brought (v0.3.17 → v0.4.3, 1,087 commits)
+## 8. Sync #6 (2026-10-20): what it brought (v0.4.3 → v0.4.4+, 61 commits)
+
+Two conflicts, both in the kanban `board` verb. Upstream added `board --project <id>` with its own
+reply builder (`renderer/lib/boardVerb.ts`); it now DELEGATES to our shared `boardSnapshot`
+(which gained an optional project name), so the desktop's two `board` paths and the server's
+answer in one shape and a `--project` read also marks agent-created columns. One new failure was
+ours: upstream's `antigravityWindowFor` reused `staticWindowFor` for Claude models served through
+`agy`, and the fork's 200k rule (a Claude Code CLI fact) made it 200k; that path now keeps
+upstream's family rule. New on this box: `scripts/patch-smart-whisper.mjs` (run it next to the
+node-pty patch, or its test reads red). Server-relevant: held launches claimed in core (#1224),
+only the pane's foreground claude speaks for a node (#1236), SSH routing by project (#1238).
+
+---
+
+## 8a. Sync #5 (2026-10-15): what it brought (v0.3.17 → v0.4.3, 1,087 commits)
 
 All three patches survived again — upstream's server still refuses `board`/`assign`, still stubs
 `contextLink.info` in the browser, and still treats opus/sonnet as 1M. What changed for us:

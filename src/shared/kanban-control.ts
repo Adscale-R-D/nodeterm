@@ -58,15 +58,18 @@ export interface BoardSnapshotColumn {
  */
 export function boardSnapshot(
   board: ProjectKanban | undefined,
-  cards: readonly ControlCard[]
+  cards: readonly ControlCard[],
+  /** Names the project in the header — `board --project <id>` reads a board other than the caller's. */
+  projectName?: string
 ): { message: string; result: { columns: BoardSnapshotColumn[]; ungrouped: string[] } } {
   const titleOf = new Map(cards.map((c) => [c.id, c.title || 'Untitled']))
   const cardIds = cards.map((c) => c.id)
   const fmt = (ids: string[]): string[] => ids.map((id) => `  - ${titleOf.get(id)} (id: ${id})`)
+  const head = projectName ? `Kanban board of project "${projectName}"` : 'Kanban board'
   if (!board) {
     return {
       message: [
-        'Kanban board: (no columns yet — default To Do / In Progress / Done appears on first edit)',
+        `${head}: (no columns yet — default To Do / In Progress / Done appears on first edit)`,
         `Ungrouped (${cardIds.length}):`,
         ...fmt(cardIds)
       ].join('\n'),
@@ -82,7 +85,7 @@ export function boardSnapshot(
   const ungrouped = unassigned(board, cardIds)
   return {
     message: [
-      'Kanban board:',
+      `${head}:`,
       ...columns.flatMap((c) => [
         `${c.title} (${c.cards.length}) [column id: ${c.id}]${c.origin ? ' (agent-created)' : ''}:`,
         ...fmt(c.cards)

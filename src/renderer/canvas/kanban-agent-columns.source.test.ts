@@ -37,7 +37,10 @@ describe('agent-created kanban columns (Canvas source pins)', () => {
 
   it('`board` answers through the shared snapshot, so both shells share one reply shape', () => {
     const board = body("case 'board': {", "case 'assign': {")
-    expect(board).toContain('boardSnapshot(ctlProject?.kanban, cards)')
+    expect(board).toContain('boardVerbReply(ctlProject?.kanban, sessions)')
+    // boardVerbReply (upstream's name, also used by `board --project`) must stay a thin delegate.
+    const verb = readFileSync(new URL('../lib/boardVerb.ts', import.meta.url), 'utf8')
+    expect(verb).toContain('return boardSnapshot(')
   })
 
   it('`assign` honours --create and narrates the board setProjectKanban actually STORED', () => {

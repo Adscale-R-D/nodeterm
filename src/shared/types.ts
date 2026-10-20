@@ -1,4 +1,4 @@
-import type { ChatPromptResult, TextDeliveryResult } from './text-delivery'
+import type { ChatPromptResult, EmptyPromptResult, TextDeliveryResult } from './text-delivery'
 import type { PushWebhookMinted, PushWebhookResult, PushWebhookTokenInfo } from './push-webhook'
 import type { IdentitySeedEntry } from './agent-identity-seed'
 import type { PrWaitHold } from './pr-wait'
@@ -7,6 +7,7 @@ import type { AgentIntegrationsSettings } from './agent-integrations'
 // Types shared across the main, preload, and renderer processes.
 
 import { TABBAR_HEIGHT_PX } from './window-chrome-metrics'
+import { DEFAULT_MARKDOWN_FONT_FAMILY, DEFAULT_MARKDOWN_FONT_SIZE } from './markdown-font'
 import { DEFAULT_WORKTREE_PATH_TEMPLATE } from './worktree'
 import type { CloneProgress } from './clone-url'
 import type { KeybindingOverrides, TerminalShortcutPolicy } from './keybindings'
@@ -213,6 +214,15 @@ export interface PtyCreateOptions {
    */
   requireRemote?: boolean
   /**
+   * The ONE way a terminal may run on THIS machine while it sits on an SSH project's canvas: the
+   * local-account login node Settings → Accounts drops onto whatever canvas is active. Core refuses
+   * every other local spawn whose `ownerProjectId` is an SSH project (`PtyManager.setSshProjectCheck`,
+   * issue #1186) — the node fields that route a node remotely come from a shared file, and a node
+   * that lacks them must never become a local shell. Set only from an in-memory, never-persisted
+   * renderer mark (`renderer/lib/localOnSshCanvas.ts`), never from node data.
+   */
+  localOnSshCanvas?: boolean
+  /**
    * Hosted-relay VIEWERS may watch a terminal but never start one: refuse a create that would spawn
    * a NEW session (`unavailable: 'join-only'`), while a co-attach join or a warm tmux reattach still
    * proceeds. Set only by the relay access policy (src/core/relay/access-policy.ts).
@@ -232,6 +242,11 @@ export interface PaneCursor {
   y: number
   visible: boolean
 }
+
+/** Outcome of typing keys into a node's pane by id (`PtyApi.sendPaneKeys`). Never a rejection. */
+export type PaneKeysResult =
+  | { ok: true }
+  | { ok: false; reason: 'not-connected' | 'unsupported-backend' | 'no-ssh' | 'failed' }
 
 /**
  * Result of creating a PTY session. `fresh` distinguishes a tmux session that had to be
@@ -421,7 +436,7 @@ export interface RecycledInfo {
 // 'subagent' and 'loop' are render-only (ephemeral hook-driven viz) and never persisted.
 // 'trigger' is a first-class PERSISTED kind (issue #493) — the canvas-owned schedule node; its
 // spec rides `CanvasNodeState.trigger` and is sanitized on every load path (@shared/trigger).
-export type NodeKind = 'terminal' | 'sticky' | 'group' | 'editor' | 'diff' | 'video' | 'web' | 'browser' | 'files' | 'subagent' | 'loop' | 'dino' | 'trigger'
+export type NodeKind = 'terminal' | 'sticky' | 'group' | 'editor' | 'diff' | 'video' | 'web' | 'browser' | 'files' | 'subagent' | 'loop' | 'dino' | 'trigger' | 'simulator'
 
 /** Persisted state of a single canvas node (terminal, sticky note, group frame, or editor). */
 /**
@@ -518,6 +533,10 @@ export interface CanvasNodeState {
   collapsed?: boolean
   /** Agent nodes only: when true, this node's subagent/loop fan-out cards are hidden. */
   hideFanout?: boolean
+  /** Terminal nodes: the ⌘M view (chat / markdown) is open. Persisted, so leaving a project and
+   *  coming back (or a reload) reopens the node the way the user left it instead of on the raw
+   *  terminal. Absent = closed. */
+  mdMode?: boolean
   /**
    * A user-chosen icon shown wherever this node is listed (canvas header, kanban card, sessions
    * sidebar): one emoji/character, or an image file. Absent = the node draws exactly as it did
@@ -592,6 +611,10 @@ export interface CanvasNodeState {
    * `normalizeRunConfig` (@shared/run-config) on every load AND save.
    */
   runConfig?: import('./run-config').RunNodeConfig
+  /** Run nodes: a simulator shown inside the node. Read through `normalizeInlineSimulatorConfig`. */
+  runSimulator?: import('./simulator').InlineSimulatorConfig
+  /** simulator-only: which iOS simulator the node shows. Read through `normalizeSimulatorConfig`. */
+  simulator?: import('./simulator').SimulatorNodeConfig
   // sticky-only
   text?: string
   /**
@@ -620,6 +643,10 @@ export interface CanvasNodeState {
    * through untouched on Server Edition / mobile, where a browser node renders with no <webview>.
    */
   partition?: string
+  /** browser-only: popped out of a run node's browser panel — that run node's id. */
+  dockTo?: string
+  /** Run nodes: the browser panel inside the node. Read through `normalizeRunBrowserConfig`. */
+  runBrowser?: import('./run-preview').RunBrowserConfig
   /** diff-only: true = staged diff (HEAD vs index), false = unstaged (index vs working). */
   diffStaged?: boolean
   /** diff-only: when set, the diff shows parent (<oid>^) vs commit (<oid>) for a file from history. */
@@ -1358,17 +1385,23 @@ export interface PtyApi {
    *  (`readsScreenDialogs`), refused BEFORE anything is written when the agent's own dialog owns the
    *  keyboard (`ChatPromptBlocked`) — such dialogs fire no hook. Otherwise the `sendText` contract. */
   sendChatPrompt(persistKey: string, text: string, agentId: string): Promise<ChatPromptResult>
+  /** Type `text` + Enter ONLY into an empty composer of an agent whose composer can be read
+   *  (issue #1144 — the app's own link notes). Refused, with the reason, before anything is written
+   *  when the composer holds a draft, a dialog owns the keyboard, or emptiness cannot be proven. */
+  sendToEmptyPrompt(persistKey: string, text: string, agentId: string): Promise<EmptyPromptResult>
   /** Is tmux available on this host (else the silent plain-shell fallback), plus a suggested
    *  install command for the "tmux not found" banner. */
   tmuxStatus(): Promise<TmuxStatus>
   /** The command currently in the foreground of a node's tmux pane (e.g. 'claude', 'zsh'), by
    *  node persistKey. null when it is unknown — no session, no tmux, or the query failed — which
    *  callers must read as "not observed", never as evidence of a particular command. */
-  paneCommand(persistKey: string): Promise<string | null>
+  paneCommand(persistKey: string, opts?: { resolveUnmounted?: boolean }): Promise<string | null>
   /** The live working directory of a node's pane (`#{pane_current_path}`). null when unknown —
    *  no session, no tmux, the session-host backend, a failed query, or a surface that does not
    *  serve it (relay tabs) — and never a rejection. Used as the second cwd for file links. */
   paneCwd(persistKey: string): Promise<string | null>
+  /** Type raw keys into a node's tmux pane by node id; no mounted terminal needed. Never rejects. */
+  sendPaneKeys(nodeId: string, data: string): Promise<PaneKeysResult>
   /**
    * Desktop only (#925). Spawn-or-attach a node's session with no viewer and deliver `command`
    * through the echo-verified writer, then release the synthetic client (the tmux session keeps
@@ -1383,7 +1416,7 @@ export interface PtyApi {
    *  foreground process group — so a caller can ask WHO owns the pane rather than what tmux calls
    *  it. `null` is "could not read", never evidence that the pane is free (see `isAgentPane`'s
    *  three-valued verdict, which is what consumers should decide on). */
-  paneOwner(persistKey: string): Promise<PaneOwner | null>
+  paneOwner(persistKey: string, opts?: { resolveUnmounted?: boolean }): Promise<PaneOwner | null>
   /**
    * Execute a semantic agent launch in a node's live LOCAL Windows session-host pane: the core
    * encodes it for the pane's own shell (pwsh / Windows PowerShell / cmd) and the host types it
@@ -1445,6 +1478,13 @@ export interface WorkspaceApi {
    *  round trips (the mirror is owed and rides the next ordinary save). For a write-ahead barrier
    *  that must be durable here but must not wait on a remote host — see WorkspaceStore.save. */
   save(workspace: Workspace, opts?: WorkspaceSaveOptions): Promise<void>
+  /**
+   * Ask the core to claim one held launch (node id + command) before any viewer types it
+   * (issue #1173): `claimed` = this viewer delivers it, `elsewhere` = another viewer of the same
+   * project already claimed it, type nothing. A manual Run now is never refused. Optional: a
+   * client without it (an older core, a test double) keeps the per-viewer barrier alone.
+   */
+  claimLaunch?(nodeId: string, command: string, manual: boolean): Promise<'claimed' | 'elsewhere'>
   /** Reads <folder>/.nodeterm/project.json and returns the assembled Project (cwd resolved), or null. */
   probeFolder(folder: string): Promise<Project | null>
   /** Whether <folder>/.nodeterm/project.json is `present`, definitely `absent`, or `unreadable`
@@ -1887,6 +1927,19 @@ export interface Settings {
    *  the default for anything that is not a finite number. Machine-local: it is one person's
    *  chrome, not a canvas fact. */
   tabBarHeight: number
+  /** How solid sticky notes / group frames are behind their colour tint, 0–100 (Settings →
+   *  Appearance, issue #1113). 0 = see-through, the original look. Hand-editable; read through
+   *  `resolveCanvasBacking` (@shared/canvas-backing). Machine-local. */
+  stickyNoteBacking: number
+  groupFrameBacking: number
+  /** Font of the rendered-Markdown reading views — the ⌘M output and chat views and the editor's
+   *  Markdown preview (Settings → Appearance). A CSS font stack. Hand-editable; read through
+   *  `resolveMarkdownFontFamily` (@shared/markdown-font). Code inside Markdown follows the
+   *  terminal `fontFamily` instead. Machine-local, like the terminal font. */
+  markdownFontFamily: string
+  /** Body size (CSS px) of the same views; headings scale from it, code is 0.92 of it. Read
+   *  through `resolveMarkdownFontSize`, which clamps to 8–28 and answers 13 for garbage. */
+  markdownFontSize: number
   /** Default size (px) for NEW terminal/agent nodes on the canvas. Existing nodes keep
    *  whatever size they were saved with; other node kinds keep their own defaults. */
   defaultNodeWidth: number
@@ -1951,6 +2004,13 @@ export interface Settings {
    *  the lock is one person's view state. Machine-local on Desktop; in the Server Edition this
    *  setting is the server's while the lock is per browser profile. */
   rememberCanvasLock: boolean
+  /** Whether `nodeterm://` links from other apps are handled (docs/superpowers/specs/
+   *  2026-10-13-open-link-design.md). OFF by default: a link can come from any web page, script
+   *  or app, so taking them is something a person turns on. On, a `nodeterm://open` link shows a
+   *  confirm sheet and opens ONE agent or terminal node only after a click; `nodeterm://pair` and
+   *  `nodeterm://join` pre-fill the code prompt. Off, a link opens nothing and a notice says where
+   *  to turn it on. Machine-local (settings.json); read by main on every link. */
+  allowOpenLinks: boolean
   /** Open Markdown files (.md, .markdown, …) in rendered preview instead of the code editor.
    *  Only picks the view an editor node OPENS in — the node's Preview/Edit toggle (and the
    *  markdown-toggle chord) still switches either way. Default ON since the release after
@@ -2387,6 +2447,10 @@ export const DEFAULT_SETTINGS: Settings = {
   snapToGrid: false,
   autoAlignGrid: false,
   tabBarHeight: TABBAR_HEIGHT_PX,
+  stickyNoteBacking: 0,
+  groupFrameBacking: 0,
+  markdownFontFamily: DEFAULT_MARKDOWN_FONT_FAMILY,
+  markdownFontSize: DEFAULT_MARKDOWN_FONT_SIZE,
   defaultNodeWidth: 640,
   defaultNodeHeight: 440,
   sidebarAutoCollapse: true,
@@ -2402,6 +2466,7 @@ export const DEFAULT_SETTINGS: Settings = {
   focusZoomToNode: true,
   offerCloseProjectOnLastSession: false,
   rememberCanvasLock: false,
+  allowOpenLinks: false,
   openMarkdownPreview: true,
   openMarkdownPreviewMigrated: true,
   terminalMiddleClickPaste: false,
@@ -3055,9 +3120,14 @@ export interface ProviderUsage {
   updatedAt: number
   /**
    * 'unavailable' = not signed in / no subscription to report → hide this provider entirely.
-   * 'fetching' = request in flight. 'ok' = limits present. 'error' = the fetch failed.
+   * 'fetching' = request in flight. 'ok' = limits present. 'error' = the fetch failed — and when
+   * `limits` is non-empty alongside it, those are the LAST GOOD numbers the service kept
+   * (`holdLastGoodProvider`), still stamped with their own `updatedAt`.
    */
   status: 'unavailable' | 'fetching' | 'ok' | 'error'
+  /** The latest read was refused with HTTP 429 (Codex today, issue #1168). Absent = not rate
+   *  limited, or not known to be. */
+  rateLimited?: boolean
 }
 
 /** Host memory snapshot in MB. `null` from any reader means "could not read" — never "zero".
@@ -3738,6 +3808,19 @@ export interface GrokCliCaps {
 /** Unprobed grok ⇒ omit the flag, offer no models ⇒ today's command line, byte-identical. */
 export const UNKNOWN_GROK_CLI_CAPS: GrokCliCaps = { sessionIdFlag: false, models: [] }
 
+export interface CursorCliCaps {
+  /** `cursor-agent models`: id + label, the account's own catalogue. [] when it cannot be read. */
+  models: { id: string; name?: string }[]
+}
+
+/** Unprobed cursor ⇒ no models ⇒ no model switching (the pre-feature behaviour). */
+export const UNKNOWN_CURSOR_CLI_CAPS: CursorCliCaps = { models: [] }
+
+export interface CursorApi {
+  /** Never rejects; an unprobed or offline CLI resolves to the empty catalogue. */
+  cliCaps(): Promise<CursorCliCaps>
+}
+
 export interface GrokApi {
   /** Capabilities of the local grok CLI (memoized in the shell; safe to call repeatedly).
    *  Never rejects — an unprobed CLI resolves to the fail-open caps. */
@@ -4330,6 +4413,22 @@ export interface TriggersApi {
   ): Promise<{ outcome: 'fired' | 'missed' | 'failed' | 'queued'; detail?: string }>
 }
 
+/** `nodeterm://` links (see main/open-link.ts, @shared/open-link). */
+export interface OpenLinkApi {
+  /** The renderer is listening: main delivers any link that arrived before (a cold start). */
+  ready(): void
+  /** An `open` link for the confirm sheet. */
+  onRequest(listener: (req: import('./open-link').OpenLinkPrompt) => void): () => void
+  /** A `pair` / `join` link: route to the existing pairing / join flow, never auto-accept. */
+  onPair(listener: (link: { kind: 'pair' | 'join'; url: string }) => void): () => void
+  /** A refused or dropped link, as one sentence for a toast. */
+  onNotice(listener: (n: { text: string }) => void): () => void
+  /** The human's choice; main re-checks it and answers with the final open. */
+  accept(id: string, choice: import('./open-link').OpenLinkChoice): Promise<import('./open-link').OpenLinkAcceptResult>
+  /** The sheet was dismissed (or replaced): forget the request. */
+  cancel(id: string): void
+}
+
 export interface NodeTerminalApi {
   pty: PtyApi
   workspace: WorkspaceApi
@@ -4366,6 +4465,8 @@ export interface NodeTerminalApi {
   wallpaper: import('./wallpaper').WallpaperApi
   /** Run node host side (launch.json, devices, launcher, status, stop, signals, reload on save). */
   runConfig: import('./run-config').RunConfigApi
+  /** Simulator node host side (macOS desktop): live iOS simulator screen + input. */
+  simulator: import('./simulator').SimulatorApi
   triggers: TriggersApi
   context: ContextApi
   canvas: CanvasApi
@@ -4374,6 +4475,7 @@ export interface NodeTerminalApi {
   codex: CodexApi
   claude: ClaudeApi
   grok: GrokApi
+  cursor: CursorApi
   /** Custom-agent launch/preview (env-var expansion + command assembly). */
   agent: AgentApi
   chat: ChatApi
@@ -4394,6 +4496,9 @@ export interface NodeTerminalApi {
   pairing: PairingApi
   presence: PresenceApi
   shortcuts: ShortcutsApi
+  /** `nodeterm://` links clicked outside the app. Desktop only (the Server Edition has no URL
+   *  scheme: its stub never fires and refuses accept). */
+  openLink: OpenLinkApi
   /** Fires when the user presses Cmd/Ctrl+M (toggle markdown view). Returns unsubscribe. */
   onMarkdownToggle(listener: () => void): () => void
   /** Fires when the user presses Cmd/Ctrl+W (close selected node). Returns unsubscribe. */

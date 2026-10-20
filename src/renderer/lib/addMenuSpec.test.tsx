@@ -10,6 +10,8 @@ import {
   contentAddItemsToDockRows,
   FILES_NO_CWD_HINT,
   RUN_SSH_HINT,
+  SIMULATOR_RELAY_HINT,
+  SIMULATOR_SSH_HINT,
   RUN_WINDOWS_HINT,
   NEW_FILE_NO_CWD_HINT,
   WORKTREE_NO_CWD_HINT,
@@ -31,6 +33,7 @@ const handlers = (overrides: Partial<AddHandlers> = {}): AddHandlers => ({
   sticky: noop,
   files: noop,
   run: noop,
+  simulator: noop,
   dino: noop,
   trigger: noop,
   openFile: noop,
@@ -44,6 +47,7 @@ const allKinds: AddItem['kind'][] = [
   'terminal',
   'remote',
   'run',
+  'simulator',
   'browser',
   'web',
   'sticky',
@@ -80,6 +84,27 @@ describe('Run configuration row', () => {
   })
 })
 
+describe('Simulator row', () => {
+  it('is disabled with its reason in a relay tab — the node would show this machine’s devices', () => {
+    const ctx = { hasCwd: true, isSshProject: false, isRelayTab: true }
+    const [row] = contentAddItemsToMenuItems([{ kind: 'simulator' }], handlers(), ctx)
+    expect(row).toMatchObject({ label: 'New simulator', disabled: true, hint: SIMULATOR_RELAY_HINT })
+    const [dock] = contentAddItemsToDockRows([{ kind: 'simulator' }], handlers(), ctx)
+    expect(dock).toMatchObject({ kind: 'simulator', disabled: true, hint: SIMULATOR_RELAY_HINT })
+  })
+  it('is disabled with its reason in an SSH project, as the run row is', () => {
+    const ctx = { hasCwd: true, isSshProject: true }
+    const [row] = contentAddItemsToMenuItems([{ kind: 'simulator' }], handlers(), ctx)
+    expect(row).toMatchObject({ label: 'New simulator', disabled: true, hint: SIMULATOR_SSH_HINT })
+    const [dock] = contentAddItemsToDockRows([{ kind: 'simulator' }], handlers(), ctx)
+    expect(dock).toMatchObject({ kind: 'simulator', disabled: true, hint: SIMULATOR_SSH_HINT })
+  })
+  it('is enabled in a local desktop project', () => {
+    const [row] = contentAddItemsToMenuItems([{ kind: 'simulator' }], handlers(), { hasCwd: true, isSshProject: false })
+    expect((row as { disabled?: boolean }).disabled).toBeFalsy()
+  })
+})
+
 describe('CONTENT_ADD_ITEMS', () => {
   it('lists every content kind in the canonical order', () => {
     expect(CONTENT_ADD_ITEMS.map((i) => i.kind)).toEqual(allKinds)
@@ -98,6 +123,7 @@ describe('contentAddItemsToMenuItems', () => {
       'New terminal',
       'New remote…',
       'New run configuration',
+      'New simulator',
       'New browser',
       'New web view…',
       'New sticky note',
@@ -201,6 +227,7 @@ describe('contentAddItemsToDockRows', () => {
     // "New Remote Connection" flow. Emitting a terminal row here duplicated the Terminal entry.
     expect(rows.map((r) => r.kind)).toEqual([
       'run',
+      'simulator',
       'browser',
       'web',
       'sticky',
@@ -329,6 +356,7 @@ describe('buildGroupedAddMenu', () => {
     }
     expect(children(ADD_GROUP_LABEL.view)).toEqual([
       'New run configuration',
+      'New simulator',
       'New browser',
       'New web view…',
       'New sticky note',

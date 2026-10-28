@@ -28,7 +28,28 @@
  *     no-op when nothing sets the global.
  *   - Runs before electron-rebuild in `postinstall` / `rebuild`, so the native build sees it.
  *
- * GUARD: src/core/speech/smart-whisper-patch.test.ts asserts the marker is present in the
+ * SECOND PATCH: Metal shaders in a packaged app (macOS)
+ *   smart-whisper tells whisper.cpp where its Metal shader source is through
+ *   GGML_METAL_PATH_RESOURCES, built from its own __dirname. In the packaged app dist/ is inside
+ *   app.asar, and native code cannot read inside an asar ("Not a directory"), so Metal init fails
+ *   and whisper.cpp silently runs on the CPU. The shader file is already unpacked beside it
+ *   (asarUnpack), so the patch points at app.asar.unpacked. Measured on an M5 Pro, Electron 42,
+ *   large-v3-turbo, 2.7 s clip, the app's own binary: 5.97 s on the CPU vs 0.64 s on Metal. An
+ *   explicit GGML_METAL_PATH_RESOURCES and a dev install are left unchanged.
+ *
+ * THIRD PATCH: initialized context params (every platform)
+ *   smart-whisper's `LoadModel` (src/binding/model.cc) declares `whisper_context_params params;`
+ *   and sets only `use_gpu`, so every other field (dtw_token_timestamps, dtw_aheads_preset,
+ *   gpu_device, flash_attn, ...) is uninitialized stack memory. What it holds decides the outcome:
+ *   with DTW switched on by garbage, whisper_init_state() fails for large-v3-turbo ("tried to set
+ *   alignment head on text layer 14, but model only has 4 text layers") and the app aborts in
+ *   whisper_free_state. Measured on an M5 Pro, Electron 42, large-v3-turbo, 2.7 s and 21 s clips:
+ *   the shipped binary crashed in 4 of 4 runs outside the app; with the params initialized it ran
+ *   without a crash (0.56 s and 0.93 s on Metal). The slow dictation seen inside the packaged app is
+ *   a separate bug, the second patch above. The fix starts from
+ *   whisper_context_default_params(), exactly what whisper.cpp's own examples do.
+ *
+ * GUARD: src/core/speech/smart-whisper-patch.test.ts asserts every marker is present in the
  * installed sources. If it is red, your node_modules is unpatched — run `npm run rebuild`.
  */
 
@@ -65,19 +86,50 @@ var module2 = (() => {
 
 const GYP_FIND = '    }\n  ],\n}'
 
+export const METAL_MARKER = 'NODETERM-PATCH(smart-whisper-metal-asar)'
+
+const METAL_FIND =
+  'process.env.GGML_METAL_PATH_RESOURCES = process.env.GGML_METAL_PATH_RESOURCES || import_node_path.default.join(__dirname, "../whisper.cpp/ggml/src");'
+
+const METAL_REPLACE = `// ${METAL_MARKER}: native code cannot read inside app.asar; use the unpacked copy.
+process.env.GGML_METAL_PATH_RESOURCES = process.env.GGML_METAL_PATH_RESOURCES || import_node_path.default.join(__dirname, "../whisper.cpp/ggml/src").replace(/([\\\\/])app\\.asar(?=[\\\\/])/, "$1app.asar.unpacked");`
+
+export const CTX_PARAMS_MARKER = 'NODETERM-PATCH(smart-whisper-ctx-params)'
+
+const PARAMS_FIND = '    whisper_context_params params;\n    params.use_gpu'
+
+const PARAMS_REPLACE =
+  `    // ${CTX_PARAMS_MARKER}: start from the defaults; the bare declaration left every\n` +
+  `    // other field (DTW, gpu_device, flash_attn, ...) as uninitialized stack memory.\n` +
+  '    whisper_context_params params = whisper_context_default_params();\n' +
+  '    params.use_gpu'
+
 /** Patches the smart-whisper package in `dir`. Returns 'patched' | 'already-patched'. */
 export function patchSmartWhisper(dir) {
   const gypPath = path.join(dir, 'binding.gyp')
   const jsPath = path.join(dir, 'dist', 'index.js')
   const gyp = fs.readFileSync(gypPath, 'utf8')
   const js = fs.readFileSync(jsPath, 'utf8')
+  const modelPath = path.join(dir, 'src', 'binding', 'model.cc')
+  const model = readOrFail(modelPath, 'src/binding/model.cc')
   const gypDone = gyp.includes(PATCH_MARKER)
   const jsDone = js.includes(PATCH_MARKER)
-  if (gypDone && jsDone) return 'already-patched'
+  const metalDone = js.includes(METAL_MARKER)
+  const modelDone = model.includes(CTX_PARAMS_MARKER)
+  if (gypDone && jsDone && metalDone && modelDone) return 'already-patched'
 
-  if (!jsDone) {
-    expectOnce(js, LOADER_FIND, 'dist/index.js binary require')
-    fs.writeFileSync(jsPath, js.replace(LOADER_FIND, LOADER_REPLACE))
+  if (!modelDone) {
+    expectOnce(model, PARAMS_FIND, 'model.cc context params')
+    fs.writeFileSync(modelPath, model.replace(PARAMS_FIND, PARAMS_REPLACE))
+  }
+
+  if (!jsDone || !metalDone) {
+    if (!jsDone) expectOnce(js, LOADER_FIND, 'dist/index.js binary require')
+    if (!metalDone) expectOnce(js, METAL_FIND, 'dist/index.js Metal path')
+    let out = js
+    if (!jsDone) out = out.replace(LOADER_FIND, LOADER_REPLACE)
+    if (!metalDone) out = out.replace(METAL_FIND, METAL_REPLACE)
+    fs.writeFileSync(jsPath, out)
   }
 
   if (!gypDone) {
@@ -107,6 +159,16 @@ export function patchSmartWhisper(dir) {
     fs.writeFileSync(gypPath, gyp.replace(GYP_FIND, `    }\n  ],\n${conditions}}`))
   }
   return 'patched'
+}
+
+/** Reads a file the patch needs; a missing one is an anchor failure, not a crash. */
+function readOrFail(file, name) {
+  try {
+    return fs.readFileSync(file, 'utf8')
+  } catch (err) {
+    if (err && err.code === 'ENOENT') fail(name, 'not found')
+    throw err
+  }
 }
 
 function expectOnce(text, needle, name) {

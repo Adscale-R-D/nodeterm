@@ -236,7 +236,24 @@ unpatched — not the code.
 
 ---
 
-## 8. Sync #6 (2026-10-20): what it brought (v0.4.3 → v0.4.4+, 61 commits)
+## 8. Sync #7 (2026-10-28): what it brought (v0.4.4+ → v0.4.5+, 146 commits)
+
+Merged clean — no conflicts. All four fork patches survived as-is.
+- **Server-relevant:** Server Edition sign-in hardening (audit S1–S8); the hook server refuses
+  browser requests (Origin / non-loopback Host) before the bearer; relay key checks (low-order
+  keys refused, canonical base64, SAS v2); exact tmux targets for node-keyed relay verbs;
+  `~/.nodeterm` on SSH hosts is 0700; per-kind default node sizes (the server factory reads the
+  sticky one).
+- **Canvas control:** `arrange --gap`, `resize`, `place`, geometry in `list` — desktop only;
+  the Server Edition still refuses `resize`/`place` by name (not in `SERVER_V1_VERBS`).
+- **Features:** whiteboard node (Excalidraw), folder projects can keep their canvas in app data,
+  "next agent needing you", live-link read-back, RAM pill shows nodeterm itself + swap/pressure,
+  Aerial wallpapers (macOS), many perf fixes.
+- Tests: 24,226 passed, 5 failed — the known-red Windows-1252 test, and four 5 s timeouts under
+  full-suite load on this box that pass when run alone (`codex.ensure`, `fs-atomic.guard`,
+  `tmux-socket-isolation.guard`, `watch-link/service`).
+
+## 8a. Sync #6 (2026-10-20): what it brought (v0.4.3 → v0.4.4+, 61 commits)
 
 Two conflicts, both in the kanban `board` verb. Upstream added `board --project <id>` with its own
 reply builder (`renderer/lib/boardVerb.ts`); it now DELEGATES to our shared `boardSnapshot`
@@ -250,7 +267,7 @@ only the pane's foreground claude speaks for a node (#1236), SSH routing by proj
 
 ---
 
-## 8a. Sync #5 (2026-10-15): what it brought (v0.3.17 → v0.4.3, 1,087 commits)
+## 8b. Sync #5 (2026-10-15): what it brought (v0.3.17 → v0.4.3, 1,087 commits)
 
 All three patches survived again — upstream's server still refuses `board`/`assign`, still stubs
 `contextLink.info` in the browser, and still treats opus/sonnet as 1M. What changed for us:
@@ -279,7 +296,7 @@ All three patches survived again — upstream's server still refuses `board`/`as
 
 ---
 
-## 8b. Sync #4 (2026-09-28): what it brought (v0.3.10 → v0.3.17, 417 commits)
+## 8c. Sync #4 (2026-09-28): what it brought (v0.3.10 → v0.3.17, 417 commits)
 
 Our three patches all survived. Upstream still refuses `board`/`assign` headless, still stubs
 `contextLink.info`, and still treats opus/sonnet as 1M. What changed for us:

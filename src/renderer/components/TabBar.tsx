@@ -44,6 +44,8 @@ interface TabBarProps {
   onOpenWelcome: () => void
   onRename: (id: string, name: string) => void
   onSetFolder: (id: string) => void
+  /** Issue #1145: move a local folder project's canvas into app data, or back into its folder. */
+  onMoveStorage?: (id: string, to: 'appData' | 'folder') => void
   /** Close (hide) the project without destroying it, reopenable from the start screen. */
   onCloseProject: (id: string) => void
   /** Open the Remote access dialog (host/share + connect). Shown for every project. */
@@ -98,6 +100,7 @@ export function TabBar({
   onOpenWelcome,
   onRename,
   onSetFolder,
+  onMoveStorage,
   onCloseProject,
   onRemoteAccess,
   onSetDefaultAccount,
@@ -309,9 +312,11 @@ export function TabBar({
             title={
               pendingUpdate.kind === 'downloaded'
                 ? `nodeterm v${pendingUpdate.version} is ready, restart to update`
-                : pendingUpdate.kind === 'manual'
-                  ? `nodeterm v${pendingUpdate.version} is available, download it to update`
-                  : 'This version is no longer supported, update to continue'
+                : pendingUpdate.kind === 'available'
+                  ? `nodeterm v${pendingUpdate.version} is available, click to download it`
+                  : pendingUpdate.kind === 'manual'
+                    ? `nodeterm v${pendingUpdate.version} is available, download it to update`
+                    : 'This version is no longer supported, update to continue'
             }
             onClick={() => runPendingUpdate(pendingUpdate)}
           >
@@ -569,6 +574,20 @@ export function TabBar({
             >
               Set folder…
             </button>
+            {onMoveStorage &&
+              menuProject.cwd &&
+              !menuProject.ssh &&
+              !menuProject.remote &&
+              !menuProject.unavailable && (
+                <button
+                  onClick={() => {
+                    onMoveStorage(menuProject.id, menuProject.storeInAppData ? 'folder' : 'appData')
+                    closeMenu()
+                  }}
+                >
+                  {menuProject.storeInAppData ? 'Store canvas in folder' : 'Store canvas in app data'}
+                </button>
+              )}
             <button
               onClick={() => {
                 onRemoteAccess()

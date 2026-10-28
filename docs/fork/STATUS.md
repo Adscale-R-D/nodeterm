@@ -125,13 +125,14 @@ worktree); pass **`--cwd`** when the target has neither, or they review the wron
 
 ---
 
-## 4. What the fork still adds (3 patches)
+## 4. What the fork still adds (4 patches)
 
 | Patch | Why it is still ours |
 |---|---|
 | **Kanban control on the Server Edition + agent-created columns** | upstream refuses `board`/`assign` headless, and has no way to create a column from an agent anywhere. See below. |
 | **`contextLink.info` over the browser bridge** | upstream still stubs it `E_UNSUPPORTED`; without it `verify` cannot build a reviewer's brief |
 | **Claude window = 200k unless `[1m]`** | upstream still uses the `opus\|sonnet\|fable` family rule, which under-reports context pressure **5×** on every 200k session |
+| **Server Edition spawns and lanes do not overlap** | upstream's headless `placeRight` places nodes edge to edge and `group` draws its frame (28 px pad + 34 px header) over whatever is beside the members, so lanes spawned side by side end up on each other. See below. |
 
 **Kanban control (added 2026-09-24).** A pipeline files each lane's cards into one column per
 TASK, and the column cleans itself up:
@@ -160,6 +161,16 @@ nodeterm.sh board                                                  # columns + c
   column into a hand-made one, which then simply stays — the safe direction.
 - Upstreamable: the transforms moved to `src/shared/` (`kanban.ts`, `board-log-diff.ts`,
   `kanban-control.ts`), with the renderer files kept as re-exports.
+
+**Spawn/lane spacing on the Server Edition (added 2026-10-21, `src/server/headless-node-factory.ts`).**
+- `placeRight` keeps `PLACE_CLEARANCE` (40 px) clear around every existing node, and its grid's
+  row gap is 48 px (was 36), so a new node is never placed touching a neighbour.
+- `group` checks the new frame against its siblings (same parent, not members). If it would
+  overlap one, `clearFrameShift` slides the whole new frame, with its members, to the nearest
+  clear offset — right/down first (away from the spawner), any direction only if that fails, up
+  to 80 steps of 40 px; past that it stays where it was. Nodes outside the new lane never move;
+  moving a node only changes its canvas position, so its tmux session is untouched.
+- Upstreamable as-is.
 
 Plus one UI keep: **the frame context menu's "close group and its nodes"** (`closeGroupWithChildren`
 + `groupSubtreeIds`). Upstream deleted the frame's `×` rather than implementing it, so this is the

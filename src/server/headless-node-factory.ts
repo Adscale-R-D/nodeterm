@@ -245,9 +245,18 @@ const TERMINAL_ROWS = 36
 const TERMINAL_SIZE = { width: 640, height: 440 }
 const STICKY_SIZE = { width: 240, height: 200 }
 const H_GAP = 80
-const V_GAP = 36
+const V_GAP = 48
 const GROUP_PAD = 28
 const GROUP_HEADER = 34
+/** Fork: the clear space a spawned node keeps around every other box, so the frame a later
+ *  `group` draws (GROUP_PAD on each side, GROUP_HEADER on top) does not land on a neighbour
+ *  that was placed edge to edge with it. */
+const PLACE_CLEARANCE = 40
+/** Fork: the breathing room a new group frame keeps from its siblings, and the step of the
+ *  search that slides it clear of them. */
+const FRAME_CLEARANCE = 24
+const FRAME_SHIFT_STEP = 40
+const FRAME_SHIFT_RINGS = 80
 const SERVER_AGENTS: ReadonlySet<string> = new Set(['claude', 'codex', 'gemini'])
 /** Author colour for board-log lines an agent wrote through the server (the neutral trace grey the
  *  agent-messaging delivery trace uses — an agent is not a person with a presence colour). */
@@ -360,10 +369,10 @@ function placeRight(
       height: size.height
     }
     const collides = occupied.some((rect) =>
-      candidate.x < rect.x + rect.width &&
-      candidate.x + candidate.width > rect.x &&
-      candidate.y < rect.y + rect.height &&
-      candidate.y + candidate.height > rect.y
+      candidate.x < rect.x + rect.width + PLACE_CLEARANCE &&
+      candidate.x + candidate.width + PLACE_CLEARANCE > rect.x &&
+      candidate.y < rect.y + rect.height + PLACE_CLEARANCE &&
+      candidate.y + candidate.height + PLACE_CLEARANCE > rect.y
     )
     if (!collides) return { x: candidate.x, y: candidate.y }
   }
@@ -531,6 +540,51 @@ function fitAncestorChain(
   return next
 }
 
+/**
+ * Fork: the smallest offset that moves `frame` clear of every box in `siblings` (all in the same
+ * parent's coordinates), keeping FRAME_CLEARANCE between them. `{0,0}` when it is already clear,
+ * and when nothing within the search is clear (an unmoved overlap beats a lane flung far away).
+ */
+export function clearFrameShift(
+  siblings: readonly CanvasNodeState[],
+  frame: { x: number; y: number; w: number; h: number }
+): { x: number; y: number } {
+  const g = FRAME_CLEARANCE
+  const boxes = siblings.map((node) => ({
+    x: node.position.x,
+    y: node.position.y,
+    w: Math.max(1, node.size?.width || TERMINAL_SIZE.width),
+    h: Math.max(1, node.size?.height || TERMINAL_SIZE.height)
+  }))
+  const clear = (dx: number, dy: number): boolean =>
+    !boxes.some((b) =>
+      frame.x + dx < b.x + b.w + g &&
+      frame.x + dx + frame.w + g > b.x &&
+      frame.y + dy < b.y + b.h + g &&
+      frame.y + dy + frame.h + g > b.y
+    )
+  if (clear(0, 0)) return { x: 0, y: 0 }
+  // Right/down first: a spawner places its lane to its right, so that direction moves the lane
+  // away from it. Any direction only when nothing that way is clear within the search.
+  for (const forwardOnly of [true, false]) {
+    for (let ring = 1; ring <= FRAME_SHIFT_RINGS; ring++) {
+      let best: { x: number; y: number; d: number } | undefined
+      for (let i = forwardOnly ? 0 : -ring; i <= ring; i++) {
+        for (let j = forwardOnly ? 0 : -ring; j <= ring; j++) {
+          if (Math.max(Math.abs(i), Math.abs(j)) !== ring) continue
+          const dx = i * FRAME_SHIFT_STEP
+          const dy = j * FRAME_SHIFT_STEP
+          if (!clear(dx, dy)) continue
+          const d = dx * dx + dy * dy
+          if (!best || d < best.d) best = { x: dx, y: dy, d }
+        }
+      }
+      if (best) return { x: best.x, y: best.y }
+    }
+  }
+  return { x: 0, y: 0 }
+}
+
 function groupPersistedNodes(
   nodes: CanvasNodeState[],
   ids: string[],
@@ -557,17 +611,23 @@ function groupPersistedNodes(
   const minY = Math.min(...members.map((node) => node.position.y))
   const maxX = Math.max(...members.map((node) => node.position.x + node.size.width))
   const maxY = Math.max(...members.map((node) => node.position.y + node.size.height))
-  const x = minX - GROUP_PAD
-  const y = minY - GROUP_PAD - GROUP_HEADER
   const parentId = members[0].parentId
+  const frameW = maxX - minX + GROUP_PAD * 2
+  const frameH = maxY - minY + GROUP_PAD * 2 + GROUP_HEADER
+  // Fork: the frame is wider than its members, so it can land on a sibling the members only
+  // touched (lanes spawned side by side). Slide the NEW frame, with its members, to the nearest
+  // spot clear of every sibling; nodes that already existed outside it never move.
+  const shift = clearFrameShift(
+    nodes.filter((node) => (node.parentId ?? null) === (parentId ?? null) && !selected.has(node.id)),
+    { x: minX - GROUP_PAD, y: minY - GROUP_PAD - GROUP_HEADER, w: frameW, h: frameH }
+  )
+  const x = minX - GROUP_PAD + shift.x
+  const y = minY - GROUP_PAD - GROUP_HEADER + shift.y
   const group: CanvasNodeState = {
     id: nextId('group'),
     kind: 'group',
     position: { x, y },
-    size: {
-      width: maxX - minX + GROUP_PAD * 2,
-      height: maxY - minY + GROUP_PAD * 2 + GROUP_HEADER
-    },
+    size: { width: frameW, height: frameH },
     title: label || `Group ${groupIndex + 1}`,
     color: color ?? SYSTEM_NODE_COLORS[groupIndex % SYSTEM_NODE_COLORS.length],
     group: null,
@@ -579,7 +639,7 @@ function groupPersistedNodes(
       ? {
           ...node,
           parentId: group.id,
-          position: { x: node.position.x - x, y: node.position.y - y }
+          position: { x: node.position.x - x + shift.x, y: node.position.y - y + shift.y }
         }
       : node
   )

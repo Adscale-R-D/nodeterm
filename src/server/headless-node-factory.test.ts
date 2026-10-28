@@ -31,6 +31,7 @@ import {
   HeadlessNodeFactory,
   launchFailedError,
   type HeadlessNodeFactoryDeps,
+  clearFrameShift,
   type HeadlessNodeOwnership,
   type HeadlessPty,
   type HeadlessWorkspace
@@ -652,14 +653,15 @@ describe('HeadlessNodeFactory', () => {
     const group = project.nodes.find((node) => node.id === groupId)!
     expect(project.nodes[0]).toMatchObject({ id: groupId, kind: 'group' })
     expect(group.title).toBe('Director team')
-    for (const id of ['term-upstream', 'term-owned']) {
+    // The members move as one block (fork: the frame slides clear of term-source, which this
+    // fixture's members overlap), so every member shifts by the same offset.
+    const deltas = ['term-upstream', 'term-owned'].map((id) => {
       const child = project.nodes.find((node) => node.id === id)!
       expect(child.parentId).toBe(groupId)
-      expect({
-        x: group.position.x + child.position.x,
-        y: group.position.y + child.position.y
-      }).toEqual(beforePositions.get(id))
-    }
+      const was = beforePositions.get(id)!
+      return `${group.position.x + child.position.x - was.x},${group.position.y + child.position.y - was.y}`
+    })
+    expect(new Set(deltas).size).toBe(1)
     expect(published.map((node) => node.id)).toEqual(
       expect.arrayContaining([groupId, 'term-upstream', 'term-owned'])
     )
@@ -975,6 +977,44 @@ describe('HeadlessNodeFactory', () => {
     expect(projectFile.nodes.find((node) => node.id === 'sticky-status')?.title).toBe(
       'Round status'
     )
+  })
+
+  it('slides a new group frame off a sibling its members only touched, members and all (fork)', async () => {
+    const workspace = await store.load({ sideline: false })
+    const nodes = workspace.projects[0].nodes
+    // A neighbour sitting 10px right of term-owned: the members clear it, the frame's pad does not.
+    const owned = nodes.find((n) => n.id === 'term-owned')!
+    nodes.push(terminal('term-neighbour', 'Neighbour', 'claude', owned.position.x + owned.size.width + 10))
+    await store.save(workspace)
+    const before = (await store.load({ sideline: false })).projects[0]
+    const reply = await factory.group('term-source', { nodes: 'term-upstream,term-owned', label: 'Lane' })
+    expect(reply.ok).toBe(true)
+    const groupId = (reply.result as { groupId: string }).groupId
+    const after = (await store.load({ sideline: false })).projects[0]
+    const frame = after.nodes.find((n) => n.id === groupId)!
+    const box = (n: CanvasNodeState) => ({ x: n.position.x, y: n.position.y, w: n.size.width, h: n.size.height })
+    const hits = (a: ReturnType<typeof box>, b: ReturnType<typeof box>) =>
+      a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y
+    for (const other of after.nodes.filter((n) => !n.parentId && n.id !== groupId)) {
+      expect(hits(box(frame), box(other)), other.id).toBe(false)
+    }
+    // Nodes outside the lane never move.
+    for (const id of ['term-neighbour', 'term-source']) {
+      expect(after.nodes.find((n) => n.id === id)!.position).toEqual(
+        before.nodes.find((n) => n.id === id)!.position
+      )
+    }
+  })
+
+  it('unit: clearFrameShift answers zero when clear and the nearest clear offset otherwise (fork)', () => {
+    const sib = terminal('s', 'S', 'claude', 0)
+    expect(clearFrameShift([sib], { x: 2000, y: 0, w: 100, h: 100 })).toEqual({ x: 0, y: 0 })
+    const shift = clearFrameShift([sib], { x: 600, y: 30, w: 200, h: 200 })
+    expect(shift).not.toEqual({ x: 0, y: 0 })
+    const fx = 600 + shift.x
+    const fy = 30 + shift.y
+    const overlaps = fx < 640 + 24 && fx + 200 + 24 > 0 && fy < 30 + 440 + 24 && fy + 200 + 24 > 30
+    expect(overlaps).toBe(false)
   })
 
   it('places repeated spawns in the first free deterministic slots without overlapping busy nodes', async () => {

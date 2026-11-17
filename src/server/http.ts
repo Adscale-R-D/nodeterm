@@ -12,6 +12,7 @@ import { noteProxyRefusal, proxyAuthDecision, type TrustProxyConfig } from './pr
 import { loginClientKey } from './client-address'
 import { sameOriginRequest } from './origin'
 import { handleDownload } from './download'
+import { sessionLinkTarget, safeSessionNext, nextQuery, notFoundSessionPage } from './session-link-route'
 import type { DownloadTickets } from '../core/download-tickets'
 
 export const SESSION_COOKIE = 'nt_session'
@@ -215,14 +216,14 @@ const H1_STYLE = 'margin:0 0 4px;font-size:18px;font-weight:600'
 const SUB_STYLE = 'margin:0 0 16px;font-size:13px;color:#9aa0a6'
 const ERR_STYLE = 'margin:0 0 12px;font-size:13px;color:#f26d6d'
 
-function loginPage(error: 'wrong' | { retryAfterMs: number } | null): string {
+function loginPage(error: 'wrong' | { retryAfterMs: number } | null, next: string | null = null): string {
   const errLine =
     error === 'wrong'
       ? `<p style="${ERR_STYLE}">Wrong password. Try again.</p>`
       : error !== null
         ? `<p style="${ERR_STYLE}">Too many attempts. Try again in ${Math.max(1, Math.ceil(error.retryAfterMs / 60_000))} minute${Math.ceil(error.retryAfterMs / 60_000) > 1 ? 's' : ''}.</p>`
         : ''
-  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sign in — nodeterm</title></head><body style="${PAGE_STYLE}"><form method="post" action="/auth/login" style="${CARD_STYLE}"><h1 style="${H1_STYLE}">nodeterm</h1><p style="${SUB_STYLE}">Sign in to continue</p>${errLine}<input style="${INPUT_STYLE}" type="password" name="password" placeholder="Password" autofocus autocomplete="current-password"><button style="${BUTTON_STYLE}" type="submit">Sign in</button></form></body></html>`
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sign in — nodeterm</title></head><body style="${PAGE_STYLE}"><form method="post" action="/auth/login" style="${CARD_STYLE}"><h1 style="${H1_STYLE}">nodeterm</h1><p style="${SUB_STYLE}">Sign in to continue</p>${errLine}<input style="${INPUT_STYLE}" type="password" name="password" placeholder="Password" autofocus autocomplete="current-password">${next ? `<input type="hidden" name="next" value="${next}">` : ''}<button style="${BUTTON_STYLE}" type="submit">Sign in</button></form></body></html>`
 }
 
 function setupNeedsTokenPage(): string {
@@ -522,7 +523,7 @@ export function createHttpHandler(
         redirect(res, 302, '/setup')
         return
       }
-      sendPage(res, 200, loginPage(url.searchParams.has('error') ? 'wrong' : null))
+      sendPage(res, 200, loginPage(url.searchParams.has('error') ? 'wrong' : null, safeSessionNext(url.searchParams.get('next'))))
       return
     }
 
@@ -572,6 +573,7 @@ export function createHttpHandler(
         return
       }
       const password = form.get('password') || ''
+      const next = safeSessionNext(form.get('next'))
       let ok: boolean
       try {
         ok = await auth.verifyPasswordAsync(password)
@@ -583,11 +585,11 @@ export function createHttpHandler(
         gate.finish('success')
         const session = auth.createSession()
         setSessionCookie(req, res, session, publicOrigin)
-        redirect(res, 303, '/')
+        redirect(res, 303, next ?? '/')
         return
       }
       gate.finish('failure')
-      redirect(res, 303, '/login?error=1')
+      redirect(res, 303, '/login?error=1' + nextQuery(next, '&'))
       return
     }
 
@@ -619,8 +621,16 @@ export function createHttpHandler(
     // ---- Everything else requires a valid session --------------------------
 
     if (!proxyAuthed && !auth.validateSession(token)) {
-      if (isHtmlNavigation(req)) redirect(res, 302, '/login')
+      if (isHtmlNavigation(req)) redirect(res, 302, '/login' + nextQuery(safeSessionNext(pathname), '?'))
       else sendJson(res, 401, { error: 'unauthorized' })
+      return
+    }
+
+    // Authenticated: a `/session/<id>` link (fork patch #5, session-link-route.ts).
+    const sessionLink = sessionLinkTarget(pathname)
+    if (sessionLink) {
+      if (sessionLink.ok) redirect(res, 302, sessionLink.location)
+      else sendPage(res, 404, notFoundSessionPage())
       return
     }
 

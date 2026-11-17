@@ -70,7 +70,25 @@ export type RecentConversationsResult =
   /** Could not look at all (a relay tab, a failed call) — never shown as "no conversations". */
   | { ok: false; reason: 'unsupported' | 'failed' }
 
+/**
+ * A Claude Code session id as Claude mints it (a lowercase-or-uppercase v4-style UUID). The one
+ * shape `/session/<id>` links and `recentConversations.find` accept: checked before any filesystem
+ * read, and again on every leg that receives one (fork patch #5, docs/fork/STATUS.md).
+ */
+export const CLAUDE_SESSION_UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/
+
+export type RecentConversationFindResult =
+  /** `heldBy`: nodes the core's agent-status mirror says are running this session RIGHT NOW. The
+   *  renderer's own view can miss one (a fresh tab, another browser), and a second `--resume` of a
+   *  live session appends two processes to one transcript, so a non-empty list means focus. */
+  | { ok: true; item: RecentConversation; heldBy: string[] }
+  /** `invalid`: not a session id. `not-found`: no transcript for it under any Claude config dir on
+   *  this machine (expired, never here, or a session with no prompt). */
+  | { ok: false; reason: 'invalid' | 'not-found' | 'unsupported' | 'failed' }
+
 export interface RecentConversationsApi {
   /** Never rejects on the real legs: a failure is `{ok:false}`, never an empty list. */
   list(req?: RecentConversationsRequest): Promise<RecentConversationsResult>
+  /** One Claude session by id, from any local Claude config dir (not capped like `list`). */
+  find(sessionId: string): Promise<RecentConversationFindResult>
 }

@@ -600,7 +600,8 @@ const api: NodeTerminalApi = {
   },
   recentConversations: {
     list: (req?: RecentConversationsRequest) =>
-      ipcRenderer.invoke(IPC.recentConversationsList, req)
+      ipcRenderer.invoke(IPC.recentConversationsList, req),
+    find: (sessionId: string) => ipcRenderer.invoke(IPC.recentConversationsFind, sessionId)
   },
   wallpaper: {
     listStills: () => ipcRenderer.invoke(IPC.wallpaperListStills),

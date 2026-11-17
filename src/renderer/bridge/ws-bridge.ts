@@ -4,7 +4,7 @@ import type { AgentStatusSnapshotEntry } from '../../shared/agent-status-snapsho
 import { subscribeAgentReplay } from '../../shared/agent-replay-subscription'
 import type { DesktopWallpaper, WallpaperStill } from '../../shared/wallpaper'
 import type { AlertSoundSaveResult } from '../../shared/alert-sound'
-import type { RecentConversationsRequest, RecentConversationsResult } from '../../shared/recent-conversations'
+import type { RecentConversationsRequest, RecentConversationsResult, RecentConversationFindResult } from '../../shared/recent-conversations'
 import type {
   RunConfigApi,
   RunDevicesResult,
@@ -1142,6 +1142,10 @@ export function buildRecentConversationsApi(client: RpcClient): Pick<NodeTermina
     recentConversations: {
       list: (req?: RecentConversationsRequest) =>
         (client.request(IPC.recentConversationsList, req) as Promise<RecentConversationsResult>).catch(
+          () => ({ ok: false as const, reason: 'failed' as const })
+        ),
+      find: (sessionId: string) =>
+        (client.request(IPC.recentConversationsFind, sessionId) as Promise<RecentConversationFindResult>).catch(
           () => ({ ok: false as const, reason: 'failed' as const })
         )
     }

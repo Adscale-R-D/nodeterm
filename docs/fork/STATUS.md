@@ -125,7 +125,7 @@ worktree); pass **`--cwd`** when the target has neither, or they review the wron
 
 ---
 
-## 4. What the fork still adds (4 patches)
+## 4. What the fork still adds (5 patches)
 
 | Patch | Why it is still ours |
 |---|---|
@@ -133,6 +133,7 @@ worktree); pass **`--cwd`** when the target has neither, or they review the wron
 | **`contextLink.info` over the browser bridge** | upstream still stubs it `E_UNSUPPORTED`; without it `verify` cannot build a reviewer's brief |
 | **Claude window = 200k unless `[1m]`** | upstream still uses the `opus\|sonnet\|fable` family rule, which under-reports context pressure **5×** on every 200k session |
 | **Server Edition spawns and lanes do not overlap** | upstream's headless `placeRight` places nodes edge to edge and `group` draws its frame (28 px pad + 34 px header) over whatever is beside the members, so lanes spawned side by side end up on each other. See below. |
+| **`/session/<id>` links open a Claude session** | upstream has no browser deep link to a session (its `nodeterm://` links are desktop-only and need a confirm). See below. |
 
 **Kanban control (added 2026-09-24).** A pipeline files each lane's cards into one column per
 TASK, and the column cleans itself up:
@@ -171,6 +172,28 @@ nodeterm.sh board                                                  # columns + c
   to 80 steps of 40 px; past that it stays where it was. Nodes outside the new lane never move;
   moving a node only changes its canvas position, so its tmux session is untouched.
 - Upstreamable as-is.
+
+**`/session/<claude-session-id>` links (added 2026-11-17).** A PR comment (written by the
+project's own Claude, not by nodeterm) can link `http://localhost:<port>/session/<id>`; clicking it
+opens that session on the canvas.
+- Server: `src/server/session-link-route.ts`, hooked into `http.ts` after the sign-in gate. It only
+  checks the id is a UUID and redirects to `/?session=<id>` (the page's asset URLs are relative, so
+  it cannot be served at `/session/`). A non-UUID gets a 404 page. A signed-out click goes to
+  `/login?next=/session/<id>` and lands back on the link after sign-in; `next` is accepted only in
+  exactly that shape (no open redirect).
+- Core: `findClaudeConversation` in `src/core/recent-conversations.ts`, channel
+  `recent-conversations:find` (host-only), registered with `list` so both shells serve it. It
+  re-checks the UUID before any filesystem call, looks for exactly `<root>/<project>/<id>.jsonl`
+  under every local Claude config dir (not capped like `list`), and returns the row plus the nodes
+  the agent-status mirror says run the session now.
+- Renderer: `src/renderer/lib/sessionLink.ts` + one effect in `Canvas.tsx` (after
+  `resumeRecentConversation`). Read once after the workspace loads, the param is stripped from the
+  URL. A node running the session is focused (never a second `--resume`); a vanished folder is
+  refused with its path; otherwise the "Open recent" planner focuses a holder or resumes the
+  session in the project owning its folder, opening the folder if needed. Unknown id: a notice.
+- No confirm, deliberately: a link can only reopen an existing local session by id and carries no
+  prompt, command or folder. Tests: `recent-conversations-find.test.ts`,
+  `session-link-route.test.ts`, `sessionLink.test.ts`.
 
 Plus one UI keep: **the frame context menu's "close group and its nodes"** (`closeGroupWithChildren`
 + `groupSubtreeIds`). Upstream deleted the frame's `×` rather than implementing it, so this is the

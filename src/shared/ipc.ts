@@ -80,6 +80,8 @@ export const IPC = {
   transcriptExists: 'transcript:exists',
   /** "Open recent": the newest agent conversations on THIS machine's disk (core/recent-conversations.ts). */
   recentConversationsList: 'recent-conversations:list',
+  /** One Claude session by id (`/session/<id>` links, fork patch #5). */
+  recentConversationsFind: 'recent-conversations:find',
   claudeAccountsAdd: 'claude-accounts:add',
   claudeAccountsWaitLogin: 'claude-accounts:wait-login',
   claudeAccountsCancelWait: 'claude-accounts:cancel-wait',

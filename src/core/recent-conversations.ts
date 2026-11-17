@@ -29,8 +29,11 @@ import {
   type RecentConversation,
   type RecentConversationAgent,
   type RecentConversationsRequest,
-  type RecentConversationsResult
+  type RecentConversationsResult,
+  CLAUDE_SESSION_UUID_RE,
+  type RecentConversationFindResult
 } from '../shared/recent-conversations'
+import { nodesForAgentSession } from './agent-status-mirror'
 import type { ChatMessage } from '../shared/types'
 import { platform } from './platform'
 import { transcriptRoot, parseChatMessages, pickSessionName } from './transcript-reader'
@@ -628,12 +631,47 @@ export function normalizeRecentRequest(raw: unknown): RecentConversationsRequest
   return { ...(ids ? { codexAccountIds: ids } : {}), limit: clampLimit(raw.limit) }
 }
 
+/**
+ * One Claude session by id, from every local Claude config dir (fork patch #5: `/session/<id>`
+ * links). Unlike `list` it is not capped, so a session from months ago is found as long as its
+ * transcript is on disk. The id is checked against the UUID shape BEFORE any filesystem call, and
+ * the file is located by joining that exact id, never by a pattern: `<root>/<project>/<id>.jsonl`.
+ * Same parse, sidechain skip and `cwdState` rule as `list`.
+ */
+export async function findClaudeConversation(
+  sessionId: unknown,
+  roots: RecentRoots['claude'] = defaultRecentRoots().claude
+): Promise<RecentConversationFindResult> {
+  if (typeof sessionId !== 'string' || !CLAUDE_SESSION_UUID_RE.test(sessionId)) return { ok: false, reason: 'invalid' }
+  let best: Row | null = null
+  for (const { root, accountId } of roots) {
+    for (const proj of await listDirs(root)) {
+      const c = await statCandidate(path.join(root, proj, `${sessionId}.jsonl`))
+      if (!c) continue
+      const r = row(await cached(c, () => parseClaude(c)), c, accountId)
+      // The same id in two config dirs (an account switch copies the transcript): the newest wins,
+      // which is the copy the session is running under.
+      if (r && (!best || r.lastActiveAt > best.lastActiveAt)) best = r
+    }
+  }
+  if (!best) return { ok: false, reason: 'not-found' }
+  const item: RecentConversation = best.cwd ? { ...best, cwdState: await dirState(best.cwd) } : best
+  return { ok: true, item, heldBy: nodesForAgentSession(sessionId) }
+}
+
 /** `recent-conversations:list`, registered by BOTH shells (each lists its own machine's history). */
 export function registerRecentConversationsIpc(): void {
   platform().handle(IPC.recentConversationsList, async (raw: unknown): Promise<RecentConversationsResult> => {
     try {
       const req = normalizeRecentRequest(raw)
       return { ok: true, items: await listRecentConversationsReused(defaultRecentRoots(req), clampLimit(req.limit)) }
+    } catch {
+      return { ok: false, reason: 'failed' }
+    }
+  })
+  platform().handle(IPC.recentConversationsFind, async (raw: unknown): Promise<RecentConversationFindResult> => {
+    try {
+      return await findClaudeConversation(raw)
     } catch {
       return { ok: false, reason: 'failed' }
     }

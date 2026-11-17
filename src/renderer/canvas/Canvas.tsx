@@ -1,4 +1,5 @@
 import { PrepareUpdateDialog } from '../components/PrepareUpdateDialog'
+import { takeSessionLinkParam, sessionLinkAction } from '../lib/sessionLink'
 import type { PrepNode } from '../lib/updatePrep'
 import { markLocalOnSshCanvas } from '../lib/localOnSshCanvas'
 import { useDevPortScanner } from './useDevPortScanner'
@@ -18474,6 +18475,25 @@ export function Canvas() {
     },
     [resumeContext, travelToNode, resumeWhenLanded, reopenProject, switchProject, openOrAdoptFolder]
   )
+
+  // `/session/<id>` links (fork patch #5, lib/sessionLink.ts): read once, after the workspace loaded.
+  const sessionLinkRan = useRef(false)
+  useEffect(() => {
+    if (!workspaceLoaded || sessionLinkRan.current) return
+    sessionLinkRan.current = true
+    const id = takeSessionLinkParam()
+    if (!id) return
+    void window.nodeTerminal.recentConversations.find(id).then((res) => {
+      const known = (nodeId: string): boolean =>
+        useProjects.getState().projects.some((p) => p.nodes.some((n) => n.id === nodeId))
+      const act = sessionLinkAction(id, res, known)
+      if (act.kind === 'focus') {
+        setWelcomeOpen(false)
+        travelToNode(act.nodeId)
+      } else if (act.kind === 'refuse') setNotice({ kind: 'error', text: act.text })
+      else resumeRecentConversation(act.conv)
+    })
+  }, [workspaceLoaded, travelToNode, resumeRecentConversation])
 
   // ── `nodeterm://` links (main/open-link.ts, components/OpenLinkSheet.tsx) ──────────────────────
   // Main validates a link and asks; the sheet shows exactly what will open and where; main re-checks

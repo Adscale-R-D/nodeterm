@@ -267,6 +267,8 @@ export const VIEW: Readonly<Record<string, Check>> = Object.freeze({
   [IPC.gitHistory]: gitView(),
   // The RESPONSE is trimmed by narrowResponseForRole (it is a response, not an event).
   [IPC.agentSubagentSnapshot]: pass,
+  // Same: the host's per-node agent states for a late joiner, trimmed to the shared nodes.
+  [IPC.agentStatusSnapshot]: pass,
   [IPC.presenceHello]: pass,
   [IPC.presenceCursor]: pass,
   [IPC.presenceFocus]: pass,
@@ -342,6 +344,12 @@ export const EDITOR_ONLY: ReadonlySet<string> = new Set<string>([
   IPC.ptySendText,
   IPC.ptySendChatPrompt,
   IPC.ptySendToEmptyPrompt,
+  // Carrying a draft between the ⌘M composer and the input box types into, or clears, the pane.
+  IPC.ptyPutChatDraft,
+  IPC.ptyTakeChatDraft,
+  // The composer's screen poll; only an editor has a composer.
+  IPC.ptyReadChatScreen,
+  IPC.ptyInterruptChat,
   IPC.ptyPaneOwner,
   // A host filesystem path, not a view of the terminal — a viewer's file links keep the node cwd.
   IPC.ptyPaneCwd,
@@ -501,6 +509,7 @@ export const EDITOR_ONLY: ReadonlySet<string> = new Set<string>([
   IPC.agentStatus,
   IPC.agentUnreadClear,
   IPC.agentSubagentActivity,
+  IPC.agentRemoteControl,
   IPC.presenceSync,
   IPC.presencePeer
 ])
@@ -559,6 +568,8 @@ export const VIEW_EVENTS: Readonly<Record<string, EventCheck>> = Object.freeze({
     return typeof toolUseId === 'string' && sharedNode(owners?.get(toolUseId), ctx)
   },
   [IPC.agentUnreadClear]: (a, ctx) => sharedNode(a[0], ctx),
+  // Claude Remote Control on/off for one node (core/remote-control-scan.ts), judged by its node.
+  [IPC.agentRemoteControl]: (a, ctx) => sharedNode(field(a[0], 'nodeId'), ctx),
   // Both carry a whole Project document.
   [IPC.workspaceExternalChange]: (a, ctx) => sharedProject(field(a[0], 'id'), ctx),
   [IPC.workspaceServerChange]: (a, ctx) => sharedProject(field(a[0], 'id'), ctx),
@@ -643,15 +654,20 @@ export function filterOutboundEvent(json: string, ctx: AccessContext, subagentOw
   return false
 }
 
+/** The snapshot responses keyed by node, trimmed to the shared nodes for a non-editor: the subagent
+ *  snapshot (every running subagent's task text) and the agent-status snapshot (every node's state,
+ *  session id and account). */
+const NODE_KEYED_SNAPSHOTS: ReadonlySet<string> = new Set([IPC.agentSubagentSnapshot, IPC.agentStatusSnapshot])
+
 /**
- * A response the peer asked for that no argument check can narrow. Only the subagent snapshot today:
- * it holds every running subagent's task text, keyed by node. Editors and every other method pass
- * through unchanged. Wire it into the host's `narrowResponse` hook.
+ * A response the peer asked for that no argument check can narrow: the node-keyed snapshots above,
+ * and the workspace with its exec fields removed. Editors and every other method pass through
+ * unchanged. Wire it into the host's `narrowResponse` hook.
  */
 export function narrowResponseForRole(method: string, result: unknown, ctx: AccessContext): unknown {
   if (isEditor(ctx.role)) return result
   if (method === IPC.workspaceLoad) return redactWorkspaceExec(result)
-  if (method !== IPC.agentSubagentSnapshot) return result
+  if (!NODE_KEYED_SNAPSHOTS.has(method)) return result
   return Array.isArray(result) ? result.filter((e) => sharedNode(field(e, 'nodeId'), ctx)) : []
 }
 

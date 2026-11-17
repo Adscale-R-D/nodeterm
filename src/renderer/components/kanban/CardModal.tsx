@@ -1,8 +1,8 @@
 import { Suspense, lazy, useCallback, useEffect, useRef, useState } from 'react'
+import { sshHostKey } from '@shared/ssh'
 import { createPortal } from 'react-dom'
 import { isTopDialog, nextDialogId, popDialog, pushDialog } from '../dialog-stack'
 import {
-  IconBroadcast,
   IconChat,
   IconClose,
   IconColor,
@@ -23,11 +23,9 @@ import { nodeIconDialog } from '../NodeIconPicker'
 import { applyIconChoice } from '../../lib/nodeIconChoice'
 import { normalizeNodeIcon, type NodeIcon } from '@shared/node-icon'
 import { ContextMeter } from '../ContextMeter'
+import { RemoteControlButton } from '../RemoteControlButton'
 import { isRemoteSessionNode } from '@shared/worktree'
 import { AccountChip, useAccountChip } from '../AccountChip'
-import { LiveLinkChip, projectSessionSource } from '../LiveLinkChip'
-import { useWatchLinks } from '../../state/watchLinks'
-import { liveLinkUnavailable } from '../../lib/liveLinkEntry'
 import { isBrowserRuntime } from '@renderer/bridge/runtime'
 import { IssueRefChip } from '../IssueRefChip'
 import { TeamProgressChip } from '../TeamProgressChip'
@@ -37,7 +35,6 @@ import { useProjects } from '../../state/projects'
 import type { TeamStation } from '../../lib/teamProgress'
 import { sessionNameRepeatsTitle } from '../../lib/cardRedundancy'
 import type { IssueRef } from '@shared/github-issue-ref'
-import { useAgentStatus } from '../../state/agentStatus'
 import { useSessionNaming } from '../../state/sessionNaming'
 import { useCardPanel } from '../../state/cardPanel'
 import {
@@ -48,7 +45,7 @@ import {
   CARD_MODAL_MIN_W,
   CARD_MODAL_MIN_H
 } from '../../state/cardModalSize'
-import { useSession } from '../../session/session'
+import { useSession, useSessionStores } from '../../session/session'
 // The same wake trigger the canvas node's SLEEPING/PAUSED chip and mount/visibility auto-wakes
 // use — NOT a bespoke resume path, so a click here gets the same WakeInputBuffer protection and
 // retries. Importing one function out of the canvas node module is safe: TerminalNode.tsx already
@@ -69,10 +66,9 @@ import { ModalTerminal } from './ModalTerminal'
 import { BrowserSurface } from '../../nodes/BrowserSurface'
 import { BrowserDrivingIndicator } from '../../nodes/BrowserDrivingChip'
 import { NoteMarkdown } from '../NoteMarkdown'
-import { inLiveChatDrawer } from '../../lib/liveChatPin'
 import { relativeTime } from '../../lib/relativeTime'
 import { TerminalMarkdownView } from '../../nodes/TerminalMarkdownView'
-import { canChat } from '@shared/agents/config'
+import { canChat, canRemoteControl } from '@shared/agents/config'
 import { transcriptSessionFor } from '../../lib/transcriptSession'
 import { effectiveAccountId } from '../../lib/accountChip'
 import { useSettings } from '../../state/settings'
@@ -82,6 +78,7 @@ import {
   type LocalFileTarget
 } from './LocalFilePreviewModal'
 import { ChatPanelFallback } from '../../nodes/ChatPanelFallback'
+import { carryDraftToChat, carryDraftToTerminal } from '../../lib/chatDraftCarry'
 
 // Code-split exactly like the canvas node's: ChatPanel carries the markdown renderer, and the
 // card modal must not pull it onto the board's first paint.
@@ -93,8 +90,7 @@ interface CardModalProps {
    *  on the Omni board. Both boards mount the modal under THAT project's session
    *  (`ProjectSessionScope`: `sessionForProject(projectId)` + `OwningProjectContext`), so
    *  `useSession()` here and in the terminal, chat and file views below is the core the node runs
-   *  on — a team tab's relay session, never this desktop's local one. The LIVE chip (R57) and the
-   *  "Share live link" action (H4) still resolve through this id. */
+   *  on — a team tab's relay session, never this desktop's local one. */
   projectId: string
   /** Owning project, supplied by the board (not necessarily the active project in Omni). */
   projectName?: string
@@ -158,17 +154,6 @@ export function CardModal({ session, projectId, projectName, projectColor, colum
   // The header slot decides "icon or smiley" on the NORMALIZED value, the answer NodeIconView
   // itself gives — on the raw one, an invalid stored icon drew an empty, un-muted slot.
   const sessionIcon = normalizeNodeIcon(session.icon)
-  // Which machine this node runs on, for the live-link chip and action (R57, H4).
-  const liveLinkSource = projectSessionSource(projectId)
-  const activeLiveLinks = useWatchLinks((s) => s.links.length)
-  // The ONE availability rule every opener checks before the Pro gate. The modal paints ABOVE the
-  // canvas's notice strip, so the reason goes on the button (disabled + title) rather than into a
-  // notice nobody could see.
-  const liveLinkWhy = liveLinkUnavailable({
-    serverEdition: isBrowserRuntime(),
-    source: liveLinkSource,
-    activeLinks: activeLiveLinks
-  })
   const idRef = useRef<string>()
   if (!idRef.current) idRef.current = nextDialogId()
   const id = idRef.current
@@ -179,21 +164,30 @@ export function CardModal({ session, projectId, projectName, projectColor, colum
   // Sticky body: rendered markdown until clicked, the plain textarea while editing (mirrors
   // StickyNode's toggle, so the canvas and the card can't disagree about how a note reads).
   const [editingNote, setEditingNote] = useState(false)
-  const agentSessionId = useAgentStatus((st) => st.byId[session.id]?.sessionId)
-  const observedAgentId = useAgentStatus((st) => st.byId[session.id]?.agentId)
-  const paused = useAgentStatus((st) => !!st.byId[session.id]?.paused)
-  const dropped = useAgentStatus((st) => !!st.byId[session.id]?.dropped)
-  const hibernated = useAgentStatus((st) => !!st.byId[session.id]?.hibernated)
-  const wakeBlocked = useAgentStatus((st) => st.byId[session.id]?.wakeBlocked)
+  // The agent status of the session this card's PROJECT runs under (the board mounts the modal
+  // through `ProjectSessionScope`): a team tab's card reads its relay session's store, never the
+  // default one, which holds the handed-off SSH project's entry under the same node id.
+  const agentStatusStore = useSessionStores().agentStatus.store
+  const agentSessionId = agentStatusStore((st) => st.byId[session.id]?.sessionId)
+  const observedAgentId = agentStatusStore((st) => st.byId[session.id]?.agentId)
+  const paused = agentStatusStore((st) => !!st.byId[session.id]?.paused)
+  const dropped = agentStatusStore((st) => !!st.byId[session.id]?.dropped)
+  const hibernated = agentStatusStore((st) => !!st.byId[session.id]?.hibernated)
+  const wakeBlocked = agentStatusStore((st) => st.byId[session.id]?.wakeBlocked)
   // Same chip as the card and the canvas node header — the modal is where a user checks WHICH
   // session this is, so the account belongs in its header chips, not only two views away.
-  const observedAccount = useAgentStatus((st) => st.byId[session.id]?.account)
+  const observedAccount = agentStatusStore((st) => st.byId[session.id]?.account)
   // The session name, where it is not already the title (lib/cardRedundancy — the rule the card
   // and the canvas node header use). The card carries it on its detail line; the modal, which
   // hides the node, carries it here so the session's name is never two views away.
-  const sessionName = useAgentStatus((st) => st.byId[session.id]?.session)
+  const sessionName = agentStatusStore((st) => st.byId[session.id]?.session)
   const portsRemote = useProjects((s) => !!(portsProjectId && s.getProject(portsProjectId)?.ssh))
-  const accountChip = useAccountChip(session.spawn.accountId, observedAccount)
+  const accountChip = useAccountChip(
+    session.spawn.accountId,
+    observedAccount,
+    agentStatusStore,
+    session.spawn.ssh ? sshHostKey(session.spawn.ssh) : undefined
+  )
   const [naming, setNaming] = useState(false)
   // The board funnel's progress for this node (`onAiName`), shared with the card menu's row.
   const funnelNaming = useSessionNaming((st) => !!st.byId[session.id])
@@ -232,10 +226,8 @@ export function CardModal({ session, projectId, projectName, projectColor, colum
   useEffect(() => {
     setMdFor(initialView === 'md' ? session.id : null)
   }, [session.id, initialView])
-  const toggleMd = useCallback(() => {
-    setMdFor((cur) => (cur === session.id ? null : session.id))
-    setSearchOpen(false) // the FindBar searches the xterm the view now covers
-  }, [session.id])
+  // `toggleMd` (the user's own flip) carries a half-typed draft across, as on the canvas node
+  // (lib/chatDraftCarry.ts); it is declared below, once `useChat` is known.
   // Same decision the node makes (TerminalNode: `showChat` / `useChat`): the CREATED agent picks
   // the reader, ChatPanel only once the session id is known, else the output view.
   const createdAgent = session.agentId ?? session.spawn.agentId
@@ -249,6 +241,34 @@ export function CardModal({ session, projectId, projectName, projectColor, colum
     cwd: session.spawn.cwd
   })
   const useChat = mdOpen && !!createdAgent && canChat(createdAgent) && !!transcript.sessionId
+  // Whether the ⌘M face is the chat panel, asked before it is open (the carry into the composer).
+  const chatFace = !!createdAgent && canChat(createdAgent) && !!transcript.sessionId
+  // Same gate as the node header: Claude only, and not on a relay tab (no local transcript tail).
+  const remoteControlShown = !!createdAgent && canRemoteControl(createdAgent) && coreSource !== 'relay'
+  const chatFaceRef = useRef(chatFace)
+  chatFaceRef.current = chatFace
+  const mdOpenRef = useRef(mdOpen)
+  mdOpenRef.current = mdOpen
+  const carryingRef = useRef(false)
+  const toggleMd = useCallback(() => {
+    if (carryingRef.current) return
+    setSearchOpen(false) // the FindBar searches the xterm the view now covers
+    if (!mdOpenRef.current) {
+      setMdFor(session.id)
+      if (chatFaceRef.current) void carryDraftToChat(api.pty, session.id, createdAgent)
+      return
+    }
+    if (!chatFaceRef.current) {
+      setMdFor(null)
+      return
+    }
+    // While the draft is typed into the terminal, a second press would type it again.
+    carryingRef.current = true
+    void carryDraftToTerminal(api.pty, session.id, createdAgent).finally(() => {
+      carryingRef.current = false
+      setMdFor((cur) => (cur === session.id ? null : cur))
+    })
+  }, [api.pty, session.id, createdAgent])
   const captureFull = useCallback((nodeId: string) => api.pty.capture(nodeId, true), [api])
   const mdChip = chipFor('node.toggleMarkdown')
   // The chord (main-intercepted on desktop, bridged in the browser) toggles THIS view while the
@@ -391,10 +411,6 @@ export function CardModal({ session, projectId, projectName, projectColor, colum
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape' || !isTopDialog(id)) return
-      // An Escape typed in the Live chat drawer is the drawer's, never this modal's: docked over the
-      // modal (raised), the drawer is not a dialog, so this modal is still the top one. Not consumed —
-      // the drawer's own rule decides (unpinned: close the drawer; pinned: nothing).
-      if (inLiveChatDrawer(e.target) || inLiveChatDrawer(document.activeElement)) return
       // The header Color swatches own Esc first: close the menu, not the whole modal. (The menu is
       // not a dialog-stack entry, so this modal still reads as the top dialog while it is open.)
       if (colorMenuOpenRef.current) {
@@ -526,7 +542,7 @@ export function CardModal({ session, projectId, projectName, projectColor, colum
             <span className="kanban-modal__column" title={columnTitle ?? 'Ungrouped'}>{columnTitle ?? 'Ungrouped'}</span>
           </div>
           {isTerminal && onOpenIssue && <IssueRefChip issueRef={session.issueRef} onOpen={onOpenIssue} />}
-          {isTerminal && team && team.length > 0 && onTravel && <TeamProgressChip stations={team} onTravel={onTravel} />}
+          {isTerminal && team && team.length > 0 && onTravel && <TeamProgressChip stations={team} onTravel={onTravel} statusStore={agentStatusStore} />}
           {isTerminal && session.pendingLaunch && (
             <QueuedLaunchChip nodeId={session.id} pending={session.pendingLaunch} firstOpen={session.launchFirstOpen} onRun={onRunQueued} />
           )}
@@ -549,7 +565,6 @@ export function CardModal({ session, projectId, projectName, projectColor, colum
             </span>
           )}
           {isTerminal && <AccountChip chip={accountChip} />}
-          {isTerminal && <LiveLinkChip nodeId={session.id} source={liveLinkSource} className="kanban-modal__live" />}
           {/* The driving chip, so a user watching a browser card THROUGH the modal is not
               driving-blind. The lease is keyed by node id (not by webview object), so this shows
               when the node is being driven even though the drive lands on the CANVAS webview, not
@@ -610,6 +625,15 @@ export function CardModal({ session, projectId, projectName, projectColor, colum
             <>
               {/* Same context-window pill + popover as the node header (null until usage data). */}
               <ContextMeter sessionId={transcript.sessionId ?? null} fromLaunchId={transcript.fallback} nodeId={session.id} remote={isRemoteSessionNode(session.spawn)} agentId={session.agentId ?? session.spawn.agentId ?? observedAgentId} />
+              {remoteControlShown && (
+                <RemoteControlButton
+                  className="kanban-modal__action kanban-modal__remote-control"
+                  nodeId={session.id}
+                  sessionId={transcript.sessionId}
+                  readState={() => agentStatusStore.getState().byId[session.id]?.state}
+                  pty={api.pty}
+                />
+              )}
               <button
                 className="kanban-modal__action"
                 title={commandTooltip(mdOpen ? 'Back to the live terminal' : 'Markdown / chat view', 'node.toggleMarkdown')}
@@ -645,26 +669,6 @@ export function CardModal({ session, projectId, projectName, projectColor, colum
                 onClick={nameWithAi}
               >
                 {naming || funnelNaming ? '…' : '✦'}
-              </button>
-              {/* Share a live link to this terminal — the canvas node menu's row, as a header action.
-                  The canvas opens the dialog (`nodeterm:live-link`) after re-checking availability
-                  and the Pro gate; the event names the card's PROJECT so a node of an Omni lane is
-                  judged by its own session, not the active tab's. */}
-              <button
-                className="kanban-modal__action"
-                data-action="live-link"
-                title={liveLinkWhy ?? 'Share live link'}
-                aria-label="Share live link"
-                disabled={!!liveLinkWhy}
-                onClick={() =>
-                  window.dispatchEvent(
-                    new CustomEvent('nodeterm:live-link', {
-                      detail: { nodeId: session.id, title: session.title, projectId }
-                    })
-                  )
-                }
-              >
-                <IconBroadcast />
               </button>
               {hasSessionRows && (
                 <button

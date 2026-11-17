@@ -6,6 +6,8 @@ import fs from 'fs'
 import type { ContextWindowUsage } from '../shared/types'
 import { claudeWindowFor } from './model-window'
 import { splitCompleteLines } from './subagent-tail'
+import { parseRemoteControl } from './remote-control-scan'
+import { claudeInterruptMarkerOf } from '../shared/agents/claude-interrupt'
 
 const POLL_MS = 1000
 // Cap the initial read: a resumed Claude transcript can be many MB, and reading the whole file
@@ -133,18 +135,7 @@ export function parseToolResultIds(text: string | string[]): string[] {
   return ids
 }
 
-/**
- * The two texts Claude Code writes as a USER record when the user interrupts a turn (Esc, or
- * Ctrl+C once). A CLOSED set: measured on 2.1.285 (`shared/agents/__fixtures__/claude/
- * interrupt-capture.json`) — `[Request interrupted by user]` after streamed text,
- * `… for tool use]` when a tool call or its permission dialog was cancelled. Any other wording is
- * ignored, so a future CLI that words it differently degrades to what happened before this
- * existed (the node waits for its next hook, or the stale sweep), never to a guess.
- */
-export const CLAUDE_INTERRUPT_MARKERS: ReadonlySet<string> = new Set([
-  '[Request interrupted by user]',
-  '[Request interrupted by user for tool use]'
-])
+export { CLAUDE_INTERRUPT_MARKERS } from '../shared/agents/claude-interrupt'
 
 const PROMPT_ID_RE = /^[A-Za-z0-9_-]{1,128}$/
 
@@ -159,12 +150,7 @@ type TranscriptRecord = {
   message?: { content?: unknown }
 }
 
-const isMarkerRecord = (o: TranscriptRecord): boolean => {
-  const content = o.message?.content
-  if (!Array.isArray(content) || content.length !== 1) return false
-  const part = content[0] as { type?: unknown; text?: unknown } | null
-  return part?.type === 'text' && typeof part.text === 'string' && CLAUDE_INTERRUPT_MARKERS.has(part.text)
-}
+const isMarkerRecord = (o: TranscriptRecord): boolean => claudeInterruptMarkerOf(o.message?.content) !== null
 
 /** A main-thread user record that OPENS a turn: the typed (or dequeued) prompt itself — not a tool
  *  result, not a meta record, not the interrupt marker. */
@@ -276,6 +262,10 @@ export interface ContextTailOptions {
   /** Fired when a tracked session's transcript records a turn INTERRUPT marker, with that turn's id
    *  — see `parseTurnInterrupts`. Claude only; the consumer decides whether it is the live turn. */
   onTurnInterrupted?: (sessionId: string, turnId: string) => void
+  /** Fired when a tracked session's transcript records Claude Remote Control connecting (`true`)
+   *  or disconnecting (`false`) — see `parseRemoteControl`. Claude only. A STATE, not an event:
+   *  the latest record in a read wins, and a read of old history may report it too. */
+  onRemoteControl?: (sessionId: string, on: boolean) => void
   /**
    * How to read the used/window numbers out of this agent's transcript. Defaults to claude's
    * `parseLatestUsage`. gemini and codex pass their own (`core/gemini-session.ts`
@@ -458,6 +448,10 @@ export function createContextTail(
             for (const id of parseToolResultIds(completeLines)) opts.onToolResult(sessionId, id)
           if (opts?.onTurnInterrupted)
             for (const id of t.interrupts.scan(completeLines)) opts.onTurnInterrupted(sessionId, id)
+          if (opts?.onRemoteControl) {
+            const rc = parseRemoteControl(completeLines)
+            if (rc !== null) opts.onRemoteControl(sessionId, rc)
+          }
         }
       }
 

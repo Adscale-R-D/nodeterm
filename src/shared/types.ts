@@ -1,6 +1,12 @@
-import type { ChatPromptResult, EmptyPromptResult, TextDeliveryResult } from './text-delivery'
+import type {
+  ChatDraftPutResult,
+  ChatDraftTakeResult,
+  ChatInterruptResult,
+  ChatPromptResult, EmptyPromptResult, TextDeliveryResult } from './text-delivery'
+import type { ChatScreenRead } from './agents/claude-screen'
 import type { PushWebhookMinted, PushWebhookResult, PushWebhookTokenInfo } from './push-webhook'
 import type { IdentitySeedEntry } from './agent-identity-seed'
+import type { AgentStatusSnapshotEntry } from './agent-status-snapshot'
 import type { WhiteboardFile, WhiteboardSaveResult } from './whiteboard'
 import type { PrWaitHold } from './pr-wait'
 import type { SessionBackend } from './session-backend'
@@ -30,6 +36,7 @@ import type { ProjectKanbanGitHub } from './github-issues'
 import type { KanbanPullAutoMove, KanbanPullLinks } from './kanban-pull-links'
 import type { BoardDispatch } from './board-dispatch'
 import type { CodexAccount } from './codex-account'
+import type { ClaimResult, ProjectLimitState } from './project-limit'
 import type { NotchAlign } from './notch-hud'
 import type { ProjectIcon, ProjectIconPickResult } from './project-icon'
 import type { AlertSoundKind, AlertSoundSaveResult, CustomAlertSounds } from './alert-sound'
@@ -215,6 +222,18 @@ export interface PtyCreateOptions {
    * "not connected" overlay and re-spawns when the master is back.
    */
   requireRemote?: boolean
+  /**
+   * "If this create turns out to be a COLD start, I want the persisted scrollback back." Set by a
+   * caller that would otherwise replay the snapshot into its own emulator (i.e. not a node being
+   * opened for the first time with an `initialCommand`).
+   *
+   * It exists because the emulator is the wrong place for it on a tmux-backed session: tmux puts
+   * the client on the alternate screen at attach, hiding anything written before it. With this
+   * set, core writes the snapshot into the new PANE instead and answers
+   * `PtyCreateResult.scrollbackSeeded`. Ignored on a warm attach, a co-attach join, an SSH-project
+   * node and the non-tmux backends — there the caller's own replay still applies.
+   */
+  restoreScrollback?: boolean
   /**
    * The ONE way a terminal may run on THIS machine while it sits on an SSH project's canvas: the
    * local-account login node Settings → Accounts drops onto whatever canvas is active. Core refuses
@@ -445,6 +464,12 @@ export interface PtyCreateResult {
    * checked. Nothing was joined or started, and the existing session was left untouched.
    */
   unavailable?: 'ssh' | 'codex-account' | 'join-only' | 'held-elsewhere' | 'new-only'
+  /**
+   * Core already put the persisted scrollback (and the "session restored" separator) into the new
+   * tmux pane — see `PtyCreateOptions.restoreScrollback`. The caller must NOT replay the snapshot
+   * into its emulator: tmux paints it and owns it as history. Only ever set with `fresh: true`.
+   */
+  scrollbackSeeded?: boolean
 }
 
 /** Payload of `pty:recycled` — see IPC.ptyRecycled and `recycleAction` in the renderer. */
@@ -1299,9 +1324,6 @@ export interface TmuxStatus {
   persistence?: {
     enabled: boolean
     backend: 'tmux' | 'zellij' | 'session-host' | null
-    /** Session host only: the CONNECTED host speaks `watch-attach`, so a live link viewer can join a
-     *  node nobody holds open. Absent = no / not known yet. */
-    watchJoin?: boolean
   } | null
   /**
    * The optional Zellij backend (@shared/session-backend): whether a `zellij` binary was found and
@@ -1370,8 +1392,8 @@ export interface PtyApi {
    *  `everySocket` (optional, trailing) widens a kill for a session we hold NOTHING for to every
    *  local tmux socket the name could be on. Opt-in for one caller — the session-memory panel's
    *  speculative kill of a row it swept off either socket. An ordinary node-× must not set it: it
-   *  takes the same unheld branch after an app restart, and `nodeterm-rmt` holds sessions another
-   *  machine's nodeterm SSHed in to spawn. */
+   *  takes the same unheld branch after an app restart, and the legacy `nodeterm-rmt` holds sessions
+   *  a pre-unification build on another machine SSHed in to spawn. */
   destroy(persistKey: string, opts?: { everySocket?: boolean }): void
   /** Ends a node's persistent session so the SAME node id respawns in a new cwd ("move into
    *  worktree"). Same tmux kill as `destroy`, opposite intent: the node stays on the canvas, so
@@ -1426,6 +1448,21 @@ export interface PtyApi {
    *  (issue #1144 — the app's own link notes). Refused, with the reason, before anything is written
    *  when the composer holds a draft, a dialog owns the keyboard, or emptiness cannot be proven. */
   sendToEmptyPrompt(persistKey: string, text: string, agentId: string): Promise<EmptyPromptResult>
+  /** One read of an agent's screen for the ⌘M chat view's poll: who owns the keyboard, and the
+   *  prompt the agent suggests next (claude: `readClaudeSuggestion`). An agent with no measured
+   *  reader, or a pane that could not be read, answers `{ screen: { kind: 'unknown' }, suggestion: null }`. */
+  readChatScreen(persistKey: string, agentId: string): Promise<ChatScreenRead>
+  /** Esc from the ⌘M chat view: interrupt a running turn, for an agent whose interrupt is measured
+   *  (claude). Refused before writing when the agent's own dialog owns the keyboard. `sentText` (the
+   *  chat view's last send) lets core take it back out of the agent's input box when the Esc landed
+   *  before the reply started; it comes back as `restored`. Never rejects on the desktop. */
+  interruptChat(persistKey: string, agentId: string, sentText?: string): Promise<ChatInterruptResult>
+  /** ⌘M chat → terminal: type the chat draft into the agent's EMPTY input box, unsent. Never
+   *  rejects on the desktop. */
+  putChatDraft(persistKey: string, agentId: string, text: string): Promise<ChatDraftPutResult>
+  /** Terminal → ⌘M chat: take a draft that can be read back exactly out of the agent's input box
+   *  (it is cleared there). Never rejects on the desktop. */
+  takeChatDraft(persistKey: string, agentId: string): Promise<ChatDraftTakeResult>
   /** Is tmux available on this host (else the silent plain-shell fallback), plus a suggested
    *  install command for the "tmux not found" banner. */
   tmuxStatus(): Promise<TmuxStatus>
@@ -2303,6 +2340,10 @@ export interface Settings {
   /** Draw the canvas dot grid (Settings → Appearance). Display only — snapping and align-to-grid
    *  are unchanged. Default ON in every appearance; read through `showCanvasDots`. */
   canvasDots: boolean
+  /** Pulse the RUNNING chip on board cards (Settings → Appearance). Off = the same chip, held still.
+   *  The node header's mascot is not affected. Default ON; read through `pulseBoardRunning`, so only
+   *  a literal false stops it. */
+  boardRunningPulse: boolean
   /** The Liquid Glass slider (Settings → Appearance), 0 = Clear … 1 = Tinted. null = the Readable
    *  tick, where text keeps 4.5:1 (renderer/lib/glassContrast.ts `resolveGlassSlider`). */
   glassTint: number | null
@@ -2358,11 +2399,20 @@ export interface Settings {
    *  footprint across restarts. Independent of manual "Pause session", which always persists this
    *  way regardless of this setting. */
   agentHibernationPersistAcrossRestart: boolean
-  /** Send anonymous usage data (version/OS) to the telemetry backend. Opt-OUT (default on):
-   *  version/OS only, nothing personal, client IP never stored. Turn it off in Settings → Privacy
+  /** Send anonymous usage data: the version/OS telemetry ping, and the open-project count on the
+   *  /v1/check call (`openProjects`, a number only — never names, paths or hosts). Opt-OUT
+   *  (default on): nothing personal, client IP never stored. Turn it off in Settings → Privacy
    *  (or hard-disable with DO_NOT_TRACK / NODETERM_TELEMETRY_DISABLED). Note: a lighter anonymous
    *  install count also rides the /v1/check call and is NOT gated on this toggle — see core/check.ts. */
   telemetryEnabled: boolean
+  /** The user's consent to license and free-project-allowance calls to api.nodeterm.dev while
+   *  DO_NOT_TRACK / NODETERM_TELEMETRY_DISABLED is set. Default off: under DNT nothing
+   *  license-related leaves the machine until the user says so. Covers ONLY the calls behind
+   *  `licenseNetworkGate()` (core/license.ts) — never telemetry or the check feed, which stay off
+   *  under DNT whatever this says. Read as `=== true` (main installs it via
+   *  `setLicenseNetworkConsent`), so a hand-edited non-boolean is no consent. Shown and revocable in
+   *  Settings → Privacy only while DNT is set. Never settable by an agent (SETTINGS_VERB_FORBIDDEN). */
+  licenseNetworkConsent: boolean
   /** Debug log panel (issue #78): captures the app's own console into an in-memory, redacted
    *  ring and unlocks the log viewer. Default off — a debugging tool, not a daily surface.
    *  Toggle in Settings → Application → Debug. */
@@ -2597,6 +2647,7 @@ export const DEFAULT_SETTINGS: Settings = {
   // reads as noise to users who navigate by the trail chords/Dock buttons instead.
   showResumeCard: false,
   canvasDots: true,
+  boardRunningPulse: true,
   glassTint: null,
   glassBlurWhileMoving: true,
   usagePercentMode: 'remaining',
@@ -2622,6 +2673,8 @@ export const DEFAULT_SETTINGS: Settings = {
   // Opt-out (default on). Existing users pick this up on hydrate ONLY if their settings.json has
   // no telemetryEnabled key yet; anyone who already saved settings keeps their stored value.
   telemetryEnabled: true,
+  // Off: under DO_NOT_TRACK no license call runs until the user consents in Settings → Privacy.
+  licenseNetworkConsent: false,
   debugLogPanel: false,
   phoneAccessEnabled: true,
   mobilePushEnabled: true,
@@ -2793,10 +2846,10 @@ export interface SshProjectApi {
    * mounted, and must be awaited BEFORE disconnect (which kills the master). `nodeIds` are
    * raw node ids; main maps them to `nt-<id>` session names.
    *
-   * `everySocket` widens the kill to every tmux socket on the host rather than the `nodeterm-rmt`
-   * one an SSH project spawns on. Opt-in for ONE caller — the session-memory panel, whose rows are
-   * swept off both sockets. Project deletion stays narrow: `node-terminal` on that host belongs to
-   * a nodeterm running ON it, not to us.
+   * `everySocket` widens the kill to every tmux socket on the host rather than the `node-terminal`
+   * one an SSH project spawns on (shared with a nodeterm running ON the host). Opt-in for ONE
+   * caller — the session-memory panel, whose rows are swept off both sockets. Project deletion
+   * stays narrow: the legacy `nodeterm-rmt` holds only what an older build left behind.
    */
   killSessions(
     projectId: string,
@@ -3074,9 +3127,24 @@ export interface Announcement {
   level?: 'info' | 'success' | 'warning'
 }
 
+/** A one-time popup from the same feed (`popups` in the check reply): shown once per install. */
+export interface PopupAnnouncement extends Announcement {
+  /** The button's label; absent = "Learn more" for a link, "Upgrade to Pro" for the checkout. */
+  ctaLabel?: string
+  /** 'upgrade' = the button starts the app's own Pro checkout instead of opening `url`. */
+  action?: 'upgrade'
+  /** The SHA-256 naming its picture, fetched with `AnnouncementsApi.popupImage`. */
+  image?: string
+}
+
 export interface AnnouncementsApi {
   /** Fetch the announcements feed from the website (returns [] on any failure). */
   fetch(): Promise<Announcement[]>
+  /** The feed's one-time popups ([] on any failure, and on the Server Edition, which does not read
+   *  the feed). Which of them were already shown is the renderer's record, not the feed's. */
+  popups(): Promise<PopupAnnouncement[]>
+  /** A popup's picture as a `data:` URL, or null when it cannot be had. */
+  popupImage(sha256: string): Promise<string | null>
 }
 
 export interface NotifyPayload {
@@ -3273,10 +3341,24 @@ export interface SessionMemoryRow {
   /** Everything below it (MCP servers, headless browsers, …). */
   childrenMb: number
   childCount: number
+  /** The whole tree: the pane's own process plus everything below it. */
   totalMb: number
+  /** The biggest single process in the tree, pane process included. Part of `totalMb`. */
+  largestMb: number
+  /** Its name, cleaned for display (`processLabel`). Absent when the table carried no name. */
+  largestName?: string
   /** `#{pane_current_command}` — the agent/shell label. */
   command: string
 }
+
+/**
+ * What a sweep's numbers are, because the three measures answer differently for the same process:
+ * on a Mac an idle MCP server measured 242 MB of footprint and 4 MB of rss (most of it compressed).
+ *  - `footprint`: macOS phys_footprint, Activity Monitor's "Memory" column;
+ *  - `rss`: resident memory: Linux, and every SSH host, which is read with `ps` whatever it runs;
+ *  - `working-set`: Windows, Task Manager's "Working set" column.
+ */
+export type SessionMemoryMetric = 'footprint' | 'rss' | 'working-set'
 
 /**
  * `ok: false` means the sweep could not run (no tmux binary, unreadable process table). It is NOT
@@ -3288,6 +3370,8 @@ export interface SessionMemoryReport {
   ok: boolean
   rows: SessionMemoryRow[]
   mem: MemInfo | null
+  /** The measure `rows` are in. Absent when the sweep read no process table. */
+  metric?: SessionMemoryMetric
   /**
    * Live nodeterm sessions on this machine that the sweep could NOT measure — today, Zellij-backed
    * ones (the sweep reads tmux). Absent/0 = none. `null` = could not tell. Local scope only. The
@@ -3508,6 +3592,11 @@ export interface ContextApi {
   /** Fires whenever a session's context fill changes. Returns unsubscribe. */
   onUpdate(listener: (usage: ContextWindowUsage) => void): () => void
   /**
+   * Fires when a Claude session's transcript records Remote Control (`/remote-control`) connecting
+   * or disconnecting. Fed by the same transcript tails as `onUpdate`. Returns unsubscribe.
+   */
+  onRemoteControl(listener: (update: { nodeId: string; sessionId: string; on: boolean }) => void): () => void
+  /**
    * Ask the core to start (or refresh) tracking a session's transcript so the meter populates
    * without waiting for a live hook event — e.g. on node mount after an app restart, when
    * the continuing session is idle. `cwd` is a transcript-path fallback only.
@@ -3576,7 +3665,59 @@ export interface TranscriptLine {
  *  metadata so committed tool cards keep the same summary/diff-click treatment as live ones. */
 export type ChatPart =
   | { kind: 'text'; text: string }
-  | { kind: 'thinking'; text: string }
+  | {
+      kind: 'thinking'
+      text: string
+      /**
+       * How long the model thought, in ms — this record's timestamp minus that of the newest `user`
+       * record before it (the prompt, tool_result or meta line the request answered). Present only on
+       * the opt-in `thinking` read, only when both stamps exist and the gap is ≥ 0. Measured 2026-11-02
+       * on CLI 2.1.275–2.1.316: a thinking record is written when the thinking ENDS, and the record
+       * after it is a tool call whose write time scales with its input, so the gap to the NEXT record
+       * is not thinking time; nor is the gap to the record right BEFORE it, which is an empty
+       * encrypted thinking record of the same message written ~10 ms earlier (1,018 of 1,037).
+       * A paged read sees only its own window, so a thinking record with no `user` record before it
+       * in that window (the start of an older page) carries no `ms`.
+       */
+      ms?: number
+    }
+  | {
+      /**
+       * An image the user attached to a prompt (a pasted screenshot): `data` is the base64 payload,
+       * drawn as `data:<mediaType>;base64,<data>`. Present only on the opt-in `rich` read
+       * (`ChatParseOptions.rich`), and only for a base64 source whose `mediaType` is in
+       * `CHAT_IMAGE_TYPES` (core/transcript-reader.ts) — never `image/svg+xml`. An image a tool
+       * returned (inside a `tool_result`) is tool output and never becomes one.
+       */
+      kind: 'image'
+      mediaType: string
+      data: string
+    }
+  | {
+      /**
+       * A message from an agent team's teammate (core/chat-teammate.ts): Claude Code records it in the
+       * lead's transcript as a user record, but nobody typed it. Present only on the opt-in `rich`
+       * read; without it the record is one `Agent message` tool part. `text` = a plain message's
+       * markdown body; `idle` = the teammate reporting that its turn ended (then `text` is absent).
+       * `color` is the teammate's TUI color name, as recorded (untrusted: map it, never use it as CSS).
+       */
+      kind: 'teammate'
+      from: string
+      color?: string
+      summary?: string
+      unverified?: boolean
+      text?: string
+      idle?: ChatTeammateIdle
+    }
+  | {
+      /**
+       * The user interrupted the turn here (Esc, or Ctrl+C once): one of Claude Code's fixed marker
+       * records (`CLAUDE_INTERRUPT_MARKERS`), which it saves as a USER record but which the user did
+       * not type. Present only on the opt-in `rich` read; without it the marker stays a user text
+       * part, as before. The renderer draws Claude's own TUI line for it.
+       */
+      kind: 'interrupt'
+    }
   | {
       kind: 'tool'
       name: string
@@ -3584,17 +3725,47 @@ export type ChatPart =
       result?: string
       summary?: ChatToolSummary
       /** Markdown worth reading in full (an `ExitPlanMode` plan, an `AskUserQuestion` question and
-       *  its options — `core/chat-tool-body.ts`). Present = the renderer shows an expanded card
-       *  instead of the collapsed chip. Capped at 64K characters. */
+       *  its options, and on the opt-in `rich` read a `TodoWrite` checklist — `core/chat-tool-body.ts`).
+       *  Present = the renderer shows an expanded card instead of the collapsed chip (a superseded
+       *  todo list excepted: `lib/chatTodo.ts`). Capped at 64K characters. */
       body?: string
       /** `AskUserQuestion` only: the questions read for the answer controls (`readQuestions`) —
        *  the SAME reader the held request's texts come from, so a surface can match the card to the
        *  held ticket. Absent = unreadable input = the card stays read-only. */
       questions?: ChatQuestion[]
+      /** `Edit` / `Write` only, on the opt-in `rich` read (`ChatParseOptions.rich`): the change the
+       *  call asked for, read from its INPUT — never from the result — so the renderer can draw it as
+       *  a diff. Absent = any other tool, an unreadable input, or a read without `rich`. */
+      diff?: ChatToolDiff
       /** The transcript's `tool_use` id. Set only by a PAGED read (`ChatTranscriptResult.olderCursor`
        *  present): a result carried across a page boundary (`unmatchedResults`) is attached by it. */
       id?: string
     }
+
+/** An `idle_notification` from a teammate (`ChatPart` teammate `idle`). Every field is optional:
+ *  the notification names only what the teammate reported. */
+export interface ChatTeammateIdle {
+  reason?: 'available' | 'interrupted' | 'failed'
+  /** The teammate's last direct message, one line. */
+  summary?: string
+  failureReason?: string
+  taskId?: string
+  /** The teammate's report, markdown, capped. */
+  result?: string
+}
+
+/**
+ * The change an `Edit` / `Write` tool call asked for (`ChatPart` tool `diff`). Edit's
+ * `{file_path, old_string, new_string}` maps to `{filePath, oldText, newText}`; Write's
+ * `{file_path, content}` to `{filePath, oldText: '', newText: content}`. An empty `newText` on an
+ * Edit is a deletion. Each text is capped at a tool body's length (`capText`, core/chat-tool-body.ts:
+ * 64K characters, then `TOOL_BODY_TRUNCATED`, with no markdown fence repair — it is file content).
+ */
+export interface ChatToolDiff {
+  filePath: string
+  oldText: string
+  newText: string
+}
 
 /** A structured chat message reconstructed from a Claude session transcript. */
 export interface ChatMessage {
@@ -3610,7 +3781,8 @@ export interface ChatMessage {
   /**
    * When the transcript line was written (epoch ms, from claude's ISO `timestamp`). Set on BOTH
    * read paths; absent when the line states none (grok, older records). The ⌘M thread shows it as a
-   * relative time under an assistant message.
+   * relative time under an assistant turn and a clock time under a user message, and starts a day
+   * divider at each local day's first stamped message.
    */
   at?: number
 }
@@ -4182,6 +4354,20 @@ export interface LicenseApi {
   releaseOthers(): Promise<LicenseDetail>
 }
 
+/** The free-tier open-project limit (src/shared/project-limit.ts; core computes the state). Desktop
+ *  only: the Server Edition's stub answers `INACTIVE_PROJECT_LIMIT` and claims `disabled`,
+ *  and a relay tab keeps the local preload — the allowance is this machine's, never the host's. */
+export interface ProjectLimitApi {
+  /** The current state. Cheap and offline: it never waits on the network. */
+  state(): Promise<ProjectLimitState>
+  /** Claim this device's allowance from the server (lazily, at the limit moment). Never rejects
+   *  for a network or server failure — that is `ok: false` with the state as it stands. */
+  claim(): Promise<ClaimResult>
+  /** Fires with the new state whenever it changes. Main sends it to this machine's windows only
+   *  (never broadcast to relay peers). Returns unsubscribe. */
+  onChange(listener: (s: ProjectLimitState) => void): () => void
+}
+
 export type PhoneApprovalResult = {
   status: 'persisted' | 'approved' | 'saved-disconnected' | 'stale' | 'persistence-failed'
 }
@@ -4591,6 +4777,7 @@ export interface NodeTerminalApi {
   updates: UpdateApi
   announcements: AnnouncementsApi
   license: LicenseApi
+  projectLimit: ProjectLimitApi
   contextLink: ContextLinkApi
   boardLog: BoardLogApi
   logs: LogApi
@@ -4737,6 +4924,11 @@ export interface NodeTerminalApi {
   onUnreadClear(listener: (nodeId: string) => void): () => void
   /** Fires on each normalized agent hook event (working/done/waiting/subagent/…). Returns unsubscribe. */
   onAgentStatus(listener: (e: NormalizedAgentEvent) => void): () => void
+  /** The core's per-node agent states as they stand now, read off its agent-status mirror (newest
+   *  `AGENT_STATUS_SNAPSHOT_MAX`; no `state` for an identity-only or restored entry). A relay tab asks
+   *  right after subscribing to `onAgentStatus`, so it does not start blank; a non-editor peer gets
+   *  the shared nodes only. Rejects on a core that predates the channel. */
+  agentStatusSnapshot(): Promise<AgentStatusSnapshotEntry[]>
   /** Report a node's Eco hibernation flag to the core (the renderer owns the flag; the core only
    *  mirrors it into the agent-status file so the phone can render SLEEPING). Fire-and-forget;
    *  called on every `setHibernated` change and replayed for the persisted set at boot. */
@@ -4855,9 +5047,4 @@ export interface NodeTerminalApi {
     list(): Promise<import('./station-handover').StationHandoverRecord[]>
     onChanged(cb: (records: import('./station-handover').StationHandoverRecord[]) => void): () => void
   }
-  /** Live links (src/core/watch-link/service.ts): a read-only, expiring browser link to one terminal,
-   *  hosted by THIS machine. Owner-only (`watchLink:*` is host-only). Desktop: real. Server Edition:
-   *  the real bridge, whose create answers `unsupported` until that edition has a license layer.
-   *  Relay tab: an inert stub (a peer's terminals are not this machine's to publish). */
-  watchLink: import('./watch-link-types').WatchLinkApi
 }

@@ -2,7 +2,7 @@
 //
 // The card right-click menu carries the node's own rows — the SAME builder the canvas node menu
 // uses (lib/nodeActionItems, narrowed by Canvas to BOARD_NODE_ACTION_IDS), passed in as
-// `nodeActionItems`. A card is a second view of its node, so color, icon, live link and the
+// `nodeActionItems`. A card is a second view of its node, so color, icon, refresh and the
 // account switch must be reachable from the board without going back to the canvas.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act } from 'react'
@@ -11,12 +11,20 @@ import { KanbanView, type KanbanSession } from './KanbanView'
 import { defaultKanban } from '../../lib/kanban'
 import type { MenuItem } from '../ContextMenu'
 
-vi.mock('../../session/session', () => ({
-  useSession: () => ({ source: 'local', api: window.nodeTerminal }),
-  // The card modal's `ProjectSessionScope` asks for the card project's session and provides it.
-  sessionForProject: () => ({ id: 'local', source: 'local', api: window.nodeTerminal }),
-  SessionProvider: ({ children }: { children: unknown }) => children
-}))
+vi.mock('../../session/session', async () => {
+  // The agent-status reads now resolve a store per project / per session (bug D, covered in
+  // session/agent-status-lookup.test.tsx). Here every one answers the default store, as before.
+  const { defaultAgentStatus } = await import('../../state/agentStatus')
+  return {
+    useSession: () => ({ source: 'local', api: window.nodeTerminal }),
+    // The card modal's `ProjectSessionScope` asks for the card project's session and provides it.
+    sessionForProject: () => ({ id: 'local', source: 'local', api: window.nodeTerminal }),
+    SessionProvider: ({ children }: { children: unknown }) => children,
+    agentStatusForProject: () => defaultAgentStatus,
+    useSessionRegistryVersion: () => 0,
+    useSessionStores: () => ({ agentStatus: defaultAgentStatus })
+  }
+})
 vi.mock('./CardModal', () => ({
   CardModal: (p: { session: { id: string }; initialView?: string; onDelete?: () => void; onSetColor?: (c: string) => void }) => (
     <div className="card-modal-mock" data-node={p.session.id} data-view={p.initialView ?? ''}>
@@ -107,13 +115,13 @@ describe('KanbanView — card menu node rows', () => {
   it('shows the node’s rows from the shared builder, built for that card’s node', () => {
     const rows = vi.fn((id: string): MenuItem[] => [
       { label: `Switch Claude account (${id})`, onClick: () => {} },
-      { label: `Share live link… (${id})`, onClick: () => {} }
+      { label: `Refresh terminal (${id})`, onClick: () => {} }
     ])
     render(rows)
     openCardMenu()
     expect(rows).toHaveBeenCalledWith('n1')
     expect(document.body.textContent).toContain('Switch Claude account (n1)')
-    expect(document.body.textContent).toContain('Share live link… (n1)')
+    expect(document.body.textContent).toContain('Refresh terminal (n1)')
   })
 
   it('shows none without a builder (no canvas behind the board)', () => {
@@ -121,7 +129,7 @@ describe('KanbanView — card menu node rows', () => {
     openCardMenu()
     expect(document.body.textContent).toContain('Open card')
     expect(document.body.textContent).not.toContain('Switch Claude account')
-    expect(document.body.textContent).not.toContain('Share live link')
+    expect(document.body.textContent).not.toContain('Refresh terminal')
   })
 
   it('"Open card in chat / markdown view" opens the card modal on that view', () => {

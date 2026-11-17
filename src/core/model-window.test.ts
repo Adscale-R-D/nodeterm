@@ -4,7 +4,6 @@
 // family table is exactly the kind of thing a later refactor re-introduces as "obvious".
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import fs from 'fs'
-import os from 'os'
 import path from 'path'
 import {
   isOneMillionSelection,
@@ -15,10 +14,11 @@ import {
   sessionContextWindow
 } from './model-window'
 import { resetClaudeModelSelectionCache } from './claude-model-selection'
+import { testTmpDir } from './test-tmp'
 
 /** A config dir holding `settings.json`, plus the transcript path that points back at it. */
 function fakeConfigDir(settings: unknown | null): { configDir: string; transcript: string } {
-  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-cfg-'))
+  const configDir = testTmpDir('claude-cfg-')
   if (settings !== null) {
     fs.writeFileSync(path.join(configDir, 'settings.json'), JSON.stringify(settings))
   }

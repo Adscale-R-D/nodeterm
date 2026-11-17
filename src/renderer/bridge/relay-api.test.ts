@@ -51,6 +51,7 @@ function fakeLocalApi() {
     githubControl: { NAME: 'local-github-control' },
     dialog: { NAME: 'local-dialog' },
     license: { NAME: 'local-license' },
+    projectLimit: { NAME: 'local-project-limit' },
     pty: { onData: ptyOnData },
     claude: { cliCaps: () => Promise.resolve({}), readTranscript: () => Promise.reject() },
     relayClient: { disconnect: vi.fn() }
@@ -96,6 +97,8 @@ describe('buildRelayApi', () => {
     expect(api.clipboard).toBe(local.clipboard)
     expect(api.settings).toBe(local.settings)
     expect(api.license).toBe(local.license)
+    // The free-project allowance is THIS machine's; the host refuses `projectLimit:*` from a peer.
+    expect(api.projectLimit).toBe(local.projectLimit)
     expect(api.githubControl).toBe(local.githubControl)
   })
 
@@ -151,26 +154,6 @@ describe('buildRelayApi', () => {
     await expect(ready()).resolves.toBeUndefined()
     close()
     expect((local.relayClient.disconnect as ReturnType<typeof vi.fn>)).toHaveBeenCalledWith('conn-7')
-  })
-
-  it('live links: a relay tab takes the inert stub, never the LOCAL preload member, and sends nothing', async () => {
-    const { local } = fakeLocalApi()
-    const localWatchLink = { NAME: 'local-watch-link', create: vi.fn(), list: vi.fn() }
-    ;(local as unknown as { watchLink: unknown }).watchLink = localWatchLink
-    ;(globalThis as Record<string, unknown>).window = { nodeTerminal: local }
-    const t = new FakeTransport()
-    const { api } = buildRelayApi('conn-1', t)
-    expect(api.watchLink).not.toBe(localWatchLink)
-    await expect(
-      api.watchLink.create({ nodeId: 'n1', role: 'viewer', ttlSeconds: 3600, label: 'Ada', title: 'build' })
-    ).resolves.toEqual({ ok: false, error: 'unsupported' })
-    await expect(api.watchLink.list()).resolves.toEqual([])
-    await expect(api.watchLink.kick('l', 'v')).resolves.toBe(false)
-    await expect(api.watchLink.sendChat('l', 'x')).resolves.toBeNull()
-    await expect(api.watchLink.chatHistory('l')).resolves.toEqual([])
-    expect(typeof api.watchLink.onState(() => {})).toBe('function')
-    expect(localWatchLink.create).not.toHaveBeenCalled()
-    expect(t.sent).toEqual([]) // nothing crossed the relay
   })
 
   it('share with team: a relay tab takes the E_UNSUPPORTED stub, never the LOCAL preload member', async () => {

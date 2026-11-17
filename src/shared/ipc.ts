@@ -30,6 +30,11 @@ export const IPC = {
   ptySendText: 'pty:send-text',
   ptySendChatPrompt: 'pty:send-chat-prompt',
   ptySendToEmptyPrompt: 'pty:send-to-empty-prompt',
+  ptyReadChatScreen: 'pty:read-chat-screen',
+  ptyInterruptChat: 'pty:interrupt-chat',
+  /** Carry a draft between the ⌘M chat composer and the agent's own input box (PtyManager). */
+  ptyPutChatDraft: 'pty:put-chat-draft',
+  ptyTakeChatDraft: 'pty:take-chat-draft',
   ptyTmuxStatus: 'pty:tmux-status',
   /** The foreground command of a node's tmux pane (`#{pane_current_command}`) — how the in-place
    *  agent restart sees that the CLI has exited and a shell owns the pane again. */
@@ -182,6 +187,11 @@ export const IPC = {
   canvasTrackpadGesture: 'canvas:trackpad-gesture',
   agentStatus: 'agent:status',
   agentSubagentSnapshot: 'agent:subagent-snapshot',
+  /** Renderer → main/server: the host's current per-node agent states, read off the agent-status
+   *  mirror (`AgentStatusSnapshotEntry[]`, shared/agent-status-snapshot.ts). A relay tab asks right
+   *  after subscribing to `agent:status`, so a node that went working before it joined is not blank.
+   *  The response is view-filtered for non-editors like `agent:status` (access-policy.ts). */
+  agentStatusSnapshot: 'agent:status-snapshot',
   /** Renderer → main/server: answer a held Claude permission hook (deterministic approvals).
    *  Payload: `{ nodeId, pendingId, decision: 'allow'|'deny' }`; resolves boolean. See
    *  docs/hook-reply-approvals.md. */
@@ -276,38 +286,6 @@ export const IPC = {
   stationHandoverList: 'station-handover:list',
   /** core → every renderer: the FULL current list on each change, never a delta. */
   stationHandoverChanged: 'station-handover:changed',
-  /** Live links (docs/live-links.md, src/core/watch-link/service.ts). OWNER-ONLY: every `watchLink:`
-   *  channel is host-only (host-control.ts), so no relay peer — hosted owners and editors included —
-   *  can create a link, which would publish a host terminal with the host's Pro. The viewer's own
-   *  tunnel protocol is `watch:*` (src/shared/watch-link/protocol.ts), deliberately NOT this
-   *  namespace. invoke: `create(CreateWatchLinkRequest)` → CreateWatchLinkResult. */
-  watchLinkCreate: 'watchLink:create',
-  /** invoke: the current links (WatchLinkView[]), for a renderer that booted after a push. */
-  watchLinkList: 'watchLink:list',
-  /** invoke: `(linkId)` — stop one link now (local first, then a best-effort server revoke). */
-  watchLinkRevoke: 'watchLink:revoke',
-  /** invoke: stop every link on this machine, then one server revoke-all. */
-  watchLinkRevokeAll: 'watchLink:revoke-all',
-  /** invoke: `(linkId, viewerId)` → boolean — end ONE viewer's connection (the link stays). */
-  watchLinkKick: 'watchLink:kick',
-  /** invoke: `(linkId, text)` → WatchChatMessage | null — the owner's reply on a Commenter link. */
-  watchLinkChatSend: 'watchLink:chat-send',
-  /** invoke: `(linkId)` → WatchChatMessage[] — this run's last messages (memory only). */
-  watchLinkChatHistory: 'watchLink:chat-history',
-  /** invoke: `(linkId, enabled)` → boolean — a Control link: turn typing on or off. */
-  watchLinkSetControl: 'watchLink:set-control',
-  /** invoke: `(linkId, password)` → boolean — a Control link: replace its password. */
-  watchLinkSetPassword: 'watchLink:set-password',
-  /** invoke: `(linkId)` → boolean — a Control link locked by wrong passwords: allow unlocking again. */
-  watchLinkAllowControl: 'watchLink:allow-control',
-  /** invoke: `(nodeId)` → ControlSupport — whether the node's terminal can take a Control link's input. */
-  watchLinkControlSupport: 'watchLink:control-support',
-  /** core → owner clients only: the full list on every change, never a delta. */
-  watchLinkState: 'watchLink:state',
-  /** core → owner clients only: `(linkId, WatchChatMessage)`. */
-  watchLinkChat: 'watchLink:chat',
-  /** core → owner clients only: a `WatchLinkNotice`. */
-  watchLinkNotice: 'watchLink:notice',
   /** Canvas sync: a client casts its local node mutations here; the core reflector
    *  (src/core/canvas-sync.ts) stamps each with the total order (`seq`) and sends it back out on the
    *  SAME channel to EVERY attached client — the sender included, whose copy is its ack (see
@@ -371,8 +349,18 @@ export const IPC = {
   licenseUpgrade: 'license:upgrade',
   licenseDetail: 'license:detail',
   licenseRelease: 'license:release',
+  // Free-tier open-project limit (src/shared/project-limit.ts). renderer → main (invoke): the
+  // current `ProjectLimitState`, and a lazy allowance claim → `ClaimResult`; a relay peer's request
+  // for either is refused (`projectLimit:` in HOST_ONLY_CHANNEL_PREFIXES). `projectLimitChanged` is
+  // main → renderer with the new state, sent to this machine's windows only — never broadcast,
+  // since a broadcast also reaches relay peers. The allowance is this machine's alone.
+  projectLimitState: 'projectLimit:state',
+  projectLimitClaim: 'projectLimit:claim',
+  projectLimitChanged: 'projectLimit:changed',
   appRestartToUpdate: 'app:restart-to-update',
   announcementsFetch: 'announcements:fetch',
+  announcementsPopups: 'announcements:popups',
+  announcementsPopupImage: 'announcements:popup-image',
   usageFetch: 'usage:fetch',
   usageRefresh: 'usage:refresh',
   usageUpdate: 'usage:update',
@@ -434,6 +422,8 @@ export const IPC = {
   triggersStatus: 'triggers:status',
   triggersRunNow: 'triggers:run-now',
   contextUpdate: 'context:update',
+  /** core → renderer: a Claude session's Remote Control connected/disconnected (transcript-read). */
+  agentRemoteControl: 'agent:remote-control',
   contextEnsure: 'context:ensure',
   // Team presence (docs/team-presence.md). `presence:hello` is a REQUEST: its response tells the
   // client its own clientId, so it never draws its own cursor. The rest are casts (client→server)

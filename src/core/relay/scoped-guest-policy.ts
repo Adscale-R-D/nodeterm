@@ -389,6 +389,10 @@ export const SCOPED: Readonly<Record<string, Check>> = Object.freeze({
   [IPC.ptySendText]: nodeArg0,
   [IPC.ptySendChatPrompt]: nodeArg0,
   [IPC.ptySendToEmptyPrompt]: nodeArg0,
+  [IPC.ptyReadChatScreen]: nodeArg0,
+  [IPC.ptyInterruptChat]: nodeArg0,
+  [IPC.ptyPutChatDraft]: nodeArg0,
+  [IPC.ptyTakeChatDraft]: nodeArg0,
   [IPC.ptyTmuxStatus]: pass,
   [IPC.ptyPaneCommand]: nodeArg0,
   [IPC.ptyPaneCwd]: nodeArg0,
@@ -481,8 +485,9 @@ export const SCOPED: Readonly<Record<string, Check>> = Object.freeze({
   [IPC.githubIssuesPullChecks]: projectArg0,
   [IPC.githubProjectAvatar]: projectArg0,
 
-  // Agent status actions, per node. The subagent snapshot's RESPONSE is narrowed below.
+  // Agent status actions, per node. The two snapshots' RESPONSES are narrowed below.
   [IPC.agentSubagentSnapshot]: pass,
+  [IPC.agentStatusSnapshot]: pass,
   [IPC.agentHibernated]: nodeField0,
   [IPC.agentAnswerPermission]: nodeField0,
   [IPC.agentAckDone]: nodeArg0,
@@ -577,6 +582,7 @@ export const SCOPED_REFUSED: ReadonlySet<string> = new Set<string>([
   IPC.agentStatus,
   IPC.agentUnreadClear,
   IPC.agentSubagentActivity,
+  IPC.agentRemoteControl,
   IPC.presenceSync,
   IPC.presencePeer,
   // Hosted-team verbs: answered by the Server Edition's hosted service only, never on Team Access.
@@ -692,7 +698,7 @@ export function filterScopedEvent(json: string, s: Scope, owners: SubagentOwners
 /**
  * The hooks that make a Team Access session bound to `projectId` a boundary. Every peer message is
  * judged by `SCOPED` (inbound), `filterScopedEvent` / terminal-frame attribution (outbound), and the
- * subagent snapshot is narrowed to the shared project's nodes.
+ * subagent and agent-status snapshots are narrowed to the shared project's nodes.
  */
 export function scopedGuestHooks(projectId: string, deps: ScopedGuestDeps): RelayHostHooks {
   const s = makeScope(projectId, deps)

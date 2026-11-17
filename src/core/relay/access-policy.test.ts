@@ -379,6 +379,12 @@ describe('outbound filter: deny by default for non-editors', () => {
     expect(filterOutboundEvent(ev(IPC.agentUnreadClear, 'n2'), ctx('viewer'))).toBe(false)
   })
 
+  it('a Remote Control update reaches a non-editor only for a shared node, like agent:status', () => {
+    expect(filterOutboundEvent(ev(IPC.agentRemoteControl, { nodeId: 'n1', sessionId: 's', on: true }), ctx('viewer'))).toBe(true)
+    expect(filterOutboundEvent(ev(IPC.agentRemoteControl, { nodeId: 'n2', sessionId: 's', on: true }), ctx('viewer'))).toBe(false)
+    expect(filterOutboundEvent(ev(IPC.agentRemoteControl, { sessionId: 's', on: true }), ctx('commenter'))).toBe(false)
+  })
+
   it('an unattributable message is dropped for a non-editor, never guessed', () => {
     expect(filterOutboundEvent('not json', ctx('viewer'))).toBe(false)
     expect(filterOutboundEvent(JSON.stringify({ t: 'ev', args: [] }), ctx('viewer'))).toBe(false)
@@ -615,6 +621,22 @@ describe('narrowResponseForRole', () => {
     expect(narrowResponseForRole(IPC.agentSubagentSnapshot, snapshot, ctx('editor'))).toBe(snapshot)
     const r = { anything: 1 }
     expect(narrowResponseForRole(IPC.fsRead, r, ctx('viewer'))).toBe(r)
+  })
+  // The agent-status snapshot names every node the host's mirror holds, keyed by node, with its
+  // session id and account: a non-editor gets the shared nodes' entries only, as with `agent:status`.
+  const NODE = 'n1'
+  const viewerCtx = ctx('viewer')
+  it('narrowResponseForRole trims agent:status-snapshot to shared nodes', () => {
+    const out = narrowResponseForRole(IPC.agentStatusSnapshot, [{ nodeId: NODE }, { nodeId: 'other' }], viewerCtx)
+    expect(out).toEqual([{ nodeId: NODE }])
+    expect(narrowResponseForRole(IPC.agentStatusSnapshot, [{ nodeId: 'n2', state: 'working' }], ctx('commenter'))).toEqual([])
+    expect(narrowResponseForRole(IPC.agentStatusSnapshot, 'garbage', viewerCtx)).toEqual([])
+    const all = [{ nodeId: NODE }, { nodeId: 'other' }]
+    expect(narrowResponseForRole(IPC.agentStatusSnapshot, all, ctx('editor'))).toBe(all)
+  })
+  it('a viewer and a commenter may call agent:status-snapshot', () => {
+    expect(decideAccess('req', IPC.agentStatusSnapshot, [], ctx('viewer'))).toEqual({ allow: true })
+    expect(decideAccess('req', IPC.agentStatusSnapshot, [], ctx('commenter'))).toEqual({ allow: true })
   })
 })
 

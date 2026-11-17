@@ -2,10 +2,11 @@ import { useEffect, useMemo, useRef, useState, type DragEvent } from 'react'
 import { createPortal } from 'react-dom'
 import { useProjects } from '../state/projects'
 import { isOmniKanbanEnabled, toggleBoardView, useViewMode, viewFor } from '../state/viewMode'
-import { useAgentStatus } from '../state/agentStatus'
+import { useAgentStatusSig, type AgentStatusLookup } from '../session/agent-status-lookup'
 import { usePauseCounts } from '../state/pauseCounts'
 import { useSettings } from '../state/settings'
-import { accountsForProject, sshAccountsHint, systemAccountDisplay } from '../state/workspace'
+import { accountsForProject, sshAccountsHint, systemAccountDisplayOn } from '../state/workspace'
+import { sshHostKey } from '@shared/ssh'
 import { useSshConn } from '../state/sshConn'
 import { sshAutoModeHint } from '../state/permissionMode'
 import { useSystemAccount } from '../state/systemAccount'
@@ -72,6 +73,44 @@ interface TabBarProps {
 }
 
 /**
+ * The unread count of every project that has one, as ONE primitive — the tab dots' selector shape,
+ * so a working/waiting flip of any agent does not re-render the tab bar. Each node is asked through
+ * ITS project (`lookup(project.id, node.id)`): a team tab's unread lives in its relay session's
+ * store, and its node ids are the handed-off SSH project's too, so counting one store for every tab
+ * put one project's dot on the other's tab. Written with `JSON.stringify` (`[[projectId, count]…]`),
+ * never a raw join — ids come from git-shared, hand-editable project files. `''` when nothing is
+ * unread. Counts `p.nodes` entries, exactly as the dot always did.
+ */
+export function unreadSigFor(
+  projects: readonly { id: string; nodes: readonly { id: string }[] }[],
+  lookup: AgentStatusLookup
+): string {
+  const entries: Array<[string, number]> = []
+  for (const p of projects) {
+    let count = 0
+    for (const n of p.nodes) if (lookup(p.id, n.id)?.unread) count++
+    if (count > 0) entries.push([p.id, count])
+  }
+  return entries.length ? JSON.stringify(entries) : ''
+}
+
+/** Parse `unreadSigFor` back into projectId → unread count (projects with none are absent). */
+export function parseUnreadSig(sig: string): ReadonlyMap<string, number> {
+  const out = new Map<string, number>()
+  if (!sig) return out
+  try {
+    const entries: unknown = JSON.parse(sig)
+    if (!Array.isArray(entries)) return out
+    for (const e of entries) {
+      if (Array.isArray(e) && typeof e[0] === 'string' && typeof e[1] === 'number') out.set(e[0], e[1])
+    }
+  } catch {
+    /* our own output; an unparseable one reads as nothing unread */
+  }
+  return out
+}
+
+/**
  * The runtime session dimension of a tab (which core the project lives on). Rendered ONLY when
  * more than one session exists, `sessionCount()` is 1 for a solo user today, so this never
  * mounts and the solo tab bar is pixel-identical. Its own component because
@@ -124,14 +163,12 @@ export function TabBar({
   const perProjectKanban = useViewMode((s) => !!activeId && viewFor(s, activeId) === 'kanban')
   const kanbanActive = isGlobal || perProjectKanban
   const highlightedId = useViewMode((s) => s.highlightedSwimlaneId)
-  // Unread dots need only the unread id set — subscribing to the whole status map re-rendered
-  // the TabBar on every working/waiting flip of any agent. Primitive signature → rare updates.
-  const unreadIds = useAgentStatus((s) => {
-    let ids = ''
-    for (const [id, st] of Object.entries(s.byId)) if (st?.unread) ids += `${id}|`
-    return ids
-  })
-  const unreadSet = useMemo(() => new Set(unreadIds.split('|').filter(Boolean)), [unreadIds])
+  // Unread dots need only each tab's unread count — subscribing to the whole status map re-rendered
+  // the TabBar on every working/waiting flip of any agent. Primitive signature → rare updates. Each
+  // tab counts from ITS project's session store (`unreadSigFor`).
+  const projectIds = useMemo(() => projects.map((p) => p.id), [projects])
+  const unreadSig = useAgentStatusSig(projectIds, (lookup) => unreadSigFor(projects, lookup))
+  const unreadCounts = useMemo(() => parseUnreadSig(unreadSig), [unreadSig])
   // ⏸ badge + the "Cancel pending pauses" row. Computed HERE, not in Canvas: this component
   // already holds the projects array, and Canvas subscribing to it would re-render the whole canvas
   // on every node serialization.
@@ -170,7 +207,7 @@ export function TabBar({
   const globalMode = useSettings((s) => s.settings.claudePermissionMode)
   const systemLabelSetting = useSettings((s) => s.settings.systemAccountLabel)
   const systemEmail = useSystemAccount((s) => s.email)
-  const systemLabel = systemAccountDisplay(systemLabelSetting, systemEmail)
+  const remoteSystemEmails = useSystemAccount((s) => s.remoteEmails)
 
   // Session labels appear only once a second session exists (4c: remote tabs). For a solo user
   // this is always false, so the tab strip renders exactly as before. Plain call, not a
@@ -182,6 +219,14 @@ export function TabBar({
   // Accounts eligible as the caret-menu project's default: local accounts for a local project, this
   // host's accounts for an SSH project (pending logins always excluded).
   const menuAccounts = accountsForProject(claudeAccounts, menuProject)
+  // The system row belongs to the machine the MENU's project runs on: an SSH project's is the
+  // host's own `~/.claude`, which this machine's label / email says nothing about.
+  const menuHostKey = menuProject?.ssh ? sshHostKey(menuProject.ssh.server) : undefined
+  const systemLabel = systemAccountDisplayOn(
+    menuHostKey,
+    { label: systemLabelSetting, email: systemEmail },
+    menuHostKey ? remoteSystemEmails[menuHostKey] : undefined
+  )
   // SSH project with no accounts on its host: say where accounts for this host come from instead
   // of presenting a bare System-only list (which read as "multi-account is broken on SSH").
   const menuAccountsHint = sshAccountsHint(menuProject, menuAccounts)
@@ -368,7 +413,7 @@ export function TabBar({
           {projects.map((p) => {
             const active = isGlobal ? (highlightedId ? p.id === highlightedId : p.id === activeId) : p.id === activeId
             const swimlaneHighlight = isGlobal && p.id === highlightedId
-            const unreadCount = p.nodes.filter((n) => unreadSet.has(n.id)).length
+            const unreadCount = unreadCounts.get(p.id) ?? 0
             return (
               <div
                 key={p.id}

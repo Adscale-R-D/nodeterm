@@ -231,12 +231,41 @@ escapes instead of throwing" (a native-Windows-curl form body). It fails identic
 `upstream/main` alone — verified in a throwaway worktree — so it is this box's environment, not the
 fork. Everything else is green: **22,291 passing**, both typechecks clean.
 
+**Two more since sync #8 (2026-11-17), from this box's Node, not the code:** this machine (and the
+service) runs Node **22.14**; jsdom's own `undici` 8.x needs ≥ 22.19 (`zlib.createZstdDecompress`),
+so `src/renderer/terminal/ime-mode-switch.test.ts` and
+`test/acceptance/hosted-relay-agent-status.test.ts` fail to LOAD ("Cannot read properties of
+undefined (reading 'bind')"). Test-only: the server bundle does not include undici. The repo's
+`engines` asks for `^22.22.2`; upgrading the box's Node (and `runtime/node`) clears both.
+
 `node_modules` here is real and patched. If `node-pty-patch.test.ts` goes red, the install is
 unpatched — not the code.
 
 ---
 
-## 8. Sync #7 (2026-10-28): what it brought (v0.4.4+ → v0.4.5+, 146 commits)
+## 8. Sync #8 (2026-11-17): what it brought (v0.4.5+ → v0.5.1+, 248 commits)
+
+Two conflicts. `src/renderer/bridge/stubs.ts`: upstream's new `projectLimit` stub and our
+context-link comment sit in the same spot; both kept. `src/renderer/lib/kanban.ts`: upstream's
+multi-select commit added `assignNodes` to the renderer file, which in the fork is a re-export of
+`src/shared/kanban.ts` — the function was moved there (after `assignNode`), and the renderer file
+stays the re-export. **Next sync: any upstream change to `renderer/lib/kanban.ts` lands in
+`shared/kanban.ts` the same way.** All four fork patches survived.
+- **Live links retired upstream** (engine, UI, Pro row, `src/shared/watch-link/` including the
+  `vectors.json` test fixture GitGuardian flagged). Retired data is cleaned at boot.
+- **Free-tier open-project limit** (desktop only, dormant until the backend switches it on); the
+  Server Edition has no gate. Desktop builds enable asar integrity + Electron fuses.
+- **⌘M chat view:** in-thread Edit/Write diffs, folded tool runs, syntax colouring, todo card,
+  compaction chip, Esc interrupts, drafts survive flips/switches/restarts, suggested next prompt.
+- **Server/agents:** a station can reply to its opener, `report-outcome --notify-opener`, joined
+  team tabs show the host's agent status, kanban multi-select, SSH projects use the host's own
+  tmux socket (desktop SSH projects only).
+- Tests: 22,199 passed, 1 failed (the known-red Windows-1252 test), 2 files failed to load on this
+  box's Node 22.14 (see §7). Upstream's new temp-leak guard caught two FORK tests
+  (`model-window.test.ts`, `claude-model-selection.test.ts`, patch #2) leaving `claude-cfg-*` /
+  `claude-sel-*` dirs; they now use `testTmpDir()`.
+
+## 8a. Sync #7 (2026-10-28): what it brought (v0.4.4+ → v0.4.5+, 146 commits)
 
 Merged clean — no conflicts. All four fork patches survived as-is.
 - **Server-relevant:** Server Edition sign-in hardening (audit S1–S8); the hook server refuses
@@ -253,7 +282,7 @@ Merged clean — no conflicts. All four fork patches survived as-is.
   full-suite load on this box that pass when run alone (`codex.ensure`, `fs-atomic.guard`,
   `tmux-socket-isolation.guard`, `watch-link/service`).
 
-## 8a. Sync #6 (2026-10-20): what it brought (v0.4.3 → v0.4.4+, 61 commits)
+## 8b. Sync #6 (2026-10-20): what it brought (v0.4.3 → v0.4.4+, 61 commits)
 
 Two conflicts, both in the kanban `board` verb. Upstream added `board --project <id>` with its own
 reply builder (`renderer/lib/boardVerb.ts`); it now DELEGATES to our shared `boardSnapshot`
@@ -267,7 +296,7 @@ only the pane's foreground claude speaks for a node (#1236), SSH routing by proj
 
 ---
 
-## 8b. Sync #5 (2026-10-15): what it brought (v0.3.17 → v0.4.3, 1,087 commits)
+## 8c. Sync #5 (2026-10-15): what it brought (v0.3.17 → v0.4.3, 1,087 commits)
 
 All three patches survived again — upstream's server still refuses `board`/`assign`, still stubs
 `contextLink.info` in the browser, and still treats opus/sonnet as 1M. What changed for us:
@@ -296,7 +325,7 @@ All three patches survived again — upstream's server still refuses `board`/`as
 
 ---
 
-## 8c. Sync #4 (2026-09-28): what it brought (v0.3.10 → v0.3.17, 417 commits)
+## 8d. Sync #4 (2026-09-28): what it brought (v0.3.10 → v0.3.17, 417 commits)
 
 Our three patches all survived. Upstream still refuses `board`/`assign` headless, still stubs
 `contextLink.info`, and still treats opus/sonnet as 1M. What changed for us:

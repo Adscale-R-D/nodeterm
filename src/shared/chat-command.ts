@@ -10,6 +10,23 @@ export const CHAT_TOOL_ARG_MAX = 200
 /** The tool-part name the reader gives a `!` bash-mode command. */
 export const BASH_COMMAND_TOOL = '!'
 
+/** The most of a `!` command's output the reader keeps, in UTF-16 code units. Its lines are kept
+ *  (the chat view shows the first under the command and all of them when opened); a slash command's
+ *  output is summarized like a tool result instead. */
+export const BASH_OUTPUT_MAX = 16384
+
+/** The name an output record's tool part gets when there is no command to attach it to. */
+export const COMMAND_OUTPUT_TOOL = 'command output'
+
+/**
+ * Whether a tool part is the USER's own local command (a `/slash` command, a `!` bash-mode line, or
+ * the output of one) rather than a tool the agent called. The reader writes both as assistant tool
+ * parts, so the thread can only tell them apart by name; agent tool names never start with `/`.
+ */
+export function isLocalCommandTool(name: string): boolean {
+  return name.startsWith('/') || name === BASH_COMMAND_TOOL || name === COMMAND_OUTPUT_TOOL
+}
+
 /**
  * The command a SENT text would become, or null when it is not one: `/name args` → `{name:"/name",
  * arg}`, `!cmd` → `{name:"!", arg:"cmd"}`. Text is trimmed first (JS `trim`); `arg` is trimmed and

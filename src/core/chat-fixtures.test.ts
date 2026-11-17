@@ -98,7 +98,7 @@ const meta = (type: string): Rec => ({ type, snapshot: { trackedFileBackups: {} 
 function line(r: Rec, i: number): string {
   const uuid = `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`
   const timestamp = new Date(T0 + i * 1000).toISOString()
-  return JSON.stringify({ ...r, isSidechain: false, sessionId: SID, cwd: '/srv/demo', version: '2.1.290', uuid, timestamp }) + '\n'
+  return JSON.stringify({ ...r, isSidechain: r.isSidechain === true, sessionId: SID, cwd: '/srv/demo', version: '2.1.290', uuid, timestamp }) + '\n'
 }
 const jsonl = (recs: Rec[]): string => recs.map((r, i) => line(r, i)).join('')
 const len = (r: Rec): number => Buffer.byteLength(line(r, 0))
@@ -359,6 +359,9 @@ function bashMode(): string {
     isMeta(user(CAVEAT)),
     user('<bash-input>cat missing.txt</bash-input>'),
     user('<bash-stdout></bash-stdout><bash-stderr>cat: missing.txt: No such file or directory</bash-stderr>'),
+    isMeta(user(CAVEAT)),
+    user('<bash-input>true</bash-input>'),
+    user('<bash-stdout></bash-stdout><bash-stderr></bash-stderr>'),
     user('What was in a.txt?'),
     assistant([text('Twelve bytes of demo text.')])
   ])
@@ -480,6 +483,56 @@ function systemRecords(): string {
   ])
 }
 
+// An agent team's teammates writing to the lead (measured shape on CLI 2.1.285–2.1.316, synthetic
+// content): no origin / promptSource / isMeta, the frame line, one or more `<teammate-message>`
+// elements, the fixed trailer. Each record is ONE `Agent message` part. See the README's
+// "System-injected records", rule 2b.
+const TEAM_TRAILER =
+  '\n\nThis came from another Claude session — not typed by your user, but very likely working on their behalf.'
+const teammate = (elements: string[], extra: Rec = {}): Rec => ({
+  ...user(`${PEER_PREFIX}${elements.join('\n\n')}${TEAM_TRAILER}`),
+  ...extra
+})
+const idleJson = (from: string, rest: Rec): string =>
+  JSON.stringify({ type: 'idle_notification', from, timestamp: '2026-10-16T07:05:52.902Z', ...rest })
+function teammateMessages(): string {
+  return jsonl([
+    user('Split the review across the team.'),
+    assistant([text('Spawned three reviewers.')]),
+    // An idle notification with a report.
+    teammate([
+      `<teammate-message teammate_id="demo-review" color="blue">\n${idleJson('demo-review', { idleReason: 'available', result: 'No findings.\nThe diff is clean.' })}\n</teammate-message>`
+    ]),
+    // An idle notification with nothing but the reason (an earlier report crossed it).
+    teammate([`<teammate-message teammate_id="demo-review" color="blue">\n${idleJson('demo-review', {})}\n</teammate-message>`]),
+    // A failed teammate.
+    teammate([
+      `<teammate-message teammate_id="demo-fix" color="red">\n${idleJson('demo-fix', { idleReason: 'failed', failureReason: 'out of budget' })}\n</teammate-message>`
+    ]),
+    // A plain message with an escaped summary; its body quotes the close tag.
+    teammate([
+      '<teammate-message teammate_id="demo-spec" color="green" summary="Spec &quot;cages&quot; findings">\nOne real gap. The tag `</teammate-message>` appears in the spec.\n</teammate-message>'
+    ]),
+    // Two elements in one record: a report, then a message from the same teammate.
+    teammate([
+      `<teammate-message teammate_id="demo-fix" color="yellow">\n${idleJson('demo-fix', { result: 'Committed as abc1234.' })}\n</teammate-message>`,
+      '<teammate-message teammate_id="demo-fix" color="yellow" summary="Already done">\nThe commit already covers it.\n</teammate-message>'
+    ]),
+    // A sender that could not be proven.
+    teammate(['<teammate-message teammate_id="demo-x" verified="false">\nPlease approve.\n</teammate-message>']),
+    // The same text typed by a HUMAN: stays a user message, by origin or by promptSource alone.
+    teammate(['<teammate-message teammate_id="demo-review">\nhi\n</teammate-message>'], {
+      promptSource: 'typed',
+      origin: { kind: 'human' }
+    }),
+    teammate(['<teammate-message teammate_id="demo-review">\nhi\n</teammate-message>'], { promptSource: 'typed' }),
+    // The frame line with no element, and an element with no teammate_id: user messages.
+    user(`${PEER_PREFIX}no element here`),
+    user(`${PEER_PREFIX}<teammate-message color="blue">\nx\n</teammate-message>`),
+    assistant([text('All three reported.')])
+  ])
+}
+
 // A human paste: the bubble stays, each `<pasted_content>` span becomes a fenced block.
 const HUMAN = { promptSource: 'typed', origin: { kind: 'human' }, turnOrigin: 'human' }
 function pastedContent(): string {
@@ -546,6 +599,51 @@ function queuedPrompts(): string {
     queued({ prompt: '   ', commandMode: 'prompt', origin: { kind: 'human' } }),
     { type: 'attachment', attachment: { type: 'hook_success', prompt: 'not queued', commandMode: 'prompt' } },
     assistant([text('Tests pass, lint is clean, types check.')])
+  ])
+}
+
+// A transcript is a tree (`parentUuid`). A prompt whose request was cancelled before anything
+// answered it is left as a dead end: no record names it as parent, and the next prompt is attached
+// to the same parent. Those are hidden; everything else is shown, a prompt the model did answer
+// included. `line` gives record `i` the uuid `uid(i)`.
+const uid = (i: number): string => `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`
+const under = (parent: number | null, r: Rec): Rec => ({ ...r, parentUuid: parent === null ? null : uid(parent) })
+function abandonedPrompts(): string {
+  return jsonl([
+    /* 0 */ under(null, user('Rename the helper.')),
+    /* 1 */ under(0, assistant([toolUse('toolu_a1', 'Bash', { command: 'npm test' })])),
+    /* 2 */ under(1, toolResult('toolu_a1', 'all passed')),
+    /* 3 */ under(2, user([text('[Request interrupted by user for tool use]')])),
+    // A queued prompt, then Esc: its request is cancelled and the next prompt takes the same parent.
+    /* 4 */ under(3, user('Also update the docs.')),
+    /* 5 */ meta('file-history-snapshot'),
+    /* 6 */ under(3, user('Also update the docs, and the README.')),
+    /* 7 */ under(6, assistant([text('Docs and README updated.')])),
+    // Sent, cancelled, edited and sent again (an array prompt this time).
+    /* 8 */ under(7, user([text('shp')])),
+    /* 9 */ under(7, user([text('ship it')])),
+    /* 10 */ under(9, assistant([text('Shipped.')])),
+    // Answered, then interrupted and re-sent: the model DID see the first one, so it stays.
+    /* 11 */ under(10, user('Explain the cache.')),
+    /* 12 */ under(11, assistant([text('The cache keeps')])),
+    /* 13 */ under(10, user('Explain the cache briefly.')),
+    /* 14 */ under(13, assistant([text('It keeps the last page.')])),
+    // A raw `/compact` left behind beside its command record: the command record stays.
+    /* 15 */ under(14, user('/compact')),
+    /* 16 */ under(14, isMeta(user(CAVEAT))),
+    /* 17 */ under(16, slash('/compact')),
+    // A later SIDECHAIN record with the same parent does not make a prompt abandoned.
+    /* 18 */ under(17, user('Check the lint.')),
+    /* 19 */ { ...under(17, user('subagent prompt')), isSidechain: true },
+    // Typed while a tool call is pending: the prompt and the call's (rejected) result share a
+    // parent and the answer hangs off the result. The model received the prompt, so it stays.
+    /* 20 */ under(18, assistant([toolUse('toolu_b1', 'Bash', { command: 'npm run lint' })])),
+    /* 21 */ under(20, user('Stop, run the tests instead.')),
+    /* 22 */ under(20, toolResult('toolu_b1', 'rejected')),
+    /* 23 */ under(22, user([text('[Request interrupted by user for tool use]')])),
+    /* 24 */ under(23, assistant([text('Running the tests.')])),
+    // The newest prompt has no answer yet and no sibling: shown.
+    /* 25 */ under(24, user('One more thing.'))
   ])
 }
 
@@ -661,8 +759,10 @@ const INPUTS: Record<string, string> = {
   'bash-mode.jsonl': bashMode(),
   'meta-turns.jsonl': metaTurns(),
   'system-records.jsonl': systemRecords(),
+  'teammate-messages.jsonl': teammateMessages(),
   'pasted-content.jsonl': pastedContent(),
-  'queued-prompts.jsonl': queuedPrompts()
+  'queued-prompts.jsonl': queuedPrompts(),
+  'abandoned-prompts.jsonl': abandonedPrompts()
 }
 
 // ── Plumbing ─────────────────────────────────────────────────────────────────────────────────────

@@ -128,6 +128,7 @@ import {
 import { quantizeCharSize } from '../terminal/char-size-quantize'
 import { resyncDomRendererSpacing } from '../terminal/dom-renderer-spacing'
 import { patchViewportScrollSync } from '../terminal/viewport-scroll-sync'
+import { patchShrinkTrim } from '../terminal/shrink-trim'
 import {
   parkCap,
   parkWindowMs,
@@ -241,7 +242,8 @@ import {
   useMdModeFocus
 } from '../terminal/useMdModeFocus'
 import { canvasOwnsMarkdownChord } from '../lib/markdownChord'
-import { IconBroadcast, IconChat, IconChevronDown, IconChevronRight, IconClose, IconEye, IconEyeOff, IconGrid, IconMic, IconMoveTo, IconPlay, IconReload, IconSearch, IconSparkle } from '../components/icons'
+import { carryDraftToChat, carryDraftToTerminal } from '../lib/chatDraftCarry'
+import { IconChat, IconChevronDown, IconChevronRight, IconClose, IconEye, IconEyeOff, IconGrid, IconMic, IconMoveTo, IconPlay, IconReload, IconSearch, IconSparkle } from '../components/icons'
 import { NodeLabels } from '../components/kanban/NodeLabels'
 import { MdViewHintButton } from '../components/MdViewHintButton'
 import { mdViewHint } from '../lib/mdViewHint'
@@ -253,6 +255,7 @@ import { pasteWithImageReceipt } from '../terminal/image-paste-confirm'
 import { usePasteReceipt } from '../terminal/usePasteReceipt'
 import { createBoardPauseSlot } from '../terminal/board-render-pause'
 import { ContextMeter } from '../components/ContextMeter'
+import { RemoteControlButton } from '../components/RemoteControlButton'
 import { isZoomModifierHeld } from '../lib/zoomModifier'
 import { HoverGuard } from './HoverGuard'
 import {
@@ -267,6 +270,7 @@ import { useClickToFocus } from './useClickToFocus'
 import { reparentKeepingFocus } from './reparentKeepingFocus'
 import { isHidden } from '../lib/ui-visibility'
 import { useTerminalGlass } from '../lib/useTerminalGlass'
+import { useFrostLayer } from '../canvas/GlassFrostSync'
 import { isLiquidGlass } from '../lib/appTheme'
 import { readsClaudeTranscript } from '../lib/transcriptGates'
 import { liveProjectJumpTarget } from '../lib/projectJump'
@@ -275,7 +279,6 @@ import { announceUserClosedSession } from '../lib/lastSessionClose'
 import { useSettings } from '../state/settings'
 import { useCodexIdentity, codexSharedIdentity, codexFallbackText } from '../state/codexIdentity'
 import { ensureCodexLaunchCaps } from '../state/codexCli'
-import { useAgentStatus, agentStatusForApi, inferInterruptAfterSettle } from '../state/agentStatus'
 import { useLaunchDelivery } from '../state/launchDelivery'
 import { erroredDeps, firstOpenInFlight as isFirstOpenInFlight, handedOverDeps, holdReason, interruptedDeps, launchTooltip } from '../lib/pendingLaunch'
 import { useStationHandovers } from '../state/stationHandovers'
@@ -286,7 +289,6 @@ import { pullBoardFor, useGitHubIssues } from '../state/githubIssues'
 import type { AgentState } from '@shared/agents/normalize'
 import type { ClientId } from '@shared/presence'
 import { PresenceChips } from '../components/PresenceChips'
-import { LiveLinkChip } from '../components/LiveLinkChip'
 import { useAgentNodes } from '../state/agentNodes'
 import { useTerminalFocus } from '../state/terminalFocus'
 import { useProjects } from '../state/projects'
@@ -296,11 +298,10 @@ import { useSshConn } from '../state/sshConn'
 import { useWorktrees } from '../state/worktrees'
 import { isRemoteSessionNode } from '@shared/worktree'
 import { RunBar } from './RunBar'
-import { isRemoteProjectId, useSession, useActiveSessionPresence } from '../session/session'
+import { isRemoteProjectId, useSession, useSessionStores, useActiveSessionPresence } from '../session/session'
+import { relayStatusGates } from '../terminal/relay-status-gates'
 import { isHostedReadOnly, useHostedReadOnly } from '../state/hostedTeams'
 import { isBrowserRuntime } from '../bridge/runtime'
-import { liveLinkUnavailable } from '../lib/liveLinkEntry'
-import { useWatchLinks } from '../state/watchLinks'
 import { agentLaunchOverride, toggleCollapsed, type CanvasNode } from '../state/workspace'
 import { NodeColorSwatches } from '../components/NodeColorSwatches'
 import { AccountChip, useAccountChip } from '../components/AccountChip'
@@ -319,6 +320,7 @@ import {
   canChat,
   canResume,
   canRename,
+  canRemoteControl,
   canReadTitle,
   createdAgentId,
   reportsOwnCopy,
@@ -1355,29 +1357,46 @@ export function TerminalNode({
   // own session's presence instead is a follow-up.
   const presence = useActiveSessionPresence()
   /**
-   * THIS node's agent-status store, for the memory levers that must not kill live work — resolved
-   * the way the session registry resolves it (`buildStores` → `agentStatusForApi`, memoized by api
-   * identity), so this node is judged against the status table of the core it actually runs on.
+   * THIS node's agent-status store: the store of the session it renders under, i.e. the status
+   * table of the core it actually runs on. For the local session that is the default persisted
+   * instance — the exact object `useAgentStatus` exports — so a local node reads and writes what it
+   * always did. For a RELAY / team tab it is that session's keyless store, which the session's own
+   * `agent:status` subscription feeds (`wireRelayAgentStatus`, plus the join-time snapshot), so the
+   * node shows its HOST session's status: the badge, the unread dot, the session chip. Never the
+   * default store for a relay node: a handed-off SSH project shares its node ids with the team tab
+   * now serving them, and the two must not read or mark each other's status.
    *
-   * WHAT THAT MEANS TODAY, PLAINLY: for the local session this resolves to the default persisted
-   * instance — the exact object `useAgentStatus` exports — so local nodes are protected. For a
-   * RELAY tab it resolves to that core's keyless instance, and NOTHING WRITES THAT INSTANCE YET:
-   * Canvas's `agent:status` subscription sits above the per-project session provider and writes
-   * the default store, and `useSessionStores()` currently has no consumers at all. So a relay
-   * node's state always reads `undefined` here, and RELAY PARKS REMAIN UNPROTECTED — which now
-   * matters, because `persistent:false` can arrive from a tmux-less relay HOST, i.e. exactly a
-   * plain-shell agent session on someone else's machine.
+   * EVERY agent-status read and write in this node goes through it; nothing here touches the
+   * default store (`useAgentStatus`) directly, and that is pinned
+   * (nodes/terminal-agent-status.source.test.ts). That covers: the badge (`status`) and everything
+   * derived from it, every focus mark (`setActive` / `clearUnread`: the dwell, a click, a "go to
+   * node" focus, selection, a file insert, the lifecycle teardown), the OSC session-title chip, the
+   * Esc / Ctrl-C interrupt inference (`agentStatusSession.inferInterruptAfterSettle`, bound to this
+   * same store), the memory levers that must not kill live work (`readAgentState`,
+   * `readAgentProcess`, the park's `readSessionEnded`), the in-place restart's busy check, pause
+   * (both depths), the hibernate / wake pair and its auto-wake triggers, the liveness check, the cold
+   * restore, the Eco viewer-release deferral and the held-launch dep tooltips (`erroredDepIds`,
+   * `interruptedDepIds`, `useSuccessWait`).
    *
-   * Resolving it this way regardless is deliberate and is the cheap half of the fix: routing relay
-   * agent-status into the per-session stores (`useSessionStores` / `SessionStores.agentStatus` is
-   * the intended seam) is a real feature and belongs in its own change. When it lands, this code
-   * lights up unchanged — no branch here to find and update.
+   * Several of those RUN on a relay session, which is why none of them may read another table: the
+   * plain restart (only its clearEnv / model-switch / restartShell branches refuse relay), a SHALLOW
+   * pause (deliberately allowed over relay; only `deep` refuses), the wake / resume, the liveness
+   * poll (over the session api), the dep tooltips. Reading the default store there would judge the
+   * node by — and write into — the entry a handed-off SSH project holds under the same node id (a
+   * restart that saw `undefined` would quit a host session the badge shows as RUNNING). The rest are
+   * refused on relay before they act (the cold auto-resume: `session.source !== 'relay'`; the Eco exit:
+   * `offscreenRemoteRef`, true for a relay session; deep pause, restartShell, model switch,
+   * clearEnv), so reading the session store there changes nothing and keeps ONE rule. A relay
+   * node's own status also protects its park — `persistent:false` can arrive from a tmux-less relay
+   * HOST, i.e. a plain-shell agent session on someone else's machine. The status-driven readers that
+   * would act on THIS machine are switched off for a relay node by `gates` below
+   * (`relayStatusGates`).
    *
-   * Scoped deliberately to the protection paths. The other status reads in this file predate
-   * per-session stores and are left exactly as they were; widening them is that same separate
-   * change.
+   * Stable for the session's lifetime (memoized by api identity), so the once-mounted lifecycle
+   * effect and the registered closures may close over it.
    */
-  const agentStatusStore = agentStatusForApi(api).store
+  const agentStatusSession = useSessionStores().agentStatus
+  const agentStatusStore = agentStatusSession.store
   const readAgentState = useCallback(
     (): AgentState | undefined => agentStatusStore.getState().byId[id]?.state,
     [agentStatusStore, id]
@@ -1427,6 +1446,7 @@ export function TerminalNode({
   // Glass terminals (Settings → Appearance): xterm paints no background and the node supplies a
   // translucent tint of THIS node's effective theme (lib/useTerminalGlass.ts).
   const { glass, tint, vars: glassVars } = useTerminalGlass(visual.terminalTheme)
+  const frostRef = useFrostLayer()
   // The alpha app-painted cell backgrounds follow on this node (null = not glass, stock rendering).
   // A ref too, because `acquireWebgl` (inside the lifecycle closure) syncs every fresh addon to it.
   const glassCellAlphaRef = useRef<number | null>(null)
@@ -1441,15 +1461,6 @@ export function TerminalNode({
   // mounted node right away instead of waiting for a remount. Search, Close and the worktree-move
   // button are absent from `isHidden`'s inventory and stay put whatever the list says.
   const hiddenHeaderButtons = useSettings((s) => s.settings.hiddenHeaderButtons)
-  // The header's "Share live link" button: the same availability rule every opener checks before the
-  // Pro gate (lib/liveLinkEntry). A primitive selector — the header must not re-render on every
-  // watch-link state push.
-  const activeLiveLinks = useWatchLinks((s) => s.links.length)
-  const shareLinkWhy = liveLinkUnavailable({
-    serverEdition: isBrowserRuntime(),
-    source: session.source,
-    activeLinks: activeLiveLinks
-  })
   const bodyRef = useRef<HTMLDivElement>(null)
   const middleClickPaste = useSettings((st) => st.settings.terminalMiddleClickPaste)
   // Chromium pastes the X PRIMARY selection into xterm's hidden textarea on middle click — a path
@@ -1821,12 +1832,16 @@ export function TerminalNode({
   const contextLinkCapable = !!agentId && canContextLink(agentId) // context-link tip wording only; handles render on all terminals
   const showUsage = !!agentId && hasUsage(agentId) // per-node context-window meter
   const showChat = !!agentId && canChat(agentId) // Cmd+M opens a chat panel instead of markdown
+  // Claude Remote Control toggle (header, right of the context meter). Not on a relay tab: the
+  // on/off signal is this machine's transcript tail, which never sees a guest core's session.
+  const showRemoteControl = !!agentId && canRemoteControl(agentId) && session.source !== 'relay'
   // Everything that reads the conversation through CLAUDE's transcript readers (`context.ensure`'s
   // mount-time meter rehydration, the find bar's transcript index) — deliberately NOT `showUsage`,
   // which now spans three agents. See lib/transcriptGates.ts for what sharing that gate broke.
   const claudeTranscript = readsClaudeTranscript(agentId)
   // The header 💬 now opens the board-log comments flyout (right side); ⌘M keeps the markdown/chat view.
   const [commentsOpen, setCommentsOpen] = useState(false)
+  const rawWriteRef = useRef<((data: string) => void) | null>(null)
   const canRenameNode = !!agentId && canRename(agentId) // WRITE leg: push `/rename <name>` back
   // READ leg: adopt the agent's own session name into the title. A superset of canRenameNode —
   // gemini names its own sessions but has no rename command, so it polls and never pushes.
@@ -1932,7 +1947,10 @@ export function TerminalNode({
       shell: data.shell || useSettings.getState().settings.defaultShell || undefined
     })
   }
-  const status = useAgentStatus((s) => s.byId[id])
+  const status = agentStatusStore((s) => s.byId[id])
+  // Which status-driven readers this node may run (see relay-status-gates.ts): all of them on the
+  // local session, none on a relay / team tab, whose status is its host's.
+  const gates = relayStatusGates(session.source)
   /**
    * Which Claude account this node is ACTUALLY on. `data.accountId` is what nodeterm launched
    * it as and is immutable; `status.account` is what the session's hooks reported — the only
@@ -1943,7 +1961,12 @@ export function TerminalNode({
    * stays creation-time (`transport.create` keeps passing `data.accountId`).
    */
   const observedAccount = status?.account
-  const accountChip = useAccountChip(data.accountId, observedAccount)
+  const accountChip = useAccountChip(
+    data.accountId,
+    observedAccount,
+    agentStatusStore,
+    data.ssh ? sshHostKey(data.ssh as SshConnection) : undefined
+  )
   // This node's team (the stations it opened), published by Canvas from the live ropes. The store
   // keeps each unchanged team's array identity, so this re-renders only when THIS team changes.
   const team = useTeamStations((s) => s.byNode.get(id))
@@ -2002,7 +2025,7 @@ export function TerminalNode({
     // node may or may not also be `hibernated` (the deep "pause & end session" recycles the tmux
     // session instead, leaving `hibernated` unset), but either flag means there is a conversation
     // this closure knows how to bring back.
-    const stNow = useAgentStatus.getState().byId[id]
+    const stNow = agentStatusStore.getState().byId[id]
     // `dropped` joins the two pause flags here because it is the same job with a different cause:
     // the pane holds a bare shell and there is a conversation this closure knows how to bring back.
     // The resume half is what makes it safe to admit — it re-reads the pane itself and refuses
@@ -2022,11 +2045,11 @@ export function TerminalNode({
         // drop on anything else (`expired` — the pane became something we did not resume into).
         wakeInputBufferRef.current.endWake(outcome === 'resumed', paneWriteRef.current)
         if (outcome === 'resumed') {
-          useAgentStatus.getState().setHibernated(id, false)
-          useAgentStatus.getState().setPaused(id, false)
+          agentStatusStore.getState().setHibernated(id, false)
+          agentStatusStore.getState().setPaused(id, false)
           // The resume line is in the pane; the CLI's own SessionStart will confirm it shortly, but
           // the chip must not survive the click that answered it.
-          useAgentStatus.getState().setDropped(id, false)
+          agentStatusStore.getState().setDropped(id, false)
           return
         }
         // 'not-eligible' — usually timing, not a refusal that will stand: at mount the spawn is
@@ -2039,7 +2062,7 @@ export function TerminalNode({
         // that the genuinely-transient cases need, and re-asks a question whose answer cannot
         // change without the user doing something. The chip carries the sentence; its click is
         // the way forward, and it re-checks.
-        if (useAgentStatus.getState().byId[id]?.wakeBlocked) return
+        if (agentStatusStore.getState().byId[id]?.wakeBlocked) return
         retryLater()
       })
       .catch(() => {
@@ -2065,7 +2088,7 @@ export function TerminalNode({
       // A `paused` node never auto-wakes, mount included — the trigger published above (and the
       // chip's own click) remain the explicit way back. `hibernated`-only nodes are unaffected:
       // this is the everyday Eco auto-resume-on-view path. See `shouldAutoWake`.
-      const stMount = useAgentStatus.getState().byId[id]
+      const stMount = agentStatusStore.getState().byId[id]
       if (isNodeWatched(id) && shouldAutoWake(stMount?.hibernated, stMount?.paused)) wakeRef.current()
     }, WAKE_MOUNT_DELAY_MS)
     return () => {
@@ -2079,7 +2102,7 @@ export function TerminalNode({
       // again. (Absent = not offscreen; see `offscreenNodes`.)
       setNodeOffscreen(id, false)
     }
-  }, [id])
+  }, [id, agentStatusStore])
   /**
    * LIVENESS — did this node's agent CLI die without telling us? (See `agent-liveness.ts` for the
    * rule and every refusal in it; this effect only supplies the pane reading and records the
@@ -2105,7 +2128,7 @@ export function TerminalNode({
     let asking = false
     const ask = async (): Promise<void> => {
       if (asking || stopped) return
-      const st = useAgentStatus.getState().byId[id]
+      const st = agentStatusStore.getState().byId[id]
       // Cheap gate first, so a canvas of healthy or plain-terminal nodes never reaches the pane.
       // Note it admits an ALREADY-dropped node too: that is how the chip clears itself when the
       // user relaunches the CLI by hand (no hook has to arrive for the pane to answer).
@@ -2118,8 +2141,8 @@ export function TerminalNode({
         if (stopped || pane === null) return
         // Re-read: the await is long enough for a turn to have started, or for the user to have
         // paused the node from the menu.
-        const now = useAgentStatus.getState().byId[id]
-        useAgentStatus
+        const now = agentStatusStore.getState().byId[id]
+        agentStatusStore
           .getState()
           .setDropped(
             id,
@@ -2147,7 +2170,7 @@ export function TerminalNode({
       clearInterval(t)
       if (livenessAskRef.current === ask) livenessAskRef.current = null
     }
-  }, [id, agentId, api])
+  }, [id, agentId, api, agentStatusStore])
   // Held launch (canvas-control `--after`). Canvas owns firing it; the node only surfaces that
   // it is armed, and by WHAT it is blocked — dep titles read straight off the live canvas, since
   // "waits for term-17" tells the user nothing.
@@ -2172,7 +2195,8 @@ export function TerminalNode({
     (depId) => {
       const n = getNode(depId) as CanvasNode | undefined
       return n ? ((n.data.title as string) || '') : undefined
-    }
+    },
+    agentStatusStore
   )
   // The stations a `--after-success` wait names are ALSO in `after`; the tooltip speaks of them in
   // the success sentence, so the plain list leaves them out rather than naming them twice.
@@ -2189,7 +2213,7 @@ export function TerminalNode({
   // is idle, so without naming them the tooltip would promise a wait that will never end on its
   // own. Selected as a joined string so the selector returns a primitive and an unarmed node never
   // re-renders on another node's status.
-  const erroredDepIds = useAgentStatus((s) => {
+  const erroredDepIds = agentStatusStore((s) => {
     const after = pendingLaunch?.after ?? []
     if (!after.length) return ''
     // Same liveness rule `depSatisfied` uses: a dep that is gone counts as satisfied, so it is
@@ -2198,7 +2222,7 @@ export function TerminalNode({
     return erroredDeps({ id, data: { pendingLaunch } }, s.byId, live).join(',')
   })
   // Same selector shape for deps held because the user interrupted their last turn (Esc/Ctrl+C).
-  const interruptedDepIds = useAgentStatus((s) => {
+  const interruptedDepIds = agentStatusStore((s) => {
     const after = pendingLaunch?.after ?? []
     if (!after.length) return ''
     const live = new Set(after.filter((d) => !!getNode(d)))
@@ -2275,7 +2299,9 @@ export function TerminalNode({
   // markdown-of-output view (computed in the capture effect below) is shown as a fallback.
   // `chatAvailable` is split out because the label-row ⌘M hint names the face BEFORE it is open:
   // one value feeds both, so the hint cannot say "Chat view" while the chord opens markdown.
-  const chatAvailable = showChat && !!transcript.sessionId
+  // `gates.chatView`: a relay / team tab keeps the Markdown output view (its transcript reads are
+  // refused over the relay; the output view captures the host's pane).
+  const chatAvailable = showChat && !!transcript.sessionId && gates.chatView
   const useChat = mdMode && chatAvailable
   useContextEnsure(session.api.context, id, agentId, transcript.sessionId, transcript.cwd, accountForReads)
   const updateNodeInternals = useUpdateNodeInternals()
@@ -2395,8 +2421,9 @@ export function TerminalNode({
     // actually running as, not the one the node was created with.
     accountId: accountForReads,
     // The transcript index reads claude's JSONL through the same resolver, so it is gated on the
-    // claude-transcript fact, NOT on the meter's `showUsage` — see lib/transcriptGates.ts.
-    searchTranscript: claudeTranscript,
+    // claude-transcript fact, NOT on the meter's `showUsage` — see lib/transcriptGates.ts. And on
+    // `gates.transcriptSearch`: it reads THIS machine's transcripts, never a relay host's.
+    searchTranscript: gates.transcriptSearch && claudeTranscript,
     open: searchOpen,
     readBuffer
   })
@@ -3250,6 +3277,9 @@ export function TerminalNode({
       // grant/release swaps renderers without the text visibly reflowing (see the helper).
       quantizeCharSize(term)
       patchViewportScrollSync(term)
+      // Before the first fit: a narrowing resize must trim the alternate buffer, or the find bar
+      // can crash this node (see the helper).
+      patchShrinkTrim(term)
       applyFit()
       // Reads the STORE, not the component's focusedRef: a parked terminal keeps the closure
       // from the instance that created it, and a ref from a dead instance never updates — the
@@ -3534,7 +3564,7 @@ export function TerminalNode({
     // would clear it on its SessionStart anyway; cursor fires none on `--resume`, so without this the
     // chat composer and the phone keep refusing a running CLI as "exited" until its next turn.
     // note: a sessionEnd POST that lands after the relaunch re-sets it; none has been observed.
-    const markRelaunched = (): void => useAgentStatus.getState().setSessionEnded(id, false)
+    const markRelaunched = (): void => agentStatusStore.getState().setSessionEnded(id, false)
 
     // Copy-on-select (issue #759). REGISTERED ONCE, at construction, and disposed WITH THE TERMINAL
     // — the OSC 52 handler's lifecycle, not a per-mount one: its only persistent listener lives on
@@ -3566,7 +3596,7 @@ export function TerminalNode({
           // Ignore path/prompt-like titles (e.g. "user@host: ~/dir") which aren't session names.
           // This feeds the `session` chip only; the node title is synced from the transcript's
           // authoritative session name instead (see the readSessionName effect below).
-          if (title && !/[/:~]/.test(title)) useAgentStatus.getState().setSession(id, title)
+          if (title && !/[/:~]/.test(title)) agentStatusStore.getState().setSession(id, title)
         }).dispose
       )
     }
@@ -3695,6 +3725,9 @@ export function TerminalNode({
           // Belt AND braces: the guard above cannot see a `ssh` executable that has gone missing,
           // which is core's other route into the local branch.
           requireRemote: sshRemoteTmux,
+          // Same rule `attachReplay` applies below: a node with a one-shot launch command is being
+          // opened for the first time and has no history to restore.
+          restoreScrollback: !data.initialCommand,
           // The one local terminal an SSH project's canvas may hold (issue #1186): core refuses
           // every other local spawn owned by an SSH project. In-memory mark, never node data.
           ...(isLocalOnSshCanvas(id) ? { localOnSshCanvas: true } : {})
@@ -3714,7 +3747,8 @@ export function TerminalNode({
           tmuxClient,
           persistent,
           sessionHost,
-          unavailable
+          unavailable,
+          scrollbackSeeded
         }) => {
         // The spawn answered: whatever it says, we are no longer waiting on the host.
         clearTimeout(slowSpawn)
@@ -3970,7 +4004,10 @@ export function TerminalNode({
           if (replay === 'cold-snapshot') {
             const snapshot = await scrollbackPromise
             if ((toreDown = onDisposed())) return
-            if (seedPaint({ replay, superseded, snapshot }) === 'snapshot') {
+            if (
+              seedPaint({ replay, superseded, snapshot, coreSeeded: scrollbackSeeded }) ===
+              'snapshot'
+            ) {
               // The snapshot comes from `capture-pane -p`: LF-separated, no CR bytes. xterm runs
               // with convertEol:false, so writing it raw would render as a staircase.
               term.write(toXtermText(snapshot))
@@ -4037,7 +4074,9 @@ export function TerminalNode({
             // Lone Esc / Ctrl-C while the agent works: Claude Code fires NO hook on a user
             // interrupt, so probe the cancelled turn (still-silent working → done). Exact
             // match — arrow keys etc. arrive as multi-byte \x1b[… sequences.
-            if (showStatus && (input === '\x1b' || input === '\x03')) inferInterruptAfterSettle(id)
+            // On THIS node's session store (the default one for a local node): a relay node's guess
+            // must never flip the entry a handed-off SSH project holds under the same node id.
+            if (showStatus && (input === '\x1b' || input === '\x03')) agentStatusSession.inferInterruptAfterSettle(id)
             // While a wake is in flight, HOLD this input rather than write it: the resume line is
             // sitting un-submitted in the pane and a keystroke would splice into it. The buffer is
             // bounded — a `queueFull`/`buffered` verdict means "held, do not write". Flushed (or
@@ -4138,7 +4177,7 @@ export function TerminalNode({
         // command-building path through the registered hibernate/wake pair) may relaunch it. Read
         // HERE because the late cold-start check below is gated on it too: a paused node has
         // nothing to relaunch, so it must not pay two probe round trips to find that out.
-        const pausedNow = !!useAgentStatus.getState().byId[id]?.paused
+        const pausedNow = !!agentStatusStore.getState().byId[id]?.paused
         // LATE COLD-START DETECTION (see terminal/cold-self-heal.ts). `freshUnverified` says the
         // create's `fresh:false` came from a freshness read that never completed, so "a session
         // already exists" was a fold and not an answer — and `new-session -A` may have made the
@@ -4191,8 +4230,8 @@ export function TerminalNode({
         //    wake path, which (rightly) refuses a pane it cannot see a shell in.
         //  - a real warm attach: the shell we exited to is still sitting in the pane, by design.
         //    Nothing auto-resumes here and the wake path owns the relaunch. That is the feature.
-        if (coldStart && useAgentStatus.getState().byId[id]?.hibernated) {
-          useAgentStatus.getState().setHibernated(id, false)
+        if (coldStart && agentStatusStore.getState().byId[id]?.hibernated) {
+          agentStatusStore.getState().setHibernated(id, false)
         }
         // The clear-env strip is one-shot: once this spawn has applied it, clear the flag so a later
         // ordinary Restart re-applies the gateway. (The recycle action re-sets it for its own spawn.)
@@ -4257,7 +4296,7 @@ export function TerminalNode({
           // no hook ever landed. That is not hypothetical: hook POSTs from an SSH node ride the
           // reverse tunnel, and after one host reboot 18 of 40 agent nodes had no id at all and
           // relaunched empty while their transcripts sat on disk, unreachable.
-          const st = useAgentStatus.getState().byId[id]
+          const st = agentStatusStore.getState().byId[id]
           const priorId = st?.sessionId || data.agentSessionId
           // …and is that conversation still THERE? A persisted id outlives its transcript
           // (claude's 30-day cleanup, a `/clear`, a removed account, an id minted for a session
@@ -4392,7 +4431,7 @@ export function TerminalNode({
                   agentEnvSnapshot()
                 )
                 if (!fresh) return
-                useAgentStatus.getState().setSessionId(id, undefined)
+                agentStatusStore.getState().setSessionId(id, undefined)
                 if (data.agentSessionId) updateNodeData(id, { agentSessionId: undefined })
                 writeWhenShellReady(fresh)
               })()
@@ -4424,7 +4463,7 @@ export function TerminalNode({
           // No ownership gate here, and none is owed: nothing is being QUIT: this pane was just
           // respawned by tmux and holds a brand-new shell, which is the context the later resume
           // is meant to launch into. The gate belongs where an exit is written.
-          useAgentStatus.getState().setHibernatedContext(id, captureWakeContext(await readPaneOwner()))
+          agentStatusStore.getState().setHibernatedContext(id, captureWakeContext(await readPaneOwner()))
         }
       })
       .catch((err: unknown) => {
@@ -4466,6 +4505,9 @@ export function TerminalNode({
       },
       onData: (cb) => (sessionId && !life.dead ? transport.onData(sessionId, cb) : () => {})
     }
+    // Published for the header's Remote Control toggle (its one gated Enter). Never cleared: the
+    // write is already a no-op once this session is dead, and the next lifecycle run replaces it.
+    rawWriteRef.current = restartIo.write
     // The wake buffer flushes held keystrokes through the SAME session-scoped, lifetime-gated write
     // as the resume line — so a flush into a torn-down session no-ops instead of throwing. Published
     // to the ref the wake `.then` (component body) reads; re-set on every mount, which is when a new
@@ -4483,7 +4525,7 @@ export function TerminalNode({
     const unregisterRestart = registerAgentRestart(
       id,
       guardConcurrentRestart(id, async (targetAgentId?: AgentId, targetModel?: string, restartShell?: boolean, clearEnv?: boolean, beforeRecycle?: () => Promise<RecyclePatch | void>) => {
-        const st = useAgentStatus.getState().byId[id]
+        const st = agentStatusStore.getState().byId[id]
         const currentNode = getNode(id)
         const agentSessionId = restartSessionId(st?.sessionId, currentNode?.data.agentSessionId)
         // `data.agentId` can change after a successful same-base swap while this deliberately
@@ -4709,7 +4751,7 @@ export function TerminalNode({
         // relay lifecycle, and a wake that cannot reach the host leaves a dead conversation behind.
         // Read at CALL time — a local project can BECOME an SSH project long after this mount.
         if (offscreenRemoteRef.current) return 'not-eligible'
-        const st = useAgentStatus.getState().byId[id]
+        const st = agentStatusStore.getState().byId[id]
         // Already paused (shallow OR deep — deep has `hibernated` unset, so this is the only
         // thing that catches it): the plan already excludes this via `HibernationCandidate.paused`,
         // but a dropped SessionEnd hook POST could otherwise leave a deep-paused node reading as
@@ -4740,10 +4782,10 @@ export function TerminalNode({
           // Only the TERMINAL verdict is recorded. `'unreadable'` is a probe that failed (no tmux,
           // a pane mid-teardown, a lapsed deadline) and the next sweep re-asks; latching it would
           // drop the node out of the plan for the rest of the run on no evidence at all.
-          useAgentStatus.getState().setPaneUnverified(id, exitVerdict === 'not-in-this-pane')
+          agentStatusStore.getState().setPaneUnverified(id, exitVerdict === 'not-in-this-pane')
           return 'not-eligible'
         }
-        useAgentStatus.getState().setPaneUnverified(id, false)
+        agentStatusStore.getState().setPaneUnverified(id, false)
         const outcome = await performExitPhase({
           agentId,
           sessionId: agentSessionId,
@@ -4764,12 +4806,12 @@ export function TerminalNode({
           // record: absent is refused, and that is the correct answer for an exit whose landing we
           // did not witness. A stale record must never stand in as permission to type into today's
           // pane.
-          useAgentStatus.getState().setHibernatedContext(id, captureWakeContext(await readPaneOwner()))
+          agentStatusStore.getState().setHibernatedContext(id, captureWakeContext(await readPaneOwner()))
         }
         return outcome
       }),
       resume: guardConcurrentRestart(id, async (): Promise<ResumePhaseOutcome> => {
-        const st = useAgentStatus.getState().byId[id]
+        const st = agentStatusStore.getState().byId[id]
         const agentSessionId = st?.sessionId
         if (!agentId || !agentSessionId || !restartTarget()) return 'not-eligible'
         // Command FIRST, pane check LAST. Both of these awaits can take a moment (the claude
@@ -4835,7 +4877,7 @@ export function TerminalNode({
         // session and a `dropped` node's CLI died on its own, so neither has a pane of ours to
         // match; both keep exactly the shell recognition they have today, and both gain the
         // agent-running refusal they did not.
-        const stWake = useAgentStatus.getState().byId[id]
+        const stWake = agentStatusStore.getState().byId[id]
         const verdict: WakeVerdict = decideWakeResume({
           owner: await readPaneOwner(),
           recorded: stWake?.hibernatedContext,
@@ -4846,7 +4888,7 @@ export function TerminalNode({
         // Always written, so a refusal that has since been fixed does not leave a stale sentence on
         // the chip. `null` for `'resume'` and for the transient `'unreadable'` — the latter is
         // timing, and the trigger's bounded retry (which reads this field) owns it.
-        useAgentStatus.getState().setWakeBlocked(id, wakeRefusalReason(verdict))
+        agentStatusStore.getState().setWakeBlocked(id, wakeRefusalReason(verdict))
         if (verdict !== 'resume') return 'not-eligible'
         // Clear the line before the launch line goes in. The shell above is the one WE exited to,
         // hours ago — nothing stops a passer-by (or a stray paste, or the user's own aborted
@@ -4888,7 +4930,7 @@ export function TerminalNode({
         // run on a relay session's core (its shell env belongs to the HOST, not this one). Shallow
         // pause touches no shell env and is allowed over SSH/relay, same as ordinary Restart/exit.
         if (deep && session.source === 'relay') return 'not-eligible'
-        const st = useAgentStatus.getState().byId[id]
+        const st = agentStatusStore.getState().byId[id]
         const agentSessionId = st?.sessionId
         const gate = restartEligibility(agentId, st?.state, agentSessionId)
         if (!gate.ok || !agentId || !agentSessionId || !restartTarget()) return 'not-eligible'
@@ -4926,7 +4968,7 @@ export function TerminalNode({
           // exact mechanism `restartAgentNode(…, restartShell: true)` uses, minus the auto-relaunch:
           // the next mount is `fresh`, and `paused` (set below, before the recycle takes effect)
           // is what keeps that mount's cold-restore auto-resume from firing.
-          useAgentStatus.getState().setPaused(id, true)
+          agentStatusStore.getState().setPaused(id, true)
           transport.recycle(id)
           updateNodeData(id, (node) => ({
             respawnNonce: ((node.data.respawnNonce as number | undefined) ?? 0) + 1
@@ -4934,15 +4976,15 @@ export function TerminalNode({
         } else if (alreadyExited) {
           // The pane and its recorded `hibernatedPane` are already correct (Eco/a prior pause set
           // them); only the durability changes.
-          useAgentStatus.getState().setPaused(id, true)
+          agentStatusStore.getState().setPaused(id, true)
         } else {
           // Shallow "Pause": identical to an Eco exit — tmux/pane untouched, `hibernated` records
           // it so the SLEEPING machinery (pane-recognition on wake) still applies — plus `paused`,
           // which is the only thing that changes: no auto-wake on reveal, and no auto-resume should
           // the tmux session itself later die and come back `fresh` (a reboot, e.g.).
-          useAgentStatus.getState().setHibernatedContext(id, captureWakeContext(await readPaneOwner()))
-          useAgentStatus.getState().setHibernated(id, true)
-          useAgentStatus.getState().setPaused(id, true)
+          agentStatusStore.getState().setHibernatedContext(id, captureWakeContext(await readPaneOwner()))
+          agentStatusStore.getState().setHibernated(id, true)
+          agentStatusStore.getState().setPaused(id, true)
         }
         return 'paused'
       })
@@ -4955,7 +4997,7 @@ export function TerminalNode({
     const unregisterUpdateExit = registerAgentUpdateExit(
       id,
       guardConcurrentRestart(id, async (): Promise<ExitPhaseOutcome> => {
-        const st = useAgentStatus.getState().byId[id]
+        const st = agentStatusStore.getState().byId[id]
         const agentSessionId = st?.sessionId
         const gate = restartEligibility(agentId, st?.state, agentSessionId)
         if (!gate.ok || !agentId || !agentSessionId || !restartTarget()) return 'not-eligible'
@@ -4970,8 +5012,8 @@ export function TerminalNode({
           isLive: restartTarget
         })
         if (outcome === 'exited') {
-          useAgentStatus.getState().setHibernatedContext(id, captureWakeContext(await readPaneOwner()))
-          useAgentStatus.getState().setHibernated(id, true)
+          agentStatusStore.getState().setHibernatedContext(id, captureWakeContext(await readPaneOwner()))
+          agentStatusStore.getState().setHibernated(id, true)
         }
         return outcome
       })
@@ -5180,7 +5222,7 @@ export function TerminalNode({
       // observer effect below, reads every input through a ref, and refuses on its own when
       // `offscreenLiveRef` is null. Clearing it on a respawn would drop a window that has been
       // counting down for minutes.
-      useAgentStatus.getState().setActive(id, false)
+      agentStatusStore.getState().setActive(id, false)
       // Teammates stop seeing us in this node's header. releaseFocus, not reportFocus(null): on a
       // project switch every node unmounts, and an unconditional clear could undo the focus the
       // node we just moved into already published.
@@ -5372,7 +5414,7 @@ export function TerminalNode({
       // conversation resumed before they can reach for the chip. No-op (one map lookup) for a
       // node that is not hibernated, which is every node in the default case. A `paused` node is
       // excluded — see the mount-timer trigger above for why (`shouldAutoWake`).
-      const stVisible = useAgentStatus.getState().byId[id]
+      const stVisible = agentStatusStore.getState().byId[id]
       if (visible && !wasVisible && shouldAutoWake(stVisible?.hibernated, stVisible?.paused))
         wakeRef.current()
       // …and the liveness check, for the same reason and on the same edge: a node whose CLI died
@@ -5479,7 +5521,7 @@ export function TerminalNode({
           // ~15 MB; the CLI is hundreds. So wait for the big prize, on the sweep's own cadence,
           // and only up to the capped total — a node that can never hibernate must not hold its
           // viewer forever.
-          const ecoStatus = useAgentStatus.getState().byId[id]
+          const ecoStatus = agentStatusStore.getState().byId[id]
           if (
             shouldDeferReleaseForEco({
               ecoEnabled: liveSettings.agentHibernationEnabled,
@@ -5687,10 +5729,11 @@ export function TerminalNode({
    *
    * `ack` (default true) says a human AIMED at this node, and two things follow from it. It marks
    * the node's finish read, which reaches past this machine (`clearUnread` → `ackDone` → the notch
-   * capsule and the paired phone). And it drops the hover guard, which is a POINTER contract: the
-   * guard makes a quick scroll pan the canvas until the dwell has elapsed, so a restore nobody
-   * pointed at must leave it armed, or the next pointer entry silently skips its dwell and the
-   * first wheel scrolls tmux instead. Keyboard focus does not need the guard down: it is an
+   * capsule and the paired phone) on the local session; a relay session's store sends no ack, so
+   * reading a team tab's finish clears this desktop's mark alone. And it drops the hover guard,
+   * which is a POINTER contract: the guard makes a quick scroll pan the canvas until the dwell has
+   * elapsed, so a restore nobody pointed at must leave it armed, or the next pointer entry silently
+   * skips its dwell and the first wheel scrolls tmux instead. Keyboard focus does not need the guard down: it is an
    * overlay, and a programmatic `focus()` is not hit-tested.
    *
    * Every gesture that reaches here aims at THIS node: a dwell, a click, a sidebar or notification
@@ -5702,9 +5745,9 @@ export function TerminalNode({
     if (aimed) setArmed(false)
     focusXtermUnlessCovered(termRef.current, mdModeRef.current)
     useTerminalFocus.getState().remember(id)
-    useAgentStatus.getState().setActive(id, true)
+    agentStatusStore.getState().setActive(id, true)
     if (aimed) {
-      useAgentStatus.getState().clearUnread(id)
+      agentStatusStore.getState().clearUnread(id)
     }
     presence.reportFocus(id)
   }
@@ -5764,8 +5807,8 @@ export function TerminalNode({
       }
       focusXtermUnlessCovered(termRef.current, mdModeRef.current)
       useTerminalFocus.getState().remember(id)
-      useAgentStatus.getState().setActive(id, true)
-      useAgentStatus.getState().clearUnread(id)
+      agentStatusStore.getState().setActive(id, true)
+      agentStatusStore.getState().clearUnread(id)
       // "I am working in this node" — the same signal the agent-status active flag uses, i.e. the
       // dwell has elapsed and the terminal actually took the keyboard (a mouse merely passing over
       // never gets here). Deduped in the store, so re-entering the same node costs nothing.
@@ -5801,8 +5844,8 @@ export function TerminalNode({
       if (focusDrivesGuard(focusFollowsPointer)) setArmed(armed)
     },
     remember: () => useTerminalFocus.getState().remember(id),
-    isActive: () => useAgentStatus.getState().activeId === id,
-    setActive: (active) => useAgentStatus.getState().setActive(id, active),
+    isActive: () => agentStatusStore.getState().activeId === id,
+    setActive: (active) => agentStatusStore.getState().setActive(id, active),
     reportFocus: () => presence.reportFocus(id),
     releaseFocus: () => presence.releaseFocus(id)
   })
@@ -5936,7 +5979,7 @@ export function TerminalNode({
       agentPane ? paneAgent : undefined,
       pasteReceipt.report
     )
-    useAgentStatus.getState().setActive(id, true)
+    agentStatusStore.getState().setActive(id, true)
     presence.reportFocus(id)
   }
 
@@ -6015,8 +6058,8 @@ export function TerminalNode({
   // Read state is separate from workflow state: selection clears the unread notification, while
   // an agent whose turn is done remains "Waiting for your response" until its next prompt starts.
   useEffect(() => {
-    if (selected) useAgentStatus.getState().clearUnread(id)
-  }, [selected, id])
+    if (selected) agentStatusStore.getState().clearUnread(id)
+  }, [selected, id, agentStatusStore])
 
   // Keep the node title in sync with the agent session's display name — the name shown in
   // `/resume` (`/rename` name, else auto name). This is the authoritative source: `/rename` doesn't
@@ -6036,6 +6079,9 @@ export function TerminalNode({
   // ref (`accountForReadsRef`, refreshed every render) rather than the deps so a late observation
   // is picked up by the very next poll instead of tearing down and restarting the timer chain.
   useEffect(() => {
+    // Not on a relay / team tab (`gates.titleSync`): the name would be read from the host and
+    // adopted into the title, i.e. this tab would write the host's canvas on a timer.
+    if (!gates.titleSync) return
     if (!canReadTitleNode || data.titleAuto === false) return
     const sid = status?.sessionId ?? ''
     if (!sid) return
@@ -6068,16 +6114,42 @@ export function TerminalNode({
       cancelled = true
       if (timer) clearTimeout(timer)
     }
-  }, [id, canReadTitleNode, status?.sessionId, data.titleAuto, updateNodeData])
+  }, [id, gates.titleSync, canReadTitleNode, status?.sessionId, data.titleAuto, updateNodeData])
+
+  // The user's own ⌘M flip (the chord, the header toggle) carries a half-typed draft across
+  // (lib/chatDraftCarry.ts): into the agent's input box before leaving the chat view, out of it
+  // after opening it. A flip the composer makes itself (`onShowTerminal`) carries nothing. While a
+  // draft is being typed into the terminal, further presses are ignored: a second carry would type
+  // it again.
+  const chatAvailableRef = useRef(chatAvailable)
+  chatAvailableRef.current = chatAvailable
+  const carryingRef = useRef(false)
+  const toggleMdView = useCallback(() => {
+    if (carryingRef.current) return
+    if (!mdModeRef.current) {
+      updateNodeData(id, () => ({ mdMode: true }))
+      if (chatAvailableRef.current) void carryDraftToChat(session.api.pty, id, agentId)
+      return
+    }
+    if (!chatAvailableRef.current) {
+      updateNodeData(id, () => ({ mdMode: false }))
+      return
+    }
+    carryingRef.current = true
+    void carryDraftToTerminal(session.api.pty, id, agentId).finally(() => {
+      carryingRef.current = false
+      updateNodeData(id, () => ({ mdMode: false }))
+    })
+  }, [id, agentId, session.api.pty, updateNodeData])
 
   // Cmd/Ctrl+M toggles markdown view of this terminal's output — only when hovered, and never while
   // a board is up (the card modal owns the chord there; see `canvasOwnsMarkdownChord`).
   useEffect(() => {
     return window.nodeTerminal.onMarkdownToggle(() => {
       if (!canvasOwnsMarkdownChord(hoveredRef.current, isGlobalKanbanOpen() || isKanbanOpen(useProjects.getState().activeProjectId ?? ''))) return
-      updateNodeData(id, (n) => ({ mdMode: !n.data.mdMode }))
+      toggleMdView()
     })
-  }, [id, updateNodeData])
+  }, [toggleMdView])
 
   // Best-effort: highlight matches that are in the live xterm buffer (on-screen scrollback).
   useEffect(() => {
@@ -6148,6 +6220,16 @@ export function TerminalNode({
       onMouseEnter={() => (hoveredRef.current = true)}
       onMouseLeave={() => (hoveredRef.current = false)}
     >
+      {/* Liquid Glass static frost: a filtered copy of the wallpaper behind this node, under its
+          tint (canvas/GlassFrostSync.tsx). Shown only while the frost is on (styles.css). */}
+      {glassOn && (
+        <div
+          className="term-node__frost"
+          aria-hidden
+          ref={frostRef}
+          style={{ '--node-x': positionAbsoluteX, '--node-y': positionAbsoluteY } as React.CSSProperties}
+        />
+      )}
       {/* Paint only: the old resize box in its old place (see .nt-resize-ghost in styles.css). */}
       <NodeResizer isVisible={selected && !collapsed && !focused} color="#0a84ff" lineClassName="nt-resize-ghost" handleClassName="nt-resize-ghost" />
       {/* Invisible source handle so edges to subagent/loop nodes can attach. */}
@@ -6285,7 +6367,7 @@ export function TerminalNode({
         />
         {/* The stations this session opened, and how far along they are — the same ring its board
             card and card modal draw (lib/teamProgress). A row travels to that station. */}
-        {team && <TeamProgressChip stations={team} onTravel={travelToStation} menuZIndex={60} />}
+        {team && <TeamProgressChip stations={team} onTravel={travelToStation} menuZIndex={60} statusStore={agentStatusStore} />}
         {/* The fallback, made visible. A Codex node that could not get a managed shared identity
             runs a perfectly good plain `codex` — but the user has to be able to SEE that it did,
             without reading a log, so the chip states it and its tooltip says why. Absent (and the
@@ -6321,11 +6403,18 @@ export function TerminalNode({
           </span>
         ) : null}
         {showUsage && <ContextMeter sessionId={transcript.sessionId ?? null} fromLaunchId={transcript.fallback} nodeId={id} remote={!!remoteSession} agentId={agentId} />}
+        {showRemoteControl && (
+          <RemoteControlButton
+            className="term-node__remote-control"
+            nodeId={id}
+            sessionId={transcript.sessionId}
+            readState={() => agentStatusStore.getState().byId[id]?.state}
+            pty={session.api.pty}
+            write={(d) => rawWriteRef.current?.(d)}
+          />
+        )}
         {/* Who else is in this node. Subscribes to presence itself — see PresenceChips. */}
         <PresenceChips nodeId={id} />
-        {/* This terminal is broadcast by a live link — never hideable (live-link.guard.test.ts).
-            Only through the LOCAL session: a relay tab's node with the same id is not ours (R57). */}
-        <LiveLinkChip nodeId={id} source={session.source} />
         {status?.state === 'working' && (
           <span className="term-node__status term-node__status--busy" title={`${agentLabel} is working`}>
             <AgentMascot agentId={agentId} />
@@ -6487,8 +6576,10 @@ export function TerminalNode({
         {/* Deterministic hook-reply approvals (docs/hook-reply-approvals.md): when the node is
             blocked on a Claude permission request whose managed hook is holding open (pendingId
             known), answer it in one click — no keystrokes into the prompt. Vanishes the moment the
-            state leaves `blocked` (the store clears pendingId). */}
-        {status?.state === 'blocked' && status?.pendingId && (
+            state leaves `blocked` (the store clears pendingId). Never on a relay / team tab
+            (`gates.approvalButtons`): the answer goes to THIS machine's main, which holds no ticket
+            for the host's session. */}
+        {gates.approvalButtons && status?.state === 'blocked' && status?.pendingId && (
           <span className="term-node__approve nodrag">
             {/* Approve is hidden when THIS ticket is a held AskUserQuestion (lib/approveGate.ts);
                 Deny still declines it. A held ExitPlanMode keeps Approve: the hook maps a plain
@@ -6568,7 +6659,7 @@ export function TerminalNode({
             claude-transcript fact (see the `useTerminalSearch` call above), so keying the label on
             the meter promised a codex/gemini node a conversation search it does not run. */}
         <Tooltip
-          label={claudeTranscript ? 'Search terminal + conversation' : 'Search this terminal'}
+          label={gates.transcriptSearch && claudeTranscript ? 'Search terminal + conversation' : 'Search this terminal'}
         >
           <button
             className="term-node__search nodrag"
@@ -6611,28 +6702,6 @@ export function TerminalNode({
               onClick={() => setCommentsOpen((v) => !v)}
             >
               <IconChat />
-            </button>
-          </Tooltip>
-        )}
-        {!isHidden('share-link', hiddenHeaderButtons) && (
-          <Tooltip label={shareLinkWhy ?? 'Share live link'}>
-            {/* The node menu's "Share live link…" row as a header button. Canvas opens the dialog
-                (`nodeterm:live-link`) after re-checking availability and the Pro gate; a node only
-                ever lives in the active project's canvas, so that is the project it names. */}
-            <button
-              className="term-node__share nodrag"
-              aria-label="Share live link"
-              disabled={!!shareLinkWhy}
-              onClick={(e) => {
-                e.stopPropagation()
-                window.dispatchEvent(
-                  new CustomEvent('nodeterm:live-link', {
-                    detail: { nodeId: id, title: data.title, projectId: owningProjectId() }
-                  })
-                )
-              }}
-            >
-              <IconBroadcast />
             </button>
           </Tooltip>
         )}
@@ -6710,8 +6779,8 @@ export function TerminalNode({
               <MdViewHintButton
                 hint={mdHint}
                 tooltip={commandTooltip(mdMode ? 'Back to the terminal' : `Open ${mdHint.label.toLowerCase()}`, 'node.toggleMarkdown')}
-                // The same flip as the chord handler and the context-menu item.
-                onToggle={() => updateNodeData(id, (n) => ({ mdMode: !n.data.mdMode }))}
+                // The same flip as the chord handler, draft carry included.
+                onToggle={toggleMdView}
               />
             )
           }

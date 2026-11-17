@@ -27,3 +27,50 @@ export const isChatPromptBlocked = (r: ChatPromptResult): r is ChatPromptBlocked
  */
 export type EmptyPromptRefusal = 'unsupported' | 'draft' | 'no-prompt' | 'unknown' | 'not-submitted' | 'failed'
 export type EmptyPromptResult = { sent: true } | { sent: false; reason: EmptyPromptRefusal }
+
+/**
+ * Why Esc from the ⌘M chat view (`pty.interruptChat`) did not reach the agent. Every refusal is decided
+ * before the Esc is written.
+ * - `unsupported` — not an agent whose interrupt and screen we have measured (claude only).
+ * - `dialog` — the agent's own dialog owns the keyboard (Esc would cancel it), or no input box is on
+ *   screen. `dialog` carries its text when one was recognized.
+ * - the rest are `sendPaneKeys`'s: the pane could not be reached or typed into.
+ */
+export type ChatInterruptRefusal = 'unsupported' | 'dialog' | 'not-connected' | 'unsupported-backend' | 'no-ssh' | 'failed'
+/**
+ * `restored` is the prompt Claude put back into its own input box when the Esc landed before the
+ * reply started, taken back out of it (the box is cleared) so the chat view can put it in its own
+ * composer. null when nothing was put back, or when it could not be taken out cleanly.
+ */
+export type ChatInterruptResult =
+  | { sent: true; restored: string | null }
+  | { sent: false; reason: ChatInterruptRefusal; dialog?: string | null }
+
+/**
+ * Carrying a draft between the ⌘M chat composer and the agent's own input box when the user flips
+ * the view (`pty.putChatDraft` / `pty.takeChatDraft`). The draft MOVES: whichever side receives it,
+ * the other is emptied, so it is never sent twice. Claude only (its composer is measured).
+ * - `unsupported` — not an agent whose composer we can read and type into, or a backend with no
+ *   typed path (Zellij, the Windows session host, a native Windows pane).
+ * - `unreadable` — the screen could not be read, or shows no input box (a dialog, a shell).
+ * - `has-draft` — (put) the input box already holds a draft: the two are not merged.
+ * - `empty` — (take) nothing to carry.
+ * - `multi-line` / `placeholder` / `not-prompt` — (take) a draft that cannot be read back exactly
+ *   (`readClaudeDraftLine`); it stays in the input box.
+ * - `unconfirmed` — (put) the text was typed but did not show in the box in time: it may be there.
+ * - `not-cleared` — (take) the box did not read empty after clearing it: nothing is handed over.
+ * - `failed` — the pane could not be reached or typed into; nothing was changed.
+ */
+export type ChatDraftCarryRefusal =
+  | 'unsupported'
+  | 'unreadable'
+  | 'has-draft'
+  | 'empty'
+  | 'multi-line'
+  | 'placeholder'
+  | 'not-prompt'
+  | 'unconfirmed'
+  | 'not-cleared'
+  | 'failed'
+export type ChatDraftPutResult = { put: true } | { put: false; reason: ChatDraftCarryRefusal }
+export type ChatDraftTakeResult = { taken: true; text: string } | { taken: false; reason: ChatDraftCarryRefusal }

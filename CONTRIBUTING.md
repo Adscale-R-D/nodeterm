@@ -6,9 +6,15 @@ its invariants — lives in `CLAUDE.md` at the repo root, which is also loaded a
 work with an AI coding agent.
 
 nodeterm is licensed **BUSL-1.1** (converts to MIT after four years — see `LICENSE`). Contributions
-are accepted under that license.
+are accepted under that license. Its Additional Use Grant does not cover production use of a build
+whose license or usage-limit checks were removed or bypassed; changing that code in a PR here is
+ordinary work.
 
 ## Getting set up
+
+You need Node.js 20+ (22 for the Server Edition) on Linux or **macOS 12 Monterey or newer** —
+the macOS floor is Electron's and esbuild's, and the README's *Build from source* section says
+what fails on an older Mac.
 
 ```bash
 npm install        # also patches + rebuilds node-pty against Electron's ABI (postinstall)
@@ -684,7 +690,7 @@ anything else. Board-level fields survive every transform — `pullLinks` is one
   pty produces no next chunk, so a resume that waits for one never comes: that froze the phone's
   terminal for good after a single >8 MB burst. `host-service.ts` arms a 250 ms sweep while a stream
   is paused, then repaints with a snapshot before it resumes — the same drain-sweep pattern as
-  `core/ui-sink-registry.ts` (whose self-paced sinks never drop). A new paused path needs the same
+  `core/ui-sink-registry.ts`. A new paused path needs the same
   trigger. CLAUDE.md, "Remote access".
 
 - **An SSH project's node runs on the project's host — ask the project, not the node.** Node
@@ -722,6 +728,12 @@ anything else. Board-level fields survive every transform — `pullLinks` is one
     `held-elsewhere` as a refusal that is NOT a lost connection (no reconnect, no drop report).
   Do not "fix" this by re-stamping `sshRemoteTmux` onto those nodes: the host would then refuse its
   own sessions. CLAUDE.md, "Projects (tabs)".
+
+- **Read agent status through the node's session — `useSessionStores()` / `agentStatusForProject` —
+  never `useAgentStatus` directly, in any surface that can show a team tab's node.** A team tab
+  keeps its host's status in its own session store and shares node ids with the SSH project it was
+  handed off from, so the default store answers for the wrong project. CLAUDE.md, "A relay session
+  owns its agent status".
 
 - **Phone keys and store links are platform-neutral.** New paired keys are stamped
   `nodeterm-mobile-<id>`, but revoke must keep matching the legacy `nodeterm-ios-<id>` stamp every
@@ -761,18 +773,6 @@ anything else. Board-level fields survive every transform — `pullLinks` is one
   to the shared project (`filterScopedEvent`). Anything that touches the host's settings,
   credentials, license or pairing belongs in `src/shared/host-control.ts` instead — refused to every
   relay peer.
-
-- **Live links: a new broadcast channel needs nothing, a new per-session pty channel needs a
-  decision.** Live-link viewers are quiet clients, so no broadcast ever reaches them. A per-session pty
-  event reaches a viewer only once it is added to `watcherEventAllowed`
-  (`src/core/watch-link/watcher-policy.ts`) on purpose — and only if its payload is the visible screen,
-  never history (why `pty:resync` is refused). Never add link state to a node, a board or a canvas op:
-  canvas sync and the canvas authority would publish it. `src/shared/watch-link/` is copied byte for
-  byte into the viewer page's repo: import only siblings and `tweetnacl`, write type imports as
-  `import type` (`isomorphism.guard.test.ts` fails otherwise), and expect a change there to need a
-  re-vendor. A new viewer CAST is refused until `watcherAccess` admits it on purpose, and a Control
-  link's typed bytes reach only the node's pane through `PtyManager.controlInput` — never written into a
-  tmux client's pty (the prefix would reach tmux) and never on a command line. `docs/live-links.md`.
 
 - **A change to canvas content that does not travel as a `canvas:mut` op is lost on a hosted core —
   route new content edits through the op vocabulary (`src/shared/canvas-content.ts`).** On a Server
@@ -984,10 +984,10 @@ empty line because `#` starts a comment.
 **Share with team's remote commands are generated shell, and so is their test.** The probe, the
 installer wrapper, the `team` invocations and the kill-verify are built in
 `src/core/remote-ssh/share-team-remote.ts` and run under a real `/bin/sh` against a fake host in its
-test; a change to one of them lands with a run there. The handover kill stays on the `nodeterm-rmt`
-socket only, with exact `=nt-<id>` targets: the every-socket kill used elsewhere would also stop the
-server core's `node-terminal` sessions, which are the ones the handover is starting. See CLAUDE.md
-"Share with team".
+test; a change to one of them lands with a run there. The handover kill targets exact `=nt-<id>`
+names on the host's `node-terminal` socket only — never the every-socket fan-out used elsewhere —
+and it runs BEFORE the server core resumes on that same socket, so one conversation never has two
+processes. See CLAUDE.md "Share with team".
 
 **Remote context polling must bound bytes before SSH transports them.** Bootstrap from the
 file's measured end, keep offsets in raw bytes, and distinguish an idle read from failure so
@@ -1061,6 +1061,14 @@ wire sent.
 Put the rule in one predicate under `src/shared` and have every mint site ask it, and derive the
 things that follow from it (a node's color, say) from that same call rather than re-deriving the
 condition per caller.
+
+**A node field the canvas sets must be asked about on the phone leg too.** The same two mint sites
+again: `createAgentNode` gave every Claude node a persisted session id (`data.agentSessionId`,
+launched with `--session-id`), and nothing asked what a phone-registered node should carry — so it
+carried none, and depended on a hook event reaching the desktop for its chat view, its title and
+its cold restore. When you add a field to the node a factory builds, decide in the same change what
+`appendProjectNode` / `RemoteNodeInput` does for it, and whether the phone needs a host fact to
+produce it (`MirrorSettings` is where those travel — see `claudeSessionIdFlag`).
 
 **A feature that creates links owes an ownership rule, and it must be a property of the plan.**
 "Share `~/.claude/skills` with this account" (issue #643) links each system skill into a managed
@@ -1276,6 +1284,8 @@ disable it with its reason (`NEW_FILE_NO_CWD_HINT`,
 `WORKTREE_NO_CWD_HINT`, the Explorer/Source Control notes); a row that simply vanishes teaches
 nothing, and a message that names the wrong cause ("not a git repository" for a project that has no
 folder to be one) sends the user hunting a problem that does not exist.
+
+**Opening a project goes through `gateProjectOpen` (`src/renderer/lib/projectLimitGate.ts`); a new way to open one must call it — see `docs/project-limit.md`.**
 
 **Agent features attach to base harness capabilities, not frontend allowlists.** A custom agent can
 inherit a builtin harness, so add the capability and its one shared leaf (`src/shared/agents`) and
@@ -1515,6 +1525,11 @@ bite most often:
 - `handleNodesChange` must not call `onNodesChange` with an empty batch (it re-renders the canvas
   every frame through React Flow's ResizeObserver).
 - Work done per terminal on a project switch must be coalesced and on-screen-first.
+- Don't put a `backdrop-filter` on a surface whose content changes often. Chromium re-runs it
+  every time the surface is drawn, and the damage spreads to the glass next to it. Liquid Glass
+  terminals frost a static wallpaper copy instead (`.term-node__frost`, `lib/glassFrost.ts`): six
+  streaming terminals went from 92% to 42% GPU. The SVG refraction filter (`url(#nt-refract)`)
+  runs only left of the Readable tick, for the same reason.
 - macOS memory pressure comes from the kernel's level (`onKernelPressure` in
   `core/memory-pressure.ts`), fired on escalations only, and at the same severity at most once per
   `KERNEL_LEVER_GAP_MS` (a level flapping normal/warn re-arms it every fall). Never re-fire it on a
@@ -1614,8 +1629,17 @@ tokens missing that were all present. Normalize at the read
 (`readFileSync(f, 'utf8').replace(/\r\n/g, '\n')`); `src/shared/line-endings.guard.test.ts` fails on
 a read that slices a `\n`-bearing literal without it.
 
+**An SSH project spawns on the host's `node-terminal` socket — the same one a nodeterm running on
+that host uses.** That is what lets the same folder, opened locally on the server and over SSH from a
+laptop, attach the same `nt-<id>` sessions. `nodeterm-rmt` is the legacy socket: never spawn on it,
+but a session an older build left there is **adopted in place** — so a remote tmux command about ONE
+session must go through `sessionTmuxCmd` and name the socket as `SESSION_SOCKET_REF`
+(`control-master.ts`), not `RMT_TMUX_SOCKET`; a bare constant silently misses every adopted session
+and the node respawns beside its own live agent. Never give the SSH path a socket of its own again
+(`src/core/remote-ssh/unified-socket.test.ts` pins the equality; CLAUDE.md "One tmux socket per host").
+
 **A test never touches a live tmux server.** You will most likely run `npm test` from inside a
-nodeterm terminal, where `-L node-terminal` and `-L nodeterm-rmt` are the servers holding every
+nodeterm terminal, where `-L node-terminal` (and a legacy `-L nodeterm-rmt`) are the servers holding every
 node you have open — one stray `kill-server` there ends your whole canvas, not your test. Every run
 therefore gets a private `TMUX_TMPDIR` (`test/setup/tmux-sandbox.ts`), which re-points every socket
 name at once. Write real-tmux suites the normal way — pick your own socket name, and use

@@ -3,30 +3,31 @@ import type { BridgeLink, CanvasNodeState, ProjectKanban } from '@shared/types'
 import { AGENT_CONFIG, BUILTIN_AGENT_IDS, type AgentId } from '@shared/agents/config'
 import { useProjects } from '../../state/projects'
 import { useSettings } from '../../state/settings'
-import { useAgentStatus } from '../../state/agentStatus'
 import { useBoardWallpaperStyle } from '../../state/wallpaper'
 import { AerialWallpaper } from '../AerialWallpaper'
 import {
-  addColumn, assignNode, assignedTo, boardLabels, cardMatchesLabelFilter, cardMeta, columnForNode,
+  addColumn, assignNodes, assignedTo, boardLabels, cardMatchesLabelFilter, cardMeta, columnForNode,
   deleteColumn, labelsForCard, moveColumn,
   nextColumnColor, pruneAssignments, recolorColumn, renameColumn, unassigned, defaultKanban, AT_COLUMN_END
 } from '../../lib/kanban'
 import { KanbanColumn, type KanbanLane } from './KanbanColumn'
 import { SessionCard } from './SessionCard'
-import { projectSessionSource } from '../LiveLinkChip'
 import { toKanbanSessionState } from '../../canvas/toKanbanSessionState'
 import { createAgentNode, createBrowserNode, createStickyNode, createTerminalNode, flowToNodeStates, resolveNewNodeAccount } from '../../state/workspace'
 import { markCanvasCovered } from '../../lib/canvasCovered'
 import { showCanvas, useViewMode } from '../../state/viewMode'
 import { KanbanScopeSwitch } from './KanbanScopeSwitch'
-import { sessionForProject } from '../../session/session'
+import { agentStatusForProject, sessionForProject, useSessionRegistryVersion } from '../../session/session'
 import { ProjectSessionScope } from '../../session/owning-project'
 import { isHostedReadOnly } from '../../state/hostedTeams'
 import { activePermissionMode } from '../../state/permissionMode'
 import { CardModal } from './CardModal'
 import { ContextMenu, type MenuItem } from '../ContextMenu'
 import { IconAgent, IconNote, IconTerminal, IconWeb } from '../icons'
-import { buildCardMenuItems } from './cardMenu'
+import { buildBulkCardMenuItems, buildCardMenuItems, bulkMoveTargets } from './cardMenu'
+import { CardSelectionBar } from './CardSelectionBar'
+import { useCardSelection } from './useCardSelection'
+import { dragGroup, inBoardOrder } from '../../lib/cardSelection'
 import { useBoardLog } from '../../state/boardLog'
 import { boardLogEvents } from '../../lib/boardLogDiff'
 import { markWorkspaceDirty } from '../../state/workspaceDirty'
@@ -71,6 +72,13 @@ interface SwimlaneProps {
   onOpenNode: (nodeId: string, projectId: string) => void
   onCreateNode: (projectId: string, choice: KanbanCreateChoice, columnId: string | null) => void
   onDeleteNode: (projectId: string, nodeId: string) => void
+  /** Delete several of this lane's cards at once (multi-select) — one confirm for all of them. */
+  onDeleteNodes: (projectId: string, nodeIds: string[]) => void
+  /** The lane that holds the overview's ONE multi-selection (null = none). Cards of different
+   *  projects cannot be moved together (their columns are different boards), so picking a card in
+   *  another lane starts over there: a lane that is not the owner drops its selection. */
+  selectionOwner: string | null
+  onSelectionOwner: (projectId: string) => void
   onRenameNode: (projectId: string, nodeId: string, title: string) => void
   onEditSticky: (projectId: string, nodeId: string, text: string) => void
   onBrowserNav: (projectId: string, nodeId: string, patch: { url?: string; title?: string }) => void
@@ -102,7 +110,7 @@ interface SwimlaneProps {
 }
 
 const Swimlane = memo(function Swimlane({
-  projectId, projectName, projectIndex, projectColor, board, sessions, ropes, nodes, onChangeBoard, onOpenNode, onCreateNode, onDeleteNode, onRenameNode, onEditSticky, onBrowserNav, onSetIcon, modalNodeId, modalView, onModalChange, liveTeams, highlight, nodeActionItems, sessionActionItems, onAiName, onSetColor, onRunQueued
+  projectId, projectName, projectIndex, projectColor, board, sessions, ropes, nodes, onChangeBoard, onOpenNode, onCreateNode, onDeleteNode, onDeleteNodes, selectionOwner, onSelectionOwner, onRenameNode, onEditSticky, onBrowserNav, onSetIcon, modalNodeId, modalView, onModalChange, liveTeams, highlight, nodeActionItems, sessionActionItems, onAiName, onSetColor, onRunQueued
 }: SwimlaneProps) {
   const dragRef = useRef<{ kind: 'column'; id: string } | { kind: 'card'; id: string } | null>(null)
   const setModalNodeId = useCallback(
@@ -154,8 +162,16 @@ const Swimlane = memo(function Swimlane({
     return teamsRef.current
   }, [liveTeams, ropes, nodes])
   const travel = useCallback((nodeId: string) => onOpenNode(nodeId, projectId), [onOpenNode, projectId])
-  // Which machine this lane's nodes run on: only a local lane shows this machine's LIVE chips (R57).
-  const liveLinkSource = projectSessionSource(projectId)
+  // The agent-status store of the session this LANE's project belongs to — a lane is not the
+  // active project, and a team lane's cards read its relay session's store (they share node ids
+  // with the handed-off SSH project, whose entries are the default store's).
+  const registryVersion = useSessionRegistryVersion()
+  const statusStore = useMemo(
+    () => agentStatusForProject(projectId).store,
+    // `registryVersion`: a reconnect swaps the project's session (and its store) under the same id.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [projectId, registryVersion]
+  )
   const sessionIds = useMemo(() => sessions.map(s => s.id), [sessions])
 
   const paletteLabels = useMemo(() => boardLabels(board), [board])
@@ -202,6 +218,27 @@ const Swimlane = memo(function Swimlane({
     }
   }, [board, byId, sessionIds, activeLocalFilter])
 
+  // Multi-select over this lane's cards, in the order the lane shows them (a collapsed lane shows
+  // none, so collapsing drops its selection — a bulk action never reaches a card out of sight).
+  const boardOrder = useMemo(
+    () => collapsed
+      ? []
+      : [...columnCards.ungrouped, ...board.columns.flatMap(c => columnCards.byColumn.get(c.id) ?? [])].map(c => c.id),
+    [collapsed, columnCards, board.columns]
+  )
+  const selection = useCardSelection(boardOrder)
+  const selectedInOrder = useMemo(() => inBoardOrder(boardOrder, selection.ids), [boardOrder, selection.ids])
+  const selectedRef = useRef<{ ids: readonly string[]; order: readonly string[] }>({ ids: [], order: [] })
+  selectedRef.current = { ids: selection.ids, order: boardOrder }
+  const selecting = selection.ids.length > 0
+  const clearSelection = selection.clear
+  useEffect(() => {
+    if (selecting) onSelectionOwner(projectId)
+  }, [selecting, projectId, onSelectionOwner])
+  useEffect(() => {
+    if (selectionOwner !== projectId) clearSelection()
+  }, [selectionOwner, projectId, clearSelection])
+
   const handleCardDragStart = useCallback((id: string) => { dragRef.current = { kind: 'card', id } }, [])
   const handleColumnDragStart = useCallback((id: string) => { dragRef.current = { kind: 'column', id } }, [])
   const handleDragEnd = useCallback(() => { dragRef.current = null }, [])
@@ -211,7 +248,8 @@ const Swimlane = memo(function Swimlane({
     if (drag.kind === 'column') {
       if (columnId !== null) commit(moveColumn(board, drag.id, columnId))
     } else {
-      commit(assignNode(board, drag.id, columnId, AT_COLUMN_END))
+      // Dragging one of several selected cards carries the whole selection.
+      commit(assignNodes(board, dragGroup(selectedRef.current.order, selectedRef.current.ids, drag.id), columnId, AT_COLUMN_END))
     }
   }, [board, commit])
 
@@ -227,7 +265,7 @@ const Swimlane = memo(function Swimlane({
       const i = ids.indexOf(targetNodeId)
       beforeId = i >= 0 && i + 1 < ids.length ? ids[i+1] : AT_COLUMN_END
     }
-    commit(assignNode(board, drag.id, columnId, beforeId))
+    commit(assignNodes(board, dragGroup(selectedRef.current.order, selectedRef.current.ids, drag.id), columnId, beforeId))
   }, [board, commit, sessionIds])
 
   const dropAtCardFor = useMemo(() => {
@@ -254,6 +292,8 @@ const Swimlane = memo(function Swimlane({
           meta={cardMeta(board, s.id)}
           labels={labelsByCard.get(s.id) ?? []}
           onOpen={setModalNodeId}
+          selected={selection.set.has(s.id)}
+          onSelectClick={selection.onSelectClick}
           onContext={(id, x, y) => setCardMenu({ nodeId: id, x, y })}
           onDragStart={handleCardDragStart}
           onDragEnd={handleDragEnd}
@@ -261,10 +301,10 @@ const Swimlane = memo(function Swimlane({
           team={teams.get(s.id) ?? NO_STATIONS}
           onTravel={travel}
           columnCategory={category}
-          liveLinkSource={liveLinkSource}
           ports={cardPorts}
           onOpenPort={openPort}
           onRunQueued={runQueued}
+          statusStore={statusStore}
         />
       ))
     }]
@@ -274,6 +314,16 @@ const Swimlane = memo(function Swimlane({
   const cardMenuItems = (nodeId: string): MenuItem[] => {
     const card = byId.get(nodeId)
     if (!card) return []
+    // Same rule as the per-project board: a card inside a multi-card selection speaks for all.
+    if (selectedInOrder.length > 1 && selection.set.has(nodeId)) {
+      return buildBulkCardMenuItems({
+        ids: selectedInOrder,
+        board,
+        commit,
+        clear: selection.clear,
+        remove: (ids) => onDeleteNodes(projectId, ids)
+      })
+    }
     return buildCardMenuItems({
       card,
       board,
@@ -284,7 +334,8 @@ const Swimlane = memo(function Swimlane({
       rename: (id, title) => onRenameNode(projectId, id, title),
       aiName: onAiName ? (id) => onAiName(projectId, id) : undefined,
       nodeActions: nodeActionItems ? (id) => nodeActionItems(id, projectId) : undefined,
-      remove: (id) => onDeleteNode(projectId, id)
+      remove: (id) => onDeleteNode(projectId, id),
+      select: { selected: selection.set.has(nodeId), toggle: selection.toggle }
     })
   }
 
@@ -346,6 +397,14 @@ const Swimlane = memo(function Swimlane({
             <button className="kanban-add-col" onClick={() => commit(addColumn(board, 'New column', nextColumnColor(board)))}>+ Add column</button>
           </div>
         </div>
+      )}
+      {selectedInOrder.length > 0 && (
+        <CardSelectionBar
+          count={selectedInOrder.length}
+          moveTargets={bulkMoveTargets(board, selectedInOrder, commit)}
+          onDelete={() => onDeleteNodes(projectId, selectedInOrder)}
+          onClear={selection.clear}
+        />
       )}
       {cardMenu && byId.has(cardMenu.nodeId) && (
         <ContextMenu x={cardMenu.x} y={cardMenu.y} zIndex={60} items={cardMenuItems(cardMenu.nodeId)} onClose={() => setCardMenu(null)} />
@@ -431,11 +490,14 @@ export const GlobalKanbanView = memo(function GlobalKanbanView({ live = null, on
     setModal(nodeId ? { projectId, nodeId, view } : null)
   }, [])
   const modalNodeId = modal?.nodeId ?? null
-  // Same rule as the per-project board: opening a card marks its completion read.
+  const modalProjectId = modal?.projectId ?? null
+  // Same rule as the per-project board: opening a card marks its completion read — on the store of
+  // the card's OWN lane project, so a team lane's read stays on this desktop and never clears the
+  // handed-off SSH project's entry under the same node id.
   useEffect(() => {
     onModalNodeChange?.(modalNodeId)
-    if (modalNodeId) useAgentStatus.getState().clearUnread(modalNodeId)
-  }, [modalNodeId, onModalNodeChange])
+    if (modalNodeId) agentStatusForProject(modalProjectId).store.getState().clearUnread(modalNodeId)
+  }, [modalNodeId, modalProjectId, onModalNodeChange])
   // Closing the overview with a card open must not leave the node "watched" forever.
   const onModalNodeChangeRef = useRef(onModalNodeChange)
   onModalNodeChangeRef.current = onModalNodeChange
@@ -499,6 +561,13 @@ export const GlobalKanbanView = memo(function GlobalKanbanView({ live = null, on
     // SSH kills via lib/sessionKill (local pty.destroy only touches local sockets).
     window.dispatchEvent(new CustomEvent('nodeterm:global-delete', { detail: { projectId, nodeId } }))
   }, [])
+
+  const onDeleteNodes = useCallback((projectId: string, nodeIds: string[]) => {
+    // Same delegate as the single delete, naming several cards: Canvas asks ONCE for all of them.
+    window.dispatchEvent(new CustomEvent('nodeterm:global-delete', { detail: { projectId, nodeIds } }))
+  }, [])
+  // The one lane whose cards are selected (see SwimlaneProps.selectionOwner).
+  const [selectionOwner, setSelectionOwner] = useState<string | null>(null)
 
   const onRenameNode = useCallback((projectId: string, nodeId: string, title: string) => {
     // The LANE's project, like every sibling here: it is known, and looking the node up in the
@@ -568,6 +637,9 @@ export const GlobalKanbanView = memo(function GlobalKanbanView({ live = null, on
               onOpenNode={onOpenNode}
               onCreateNode={onCreateNode}
               onDeleteNode={onDeleteNode}
+              onDeleteNodes={onDeleteNodes}
+              selectionOwner={selectionOwner}
+              onSelectionOwner={setSelectionOwner}
               onRenameNode={onRenameNode}
               onEditSticky={onEditSticky}
               onBrowserNav={onBrowserNav}

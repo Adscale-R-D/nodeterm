@@ -2,12 +2,14 @@ import { useEffect } from 'react'
 import { createPortal } from 'react-dom'
 import { Switch } from '@renderer/ui/Switch'
 import { useSettings } from '@renderer/state/settings'
+import { applyPhoneAccess } from '@renderer/lib/phoneAccess'
 import { usePhonePairing } from './settings/usePhonePairing'
 import { mobileStoreLinks } from '@renderer/lib/links'
 import { hostOsFromNavigator, sshServerCopy } from '@shared/ssh-server'
 import {
   pairingEndedMessage,
   pairingGate,
+  pairingNetworkHint,
   relayGateMessage,
   relayOnlyExplanation
 } from '@shared/pairing-gate'
@@ -49,12 +51,10 @@ export function PhonePairPopover({
   const gate = pairingGate({ sshKey, sshOpen, relayPlan })
 
   const phoneAccessEnabled = useSettings((s) => s.settings.phoneAccessEnabled)
-  const updateSettings = useSettings((s) => s.update)
 
   const togglePhoneAccess = (next: boolean): void => {
-    updateSettings({ phoneAccessEnabled: next })
-    // Start/stop the standing relay host immediately.
-    window.nodeTerminal.remoteHost.setPhoneAccess(next)
+    // Persist + start/stop the standing relay host immediately.
+    applyPhoneAccess(next)
     // The relay block is baked into the QR when the listener STARTS — a code already on
     // screen doesn't know about this flip, and scanning it would still produce a LAN-only
     // pairing (the field failure: works at home, dies on cellular). Regenerate; start()
@@ -118,6 +118,7 @@ export function PhonePairPopover({
             <>
               <img src={qr} width={208} height={208} alt="Pairing QR code" className="phone-pair__qr" />
               <div className="phone-pair__hint">Scan with the nodeterm mobile app · waiting (10 min)</div>
+              <div className="phone-pair__hint">{pairingNetworkHint(relayPlan === 'ok')}</div>
               {!sshKey ? (
                 <div className="phone-pair__hint">{relayOnlyExplanation(windowsKeyFile)}</div>
               ) : relayPlan === 'dev' ? (

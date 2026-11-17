@@ -434,6 +434,12 @@ export const SCREEN_DIALOG_READABLE = ['claude'] as const
 // delivered at the next tool boundary of the SAME turn (a `queued_command` transcript attachment, not
 // a new user turn). Every other chat-capable agent is unmeasured and keeps "wait for the reply".
 export const INPUT_QUEUE_CAPABLE = ['claude'] as const
+// Agents the ⌘M chat view may send a lone Esc to while a turn is running, to interrupt it as Esc in
+// the terminal would. MEASURED for claude (2.1.318, 2026-11-04): mid-reply it prints "Interrupted ·
+// What should Claude do instead?"; text in its own input box stays; a queued message is sent as the
+// next turn; an Esc before the first token puts the prompt back into its input box. Must stay within
+// SCREEN_DIALOG_READABLE: core reads the screen first, because Esc on a dialog would cancel it.
+export const CHAT_INTERRUPT_CAPABLE = ['claude'] as const
 // Agents whose native transcript we can read + render for cross-agent transfer.
 export const TRANSFER_SOURCE_CAPABLE = [
   'claude',
@@ -500,6 +506,11 @@ export const LINKED_CONTEXT_SKILL_AGENTS = ['claude', 'cursor'] as const
 // rename command, so it stays out of RENAME_CAPABLE — the read⊇write invariant holds either way.
 // cursor: its `name` (AI-generated, or `/rename`) is in the chat store meta; the write leg joined
 // RENAME_CAPABLE once `/rename` was measured to land there.
+// Agents with an in-session "reach this session from another device" toggle the node header can
+// drive. claude only: `/remote-control` (alias `/rc`, measured on 2.1.325) connects the session to
+// claude.ai / the Claude mobile app and, run again, offers to disconnect it. State is read from
+// the transcript (core/remote-control-scan.ts). No other builtin has a measured equivalent.
+export const REMOTE_CONTROL_CAPABLE = ['claude'] as const
 export const TITLE_READ_CAPABLE = ['claude', 'codex', 'grok', 'gemini', 'cursor'] as const
 // Agents whose canvas nodes share ONE managed CLI server per machine and keep a stable per-node
 // identity inside it, instead of each node owning a whole process tree.
@@ -723,6 +734,7 @@ export const chatReadsLocalOnly = (id: AgentId): boolean => includes(CHAT_LOCAL_
 export const typesChatInput = (id: AgentId): boolean => includes(TYPED_INPUT_CAPABLE, id)
 export const readsScreenDialogs = (id: AgentId): boolean => includes(SCREEN_DIALOG_READABLE, id)
 export const queuesInputWhileWorking = (id: AgentId): boolean => includes(INPUT_QUEUE_CAPABLE, id)
+export const interruptsFromChat = (id: AgentId): boolean => includes(CHAT_INTERRUPT_CAPABLE, id)
 /** Can CLAUDE's transcript resolver locate and parse this agent's conversation? Never widen this
  *  to mean "can we read this agent" — see CLAUDE_TRANSCRIPT_READABLE. */
 export const readsClaudeShapedTranscript = (id: AgentId): boolean =>
@@ -734,6 +746,7 @@ export const reportsSessionEnd = (id: AgentId): boolean => includes(SESSION_END_
 export const canRename = (id: AgentId): boolean => includes(RENAME_CAPABLE, id)
 export const submitsSeparately = (id: AgentId): boolean => includes(SEPARATE_SUBMIT_AGENTS, id)
 export const readsLinkedContextSkill = (id: AgentId): boolean => includes(LINKED_CONTEXT_SKILL_AGENTS, id)
+export const canRemoteControl = (id: AgentId): boolean => includes(REMOTE_CONTROL_CAPABLE, id)
 export const canReadTitle = (id: AgentId): boolean => includes(TITLE_READ_CAPABLE, id)
 export const canControlCanvas = (id: AgentId): boolean => includes(CANVAS_CONTROL_CAPABLE, id)
 export const usesPosixToolShellOnWindows = (id: AgentId): boolean => includes(POSIX_TOOL_SHELL_ON_WINDOWS, id)

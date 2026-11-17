@@ -7,8 +7,12 @@ import {
   typedInputScript,
   typedLines,
   typedStdin,
-  type TypedSurface
+  type TypedSurface,
+  typedRecords,
+  endsWithBackslash
 } from './typed-input'
+import { readClaudeDraft } from '../shared/agents/claude-screen'
+import composer from '../shared/agents/__fixtures__/claude/composer-capture.json'
 
 describe('typedLines', () => {
   it('splits on every line-ending style and keeps blank lines', () => {
@@ -29,8 +33,41 @@ describe('typedLines', () => {
 })
 
 describe('typedStdin', () => {
-  it('terminates every line, so the script reads the last one too', () => {
-    expect(typedStdin(['a', '', 'b'])).toBe('a\n\nb\n')
+  it('gives every line a carry line and terminates both, so the script reads the last one too', () => {
+    expect(typedStdin(['a', '', 'b'])).toBe('\na\n\n\n\nb\n')
+  })
+
+  it('carries a line\'s trailing backslashes onto the next line', () => {
+    expect(typedStdin(['cd . \\', 'popd'])).toBe('\ncd . \n\\\npopd\n')
+  })
+})
+
+describe('typedRecords', () => {
+  it('moves each trailing run of backslashes past the line break, whole', () => {
+    const records = typedRecords(['a \\', 'b \\\\', '\\', 'end'])
+
+    expect(records).toEqual([
+      { carry: '', text: 'a ' },
+      { carry: '\\', text: 'b ' },
+      { carry: '\\\\', text: '' },
+      { carry: '\\', text: 'end' }
+    ])
+  })
+
+  it('keeps the last line whole, and backslashes that do not end a line', () => {
+    expect(typedRecords(['a\\b', 'tail \\'])).toEqual([
+      { carry: '', text: 'a\\b' },
+      { carry: '', text: 'tail \\' }
+    ])
+  })
+})
+
+describe('endsWithBackslash', () => {
+  it('asks only about the last line', () => {
+    expect(endsWithBackslash(['tail \\'])).toBe(true)
+    expect(endsWithBackslash(['a \\', 'b'])).toBe(false)
+    expect(endsWithBackslash(['a\\b'])).toBe(false)
+    expect(endsWithBackslash([])).toBe(false)
   })
 })
 
@@ -84,7 +121,7 @@ describe('typeThenSubmitWhenSettled', () => {
     const result = await typeThenSubmitWhenSettled('hello there', surface, noWait)
 
     expect(result).toBe(true)
-    expect(surface.typed).toEqual(['hello there\n'])
+    expect(surface.typed).toEqual(['\nhello there\n'])
     expect(surface.submit).toHaveBeenCalledTimes(1)
   })
 
@@ -140,6 +177,50 @@ describe('typeThenSubmitWhenSettled', () => {
 
     expect(result).toBe(true)
     expect(surface.canSubmit).toHaveBeenCalledTimes(1)
+    expect(surface.submit).toHaveBeenCalledTimes(1)
+  })
+
+  it('submits a one-letter answer whose letter typing also removes elsewhere on screen', async () => {
+    // Real Claude Code captures: typing clears the placeholder and shortens the status line, which
+    // loses the `a` in "← for agents". Counting `a` across the screen never rose, so the Enter was
+    // withheld with the answer sitting in the box.
+    const before = composer.screens.empty
+    const after = composer.screens.draft.replace('heb ik getest', 'a')
+    let captures = 0
+    const submit = vi.fn(async () => true)
+
+    const result = await typeThenSubmitWhenSettled('a', {
+      capture: async () => (captures++ === 0 ? before : after),
+      type: async () => true,
+      submit,
+      draftOf: readClaudeDraft
+    }, noWait)
+
+    expect(result).toBe(true)
+    expect(submit).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not take a draft that already ended with the answer as the answer arriving', async () => {
+    const leftover = composer.screens.draft.replace('heb ik getest', 'a')
+    const submit = vi.fn(async () => true)
+
+    const result = await typeThenSubmitWhenSettled('a', {
+      capture: async () => leftover,
+      type: async () => true,
+      submit,
+      draftOf: readClaudeDraft
+    }, noWait)
+
+    expect(result).toBe('pasted-not-submitted')
+    expect(submit).not.toHaveBeenCalled()
+  })
+
+  it('falls back to counting on screen when the composer cannot be read', async () => {
+    const surface = { ...fakeSurface({ lag: 1 }), draftOf: () => null }
+
+    const result = await typeThenSubmitWhenSettled('hello there', surface, noWait)
+
+    expect(result).toBe(true)
     expect(surface.submit).toHaveBeenCalledTimes(1)
   })
 

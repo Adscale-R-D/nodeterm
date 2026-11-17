@@ -2,9 +2,11 @@ import { registerUpdatePrepIpc } from './update-prep'
 import { installOpenLinks } from './open-link-wiring'
 import { nodetermUrlFromArgv } from '../shared/open-link'
 import { createRemoteContextEnsure } from '../core/remote-context-ensure'
+import { removeRetiredLiveLinkData } from '../core/retired-data-cleanup'
 import { isKnownRemoteCodexAccount } from '../core/remote-ssh/codex-home'
 import { createRemoteCodexContext, type RemoteCodexContextTarget } from '../core/remote-ssh/codex-context'
 import { subagentReplay } from '../core/subagent-replay'
+import { registerAgentStatusSnapshotIpc } from '../core/agent-status-snapshot'
 import { grokHomeDir, grokSessionDir, grokSessionsDir } from '../core/agents/grok-paths'
 import { join, resolve, posix } from 'path'
 import { startSessionNameSweep, displayNodeTitle } from '../core/session-name-sweep'
@@ -118,22 +120,12 @@ import { boardLogRemotePath } from '../core/board-log'
 import { PtyManager } from '../core/pty-manager'
 import { desktopHeadlessRequest, launchHeadless } from '../core/headless-launch'
 import { WorkspaceStore } from '../core/workspace-store'
+import type { RemoteNodeInput } from '../core/project-node-append'
 import type { CardLabelEdit } from '../core/project-kanban-write'
 import { WorkspaceWatcher } from '../core/workspace-watcher'
 import { SettingsStore } from '../core/settings-store'
 import { registerAgentEnvIpc } from '../core/agent-env-ipc'
-import { allocateRelayClientId, presenceHub } from '../core/presence/hub'
-import {
-  createWatchLinkService,
-  registerWatchLinkIpc,
-  sendToOwners,
-  workspaceNodeState,
-  type WatchLinkService
-} from '../core/watch-link/service'
-import { createWatchLinkApi } from '../core/watch-link/api'
-import { WatchLinkStore } from '../core/watch-link/store'
-import { HISTORY_READ_BYTES } from '../core/watch-link/history'
-import { createWatchPty, watchRemoteFor, watchRemoteRecords, type WatchRemote } from '../core/watch-link/pty-seam'
+import { presenceHub } from '../core/presence/hub'
 import { SshStore } from './ssh-store'
 import { GitService } from '../core/git-service'
 import { ProjectTrustStore } from '../core/project-trust-store'
@@ -177,7 +169,7 @@ import {
 } from '../core/commit-message'
 import { initUpdater, type UpdaterHandle } from './updater'
 import { requestRendererFlush } from './renderer-flush'
-import { fetchCheck } from '../core/check'
+import { configureCheck, fetchCheck, fetchPopupImage } from '../core/check'
 import {
   hookServer,
   OPEN_PROJECT_CONTROL_REFUSAL,
@@ -239,6 +231,7 @@ import {
   recordRawToolEvent,
   recordContextUsage,
   setMirrorSettingsProvider,
+  mirrorClaudeSessionIdFlag,
   setMirrorLiveNodesProvider,
   setMirrorUsageProvider,
   buildMirrorUsage,
@@ -295,6 +288,7 @@ import { createCursorSubagentTracker } from '../core/cursor-subagents'
 import { ClaudeSubagentLifecycle } from '../core/claude-subagent-lifecycle'
 import { claudeSubagentTranscriptPath, isClaudeAgentId } from '../shared/agents/claude-subagents'
 import { createContextTail, type TaskNotification } from '../core/context-tail'
+import { remoteControlHandler } from '../core/remote-control-scan'
 import { registerContextEnsureIpc } from '../core/context-ensure'
 import { grokContextParse, GROK_SIGNALS_FILE } from '../core/grok-signals'
 import { applyCursorRaw, cursorContextParse, readCursorContextSource, releaseCursorRaw } from '../core/cursor-chat'
@@ -308,7 +302,7 @@ import { codexHome } from '../core/usage/codex-usage'
 import { isAsyncSubagentLaunch, isCursorPayload, grokRawFields, type NormalizedAgentEvent } from '../shared/agents/normalize'
 import { applyGrokHookSession } from '../core/grok-hook-session'
 import { agentAccountColor } from '../shared/agents/account-color'
-import { canChat, capabilityAgentId } from '../shared/agents/config'
+import { capabilityAgentId } from '../shared/agents/config'
 import {
   setRemoteTranscriptReader,
   TITLE_TAIL_BYTES,
@@ -375,7 +369,9 @@ import {
 } from './window-state'
 import { remoteCodexUsageTargets } from '../core/usage/remote-codex-usage'
 import { remoteUsageTargets } from '../core/usage/remote-claude-usage'
-import { initLicense, isPremium, getStoredEntitlement } from '../core/license'
+import { initLicense, isPremium, getStoredEntitlement, setLicenseNetworkConsent } from '../core/license'
+import { initProjectLimit } from '../core/project-limit'
+import { readMachineHashResult } from '../core/machine-id'
 import { WhisperModelStore } from '../core/speech/whisper-models'
 import { SpeechService } from '../core/speech/speech-service'
 import { registerSpeechIpc } from '../core/speech/register-ipc'
@@ -427,8 +423,7 @@ import {
   loadOrCreateKeyPair,
   relayAllowed,
   API_BASE as RELAY_API_BASE,
-  RELAY_URL,
-  type HostChatOps
+  RELAY_URL
 } from './remote/host-service'
 import { initStandingHost } from './remote/standing-host'
 import { initRelayHost } from './remote/relay-host-service'
@@ -456,7 +451,7 @@ import {
 } from './media-protocol'
 import { initPlatform, platform } from '../core/platform'
 import { electronPlatform } from './platform-electron'
-import { registerPeerSink, unregisterPeerSink, wirePeerRegistry } from './peer-registry'
+import { wirePeerRegistry } from './peer-registry'
 import { WEBGL_CONTEXT_CAP_DESKTOP } from '../shared/webgl'
 
 // Dev-only: NT_MULTI lets a SECOND instance run (host + client testing on one machine) with an
@@ -602,10 +597,6 @@ wirePeerRegistry({
 // Set once the app window is ready; used by the quit hooks to tear down SSH-project masters and
 // (via the closures below) to resolve a live SSH project's ControlMaster for remote workspace IO.
 let sshProjectManager: ReturnType<typeof initSshProject> | undefined
-// Live links (src/core/watch-link/service.ts). Assigned in `whenReady`; declared here because the
-// workspace store's `onPersist`, the license callback and the quit handler read it at call time (the
-// boot workspace load's `onPersist` runs before the assignment — a later `const` would be a TDZ throw).
-let watchLinks: WatchLinkService | null = null
 
 // The standalone Codex relay bundle (`out/main/codex-relay.js`, built by scripts/build-codex-relay.mjs
 // after electron-vite build), uploaded to a Linux host for managed Codex accounts. Read once, beside
@@ -658,8 +649,6 @@ const workspaceWatcher = new WorkspaceWatcher({
 workspaceStore.onPersist = () => {
   workspaceWatcher.sync()
   refreshNodeTokens()
-  // A node the store now provably holds nowhere (a delete, the canvas authority's op) ends its links.
-  watchLinks?.onWorkspaceChanged()
 }
 // "Which host owns this node?", answered WITHOUT a live session — the persisted index, not the
 // in-memory `Session`. A delete arrives precisely when there may be nothing attached (an app
@@ -2054,7 +2043,15 @@ app.whenReady().then(async () => {
     if (target) void shell.openExternal(target)
   })
 
+  // The open-project count rides /v1/check only while the Settings → Privacy telemetry toggle is
+  // on, and only once the workspace index is known (core/check.ts). Both read per call.
+  configureCheck({
+    openProjects: () => workspaceStore.openProjectCount(),
+    telemetryEnabled: () => settingsStore.get().telemetryEnabled
+  })
   ipcMain.handle(IPC.announcementsFetch, async () => (await fetchCheck()).messages)
+  ipcMain.handle(IPC.announcementsPopups, async () => (await fetchCheck()).popups)
+  ipcMain.handle(IPC.announcementsPopupImage, (_e, sha256: string) => fetchPopupImage(String(sha256)))
   ipcMain.handle(IPC.appUpdatePolicy, async () => (await fetchCheck()).update)
 
   // Writable base dir for app-managed files (e.g. default git worktree location). On the platform:
@@ -2323,14 +2320,20 @@ app.whenReady().then(async () => {
   // (the station's `openedBy` plus that agent's rope to it), never from the renderer; the canvas
   // leg (board-log line + chip) needs no switch, the pane leg is the messaging service above with
   // every one of its gates, the per-project `agentMessaging` switch included.
+  // Shared with `report-outcome --notify-opener` (#1356): same recipient, same delivery.
+  const stationOpener = {
+    recipientFor: (id: string) => stationRecipient(workspaceStore.persistedCanvases(), id),
+    deliver: (notice: Parameters<typeof deliverStationNotice>[0]) =>
+      deliverStationNotice(notice, messagingDeps)
+  }
   const stationNotices = new StationNoticeMonitor({
     now: () => Date.now(),
-    recipientFor: (id) => stationRecipient(workspaceStore.persistedCanvases(), id),
+    recipientFor: stationOpener.recipientFor,
     // The mirror's correlated, unanswered question — the one fact that says a station is really
     // waiting on a human (station-notice.ts: permission prompts are not a trigger).
     pendingQuestionOf: (id) => mirrorEntry(id)?.pendingQuestion?.toolUseId,
     appendBoardLog: (projectId, entry) => appendBoardLogVia(boardLogRouter, projectId, entry),
-    deliver: (notice) => deliverStationNotice(notice, messagingDeps),
+    deliver: stationOpener.deliver,
     publish: (views) => sendToMain(IPC.stationNoticeChanged, views),
     // The memoized index scan, not `getNode` (which re-parses a project file per call): the sweep
     // asks this for every node it tracks.
@@ -2538,7 +2541,6 @@ app.whenReady().then(async () => {
   // here, and its sender leg (board-log line in the sender's project) resolves projects through the
   // index, which nothing else has loaded yet at this point of boot (the renderer's own
   // `workspace.load` comes later). Read-only load (`sideline: false`), like the relay path's.
-  // Shared with the live links' `init()` below, which must not judge a node gone before this read.
   const bootWorkspaceLoad = workspaceStore.load({ sideline: false })
   void restoreDeliveryQueue(messagingDeps.queue, deliveryQueueFile, {
     ready: bootWorkspaceLoad
@@ -2675,6 +2677,9 @@ app.whenReady().then(async () => {
     return {
       claudePermissionMode: s.claudePermissionMode,
       autoSupported: localClaudeCaps?.autoPermissionMode === true,
+      // A phone starting a Claude session here may then mint `--session-id` and register the node
+      // with it (MirrorSettings.claudeSessionIdFlag). Unprobed / older CLI ⇒ absent ⇒ bare command.
+      ...mirrorClaudeSessionIdFlag(localClaudeCaps?.sessionIdFlag),
       ...(localCodexCaps?.approvalValues
         ? { codexApprovalValues: localCodexCaps.approvalValues }
         : {}), // unprobed ⇒ absent ⇒ the reader uses the baseline vocabulary
@@ -2919,6 +2924,8 @@ app.whenReady().then(async () => {
         claudePermissionMode: s.claudePermissionMode,
         // The phone launches claude on the REMOTE host — its CLI is the gate, never the local one.
         autoSupported: sshProjectManager?.remoteAutoPermFor(projectId) === true,
+        // Same rule for `--session-id`: the HOST's own `claude --help` answered, or nothing rides.
+        ...mirrorClaudeSessionIdFlag(sshProjectManager?.remoteClaudeSessionIdFlagFor(projectId)),
         // `codexApprovalValues` is deliberately ABSENT from an SSH slice: the session runs the HOST's
         // codex, the only remote codex probe asks about `--no-daemon` (not the approval vocabulary),
         // and publishing this machine's vocabulary for another machine's binary is the cross-host
@@ -2952,7 +2959,7 @@ app.whenReady().then(async () => {
   // which need the raw transcript_path the NormalizedAgentEvent intentionally drops.
   const subagentTail = createSubagentTail(({ toolUseId, chunk }) => {
     subagentReplay.touch(toolUseId) // a streaming subagent is alive: keep it in the reload replay
-    if (!win.isDestroyed()) win.webContents.send(IPC.agentSubagentActivity, { toolUseId, chunk })
+    corePlatform.broadcast(IPC.agentSubagentActivity, { toolUseId, chunk })
   })
   // Claude's two subagent signal paths merged into one card per child (native SubagentStart/Stop
   // win once a session sends them — core/claude-subagent-lifecycle.ts). Every normalized event
@@ -2982,7 +2989,7 @@ app.whenReady().then(async () => {
     for (const [nid, sid] of nodeContextSession) if (sid === sessionId) nodeId = nid
     if (!nodeId) return
     const ev = recordQuestionResult(nodeId, sessionId, toolUseId)
-    if (ev) sendToMain(IPC.agentStatus, ev)
+    if (ev) corePlatform.broadcast(IPC.agentStatus, ev)
   }
   /**
    * The transcript recorded an interrupt marker (Esc / Ctrl+C). Claude sends no hook for an
@@ -3015,7 +3022,7 @@ app.whenReady().then(async () => {
     // Through the lifecycle like every other event: in a session that sends native hooks the card
     // is keyed by the child's agent_id, and this tool-keyed end is re-keyed onto it (idempotent).
     for (const out of claudeSubagents.apply(taskDoneEvent)) {
-      sendToMain(IPC.agentStatus, out)
+      corePlatform.broadcast(IPC.agentStatus, out)
       recordAgentEvent(out)
     }
     subagentTail.finish(n.toolUseId)
@@ -3026,14 +3033,16 @@ app.whenReady().then(async () => {
   const cursorSubagents = createCursorSubagentTracker({
     tail: subagentTail,
     emit: (ev) => {
-      sendToMain(IPC.agentStatus, ev)
+      corePlatform.broadcast(IPC.agentStatus, ev)
       recordAgentEvent(ev)
     }
   })
   // Every context tail pushes through here, so an agent's meter reaches the renderer, the Notch HUD
-  // and the phone's context ring identically whichever CLI produced the numbers.
+  // and the phone's context ring identically whichever CLI produced the numbers. `broadcast` is the
+  // main window (sendToMain) plus every non-quiet relay peer. A joined team tab does not subscribe
+  // `context:update`, so its meter stays empty (docs/hosted-team-relay.md, follow-ups).
   const pushContextUpdate = (payload: unknown): void => {
-    if (!win.isDestroyed()) win.webContents.send(IPC.contextUpdate, payload)
+    corePlatform.broadcast(IPC.contextUpdate, payload)
     // Feed the macOS Notch HUD the model name (keyed by sessionId; no-op off/non-darwin).
     notchHudOnContextUpdate(payload as Parameters<typeof notchHudOnContextUpdate>[0])
     // Feed the mirror's per-node context ring (mobile-usage-inbox). The context tail keys by
@@ -3046,7 +3055,12 @@ app.whenReady().then(async () => {
       }
     }
   }
-  const contextTail = createContextTail(pushContextUpdate, { onTaskNotification, onToolResult, onTurnInterrupted })
+  // Claude Remote Control on/off, read from the transcript (no hook exists). ONE handler for the
+  // local and the SSH tail; the Server Edition wires the same core helper.
+  const onRemoteControl = remoteControlHandler(nodeContextSession, (u) =>
+    corePlatform.broadcast(IPC.agentRemoteControl, u)
+  )
+  const contextTail = createContextTail(pushContextUpdate, { onTaskNotification, onToolResult, onTurnInterrupted, onRemoteControl })
   // ONE TAIL PER AGENT, each with its own parser — not one tail switching on an agent id, which
   // would mean changing `ContextTail.track(sessionId, path)` and the four call sites that depend on
   // it. The poller (offset reads, torn-line carry, change-gated push) is written once in
@@ -3087,7 +3101,7 @@ app.whenReady().then(async () => {
   const remoteFile = new RemoteFile((args) =>
     sshProjectManager ? sshProjectManager.sshRun(args) : Promise.resolve({ code: 1, stdout: '' })
   )
-  const remoteContextTail = createRemoteContextTail(win, remoteFile, { onTaskNotification, onToolResult, onTurnInterrupted })
+  const remoteContextTail = createRemoteContextTail(win, remoteFile, { onTaskNotification, onToolResult, onTurnInterrupted, onRemoteControl })
   const remoteCodexContextTail = createRemoteContextTail((usage) => {
     const scoped = remoteCodexContext.publish(usage)
     if (scoped) pushContextUpdate(scoped)
@@ -3121,7 +3135,7 @@ app.whenReady().then(async () => {
     onTrack: (nodeId, sessionId) => { nodeContextSession.set(nodeId, sessionId) },
     onClear: (nodeId, sessionId) => {
       notchHudOnContextUpdate({ nodeId, sessionId, cleared: true })
-      if (!win.isDestroyed()) win.webContents.send(IPC.contextUpdate, { nodeId, sessionId, cleared: true,
+      corePlatform.broadcast(IPC.contextUpdate, { nodeId, sessionId, cleared: true,
         usedTokens: 0, windowTokens: 0, usedPercent: 0, model: null, updatedAt: Date.now() })
     }
   })
@@ -3471,7 +3485,10 @@ app.whenReady().then(async () => {
       // A station that starts a DIFFERENT session drops the report its old one made — before the
       // renderer hears the event, so no `--after-success` can fire on it in between.
       stationOutcomes.onAgentEvent(enriched)
-      sendToMain(IPC.agentStatus, enriched)
+      // The main window and every non-quiet relay peer: a joined team tab keeps the host's agent
+      // status in its own session store (a scoped guest hears only its project's nodes —
+      // filterScopedEvent).
+      corePlatform.broadcast(IPC.agentStatus, enriched)
       // Feed the macOS Notch HUD its prompt (ev.task on newTurn) + subagent grouping (no-op off/non-darwin).
       notchHudOnAgentEvent(enriched)
       // Agent messaging taps the SAME stream: the sender's newTurn resets its fan-out budget, and
@@ -3524,6 +3541,8 @@ app.whenReady().then(async () => {
   // (phone Inbox archives the card) and re-sends an 'end' live-update so the paired phone dismisses
   // its lingering DONE Live Activity. Fire-and-forget; the mirror no-ops with no unresolved done.
   corePlatform.handle(IPC.agentSubagentSnapshot, () => subagentReplay.snapshot())
+  // The host's per-node agent states off the mirror, for a relay tab that joins late (bug D).
+  registerAgentStatusSnapshotIpc(corePlatform)
   corePlatform.handle(IPC.agentAckDone, (nodeId: string) => {
     ackDone(nodeId)
   })
@@ -3660,67 +3679,9 @@ app.whenReady().then(async () => {
       }
     }
   })
-  // Live links (docs/live-links.md): a Pro, read-only, expiring browser link to one terminal, hosted
-  // by this machine over the E2E relay. The viewer is a QUIET, SELF-PACED relay peer (never in a
-  // broadcast, never a pause ticket); the pty seam and the node-gone rule are core's, shared with the
-  // Server Edition. `init()` decides nothing before the boot workspace load (R40): an empty answer
-  // while the index is still being read is not evidence that a node is gone.
-  // Where a watcher join goes (core's ONE rule, over this machine's records and its live masters).
-  // Read-back for a link's viewers (docs/live-links.md → Read-back) reads through the phone Chat
-  // screen's page reader (host-chat.ts, `hostBridge.chat` below): the node from this machine's
-  // records, the renderer's session id first, an SSH node read on its host and never here. That reader
-  // is built later in boot, so it is bound late; a read-back before it exists is a failed read the
-  // viewer may repeat. The link host cuts every page at the link's creation; this only reads.
-  let watchHistoryChat: Pick<HostChatOps, 'page'> | null = null
-  const watchRemote = (nodeId: string): WatchRemote =>
-    watchRemoteFor(nodeId, watchRemoteRecords(workspaceStore, (connectionId) => sshProjectManager?.refForProject(connectionId)))
-  watchLinks = createWatchLinkService({
-    api: createWatchLinkApi({ apiBase: RELAY_API_BASE }),
-    relayUrl: RELAY_URL,
-    // Sealed through the keychain seam; if it refuses, links live in memory and the owner is told.
-    store: new WatchLinkStore({
-      file: join(corePlatform.userDataDir, 'watch-links.json'),
-      seal: corePlatform.sealSecret?.bind(corePlatform),
-      unseal: corePlatform.unsealSecret?.bind(corePlatform)
-    }),
-    entitlement: getStoredEntitlement,
-    relayAllowed,
-    nodeState: (nodeId) => workspaceNodeState(workspaceStore, nodeId),
-    workspaceReady: () => bootWorkspaceLoad,
-    clients: {
-      attach: (sink) => {
-        const id = allocateRelayClientId()
-        // No presence join: a viewer puts no cursor or facepile on the owner's canvas.
-        registerPeerSink(id, sink, { quiet: true, selfPaced: true })
-        return id
-      },
-      // → presenceHub.leave (a no-op for an id that never joined) and PtyManager.dropClient.
-      detach: (id) => unregisterPeerSink(id)
-    },
-    // A node whose session lives in a HOST's tmux — every node of an SSH project, and a remote-tmux node
-    // in a LOCAL project (`ssh` + `sshRemoteTmux`, served by the project's host attachment) — is watched
-    // on that host over the master this machine holds for it, or not at all: `requireRemote` for every
-    // such node, the remote fields from this machine's own records (core's `watchRemoteFor`).
-    pty: createWatchPty(ptyManager, watchRemote),
-    // Can a Control link type into this node? A node in a HOST's tmux (the same `watchRemoteFor` answer:
-    // Zellij is a local-only backend) is not decided by this machine's backend choice: 'ok' (a host
-    // with no tmux at all answers every keystroke false, which the link host reports as dropped).
-    controlSupport: (nodeId) => (watchRemote(nodeId).requireRemote ? 'ok' : ptyManager.nodeControlSupport(nodeId)),
-    history: async (nodeId, before) => {
-      const chat = watchHistoryChat
-      if (!chat) throw new Error('read-back is not ready yet')
-      const page = await chat.page(nodeId, before === null ? { maxBytes: HISTORY_READ_BYTES } : { before, maxBytes: HISTORY_READ_BYTES })
-      return page === null || page === 'unsupported' ? { kind: 'unsupported' } : { kind: 'page', result: page }
-    },
-    // The same question host-chat's page asks before it reads: an agent the ⌘M view can render.
-    historySupported: (nodeId) => {
-      const agentId = workspaceStore.getNodeResolved(nodeId)?.agentId ?? mirrorEntry(nodeId)?.agentId
-      return !!agentId && canChat(capabilityAgentId(agentId))
-    },
-    emit: (channel, ...args) => sendToOwners(corePlatform, channel, ...args)
-  })
-  registerWatchLinkIpc(corePlatform, watchLinks)
-  void watchLinks.init()
+  // Live links were retired (2026-11): remove the old store's files (sealed link secrets, password
+  // hashes) from userData once per boot. Never throws; ENOENT is the normal case.
+  void removeRetiredLiveLinkData(corePlatform.userDataDir)
   // Dev-server ports (CLAUDE.md → Dev-server ports). Same identity predicate and the same
   // exit-code-gated runner shape as session memory above; forwarding rides the project's master.
   const devPorts = startDevPortsService({
@@ -4646,7 +4607,8 @@ app.whenReady().then(async () => {
           store: stationOutcomes,
           now: () => Date.now(),
           projectIdOfNode,
-          appendBoardLog: (projectId, entry) => appendBoardLogVia(boardLogRouter, projectId, entry)
+          appendBoardLog: (projectId, entry) => appendBoardLogVia(boardLogRouter, projectId, entry),
+          opener: stationOpener
         }
       )
     }
@@ -4876,9 +4838,29 @@ app.whenReady().then(async () => {
     buildMirrorUsage(usageService.snapshot(), settingsStore.get().claudeAccounts ?? [], Date.now())
   )
   initTelemetry(() => settingsStore.get())
-  // A license change (activate, refresh, a lapsed token replaced) re-arms every live link the API
-  // refused: a link host whose 7-day entitlement expired under it stops minting until then (R41).
-  initLicense(() => watchLinks?.onEntitlementChanged())
+  // The free-tier open-project limit (core/project-limit.ts). Its state goes to THIS machine's
+  // window only: sendToMain, never platform().broadcast, which also fans out to every relay peer
+  // (the state carries this host's Pro and DO_NOT_TRACK facts). The Server Edition does not run it.
+  // Its first check read waits for the boot workspace load, the one the delivery queue waits on: read
+  // before the index is loaded, the open-project count is unknown and would not ride that read.
+  const projectLimit = initProjectLimit({
+    openProjects: () => workspaceStore.openProjectCount(),
+    machineHash: readMachineHashResult,
+    notify: (s) => sendToMain(IPC.projectLimitChanged, s),
+    ready: bootWorkspaceLoad
+  })
+  settingsStore.onChange(() => projectLimit.pushIfChanged())
+  // DO_NOT_TRACK consent for license and allowance calls (docs/project-limit.md): Settings →
+  // Privacy, read on every gated call so revoking it applies at once. Installed BEFORE initLicense,
+  // whose launch refresh runs immediately. Only `licenseNetworkGate()` callers read it — never
+  // telemetry or the check feed. (Giving consent does not trigger a refresh: license.ts exposes
+  // none, so the next license call is the 6 h refresh, an activate or an upgrade; a claim reads the
+  // gate itself.)
+  setLicenseNetworkConsent(() => settingsStore.get().licenseNetworkConsent === true)
+  // A license change can change Pro for the project limit, which nothing else would tell the renderer.
+  initLicense(() => {
+    projectLimit.pushIfChanged()
+  })
   // Lazy getter: sshProjectManager is created just below, so a remote account op (which only runs
   // after the user has connected an SSH project) always sees the live manager.
   initClaudeAccounts(() => sshProjectManager)
@@ -4894,11 +4876,10 @@ app.whenReady().then(async () => {
   const hostBridge = {
     git: gitService,
     // `accountId` = the managed Claude account the phone launched the session under. It has to be
-    // declared here too, or the wire's honest shape stops at this boundary (see RemoteNodeInput).
-    registerNode: (
-      projectId: string,
-      node: { id: string; title?: string; agentId?: string; accountId?: string }
-    ) =>
+    // declared here too, or the wire's honest shape stops at this boundary — which is why this takes
+    // the registrar's own `RemoteNodeInput` instead of re-listing its fields: a hand-copied shape is
+    // where `agentSessionId` (the id the phone launched the agent with) would have stopped next.
+    registerNode: (projectId: string, node: RemoteNodeInput) =>
       workspaceStore.appendRemoteNode(
         projectId,
         node,
@@ -5099,7 +5080,6 @@ app.whenReady().then(async () => {
     // to have focused (that gap read as "cwd is outside the shared project roots" on the phone).
     workspaceRoots: () => workspaceStore.localProjectCwds()
   }
-  watchHistoryChat = hostBridge.chat
   // The renderer owns the Eco hibernation flag (persisted in ITS localStorage) and main only
   // mirrors it — same direction as `terminalFocused`. Feeds the agent-status mirror so the phone
   // renders SLEEPING (and re-fed at renderer boot from the persisted store, so a desktop restart
@@ -5607,10 +5587,6 @@ app.on('before-quit', (e) => {
   }
   quitFlushed = true
   e.preventDefault()
-  // Live links: tell every viewer the host is stopping while the relay sockets are still up, before
-  // killAll tears their pty subscriptions out from under the link hosts. The records stay on disk (the
-  // links resume at the next launch); the last write the service issued lands inside the raced flush.
-  const watchLinksStopped = watchLinks?.shutdown()
   // Pending throttled .nodeterm mirror writes must land BEFORE the ControlMasters die — killing
   // a master mid-write used to leave a truncated project.json on the server. The masters are
   // therefore kept up through the raced flush and dropped on the second before-quit pass.
@@ -5626,8 +5602,7 @@ app.on('before-quit', (e) => {
   const flush = Promise.allSettled([
     requestRendererFlush(getMainWindow()?.webContents, ipcMain).then(() => remoteWorkspaceIO.flush()),
     remoteWorkspaceIO.flush(),
-    ptyManager.killAll(),
-    watchLinksStopped
+    ptyManager.killAll()
   ])
   void Promise.race([flush, new Promise((r) => setTimeout(r, 1500))])
     // Then let whisper go. A dictation still transcribing when Electron tears down the main

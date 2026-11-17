@@ -1,8 +1,8 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import fs from 'fs'
-import os from 'os'
 import path from 'path'
 import { claudeConfigDirFromTranscript, selectedClaudeModel, resetClaudeModelSelectionCache } from './claude-model-selection'
+import { testTmpDir } from './test-tmp'
 
 describe('claudeConfigDirFromTranscript', () => {
   it('climbs three levels for the canonical transcript shape', () => {
@@ -35,7 +35,7 @@ describe('selectedClaudeModel', () => {
 
   beforeEach(() => {
     resetClaudeModelSelectionCache()
-    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-sel-'))
+    dir = testTmpDir('claude-sel-')
   })
 
   it('reads and trims the `model` key', () => {

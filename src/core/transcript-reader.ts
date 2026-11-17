@@ -4,19 +4,23 @@
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
-import type { TranscriptLine, ChatMessage, ChatPart, ChatCarriedToolResult } from '../shared/types'
+import type { TranscriptLine, ChatMessage, ChatPart, ChatCarriedToolResult, ChatToolDiff } from '../shared/types'
 import { transcriptRootFor } from './claude-accounts-core'
 import { linkedClaudeConfigDirFor } from './claude-config-dir'
 import { platform } from './platform'
-import { toolBody } from './chat-tool-body'
+import { capText, toolBody } from './chat-tool-body'
+import { isRecord } from '../shared/is-record'
+import { CLAUDE_TOOL_INTERRUPT_MARKER, claudeInterruptMarkerOf } from '../shared/agents/claude-interrupt'
 import { ASK_USER_QUESTION_TOOL, readQuestions } from '../shared/agents/permission-answer'
-import { BASH_COMMAND_TOOL, CHAT_TOOL_ARG_MAX } from '../shared/chat-command'
+import { BASH_COMMAND_TOOL, BASH_OUTPUT_MAX, CHAT_TOOL_ARG_MAX, COMMAND_OUTPUT_TOOL } from '../shared/chat-command'
 import {
   AGENT_MESSAGE_TOOL,
   BACKGROUND_TASK_TOOL,
+  COMPACTION_TOOL,
   SYSTEM_TOOL,
   expandPastedContent
 } from '../shared/chat-system-records'
+import { teammateElementText, teammateElements, type TeammateElement } from './chat-teammate'
 
 // Transcript root for a managed account (its `projects` dir) or the system default
 // (`~/.claude/projects` when accountId is undefined — bit-for-bit the old behavior). Impure
@@ -115,6 +119,13 @@ function outputText(tags: Map<string, string>): string {
     .join('\n')
 }
 
+/** A command's output as its tool part's `result`. A `!` command's keeps its lines, capped at
+ *  BASH_OUTPUT_MAX (the chat view shows the first line under the command, all of it when opened); a
+ *  slash command's is summarized like a tool result. */
+function commandOutputResult(family: 'slash' | 'bash', text: string): string {
+  return family === 'bash' ? text.slice(0, BASH_OUTPUT_MAX) : summarizeResult(text)
+}
+
 /** A command's arg: trimmed, then capped like `toolArg` (the composer's `sentCommand` agrees). */
 const capArg = (v: string | undefined): string => (v ?? '').trim().slice(0, CHAT_TOOL_ARG_MAX)
 
@@ -184,9 +195,6 @@ export function classifyLocalCommand(content: string): LocalCommandRecord | null
   return null
 }
 
-/** The name an output record's tool part gets when there is no command to attach it to. */
-export const COMMAND_OUTPUT_TOOL = 'command output'
-
 // ── System-injected user records ─────────────────────────────────────────────────────────────────
 // Claude Code writes several things that are NOT the user's words as `type:"user"` records. Measured
 // on 200 real transcripts (2026-09), user records without a tool_result, by `origin.kind`:
@@ -198,6 +206,9 @@ export const COMMAND_OUTPUT_TOOL = 'command output'
 //                      `<agent-message from="…">` (a subagent hand-back) or `<cross-session-message
 //                      from="…" from-name="…" from-mode="…">` element + a fixed instruction trailer.
 //   auto-continuation / coordinator  (isMeta)  plain text.
+//   (no origin)        an agent team's teammate: "Another Claude session sent a message:\n" + one or
+//                      more `<teammate-message teammate_id="…">` elements + a fixed trailer, with no
+//                      `origin` / `promptSource` / `isMeta` at all (core/chat-teammate.ts).
 // Each renders as ONE assistant tool part — the #991 local-command pattern: no new role, part kind
 // or field, so a v1 decoder (the phone) reads it as an ordinary tool chip. A human paste
 // (`<pasted_content id="…">…</pasted_content id="…">` inside typed text) stays the user's bubble.
@@ -347,7 +358,36 @@ export function classifySystemRecord(
   }
   if (kind === 'peer') return peerMessage(content)
   if (kind === 'auto-continuation' || kind === 'coordinator') return fallback(SYSTEM_TOOL, content)
+  const team = teammateElements(rec, content)
+  if (team !== null) return teammateRecord(team)
   return null
+}
+
+/** A teammate record (core/chat-teammate.ts) as ONE `Agent message` part: `arg` names the sender(s),
+ *  `result` holds each element as text. The rich read draws `teammate` parts instead. */
+function teammateRecord(team: TeammateElement[]): SystemRecord {
+  const senders = [...new Set(team.map((el) => (el.unverified ? `${el.from} (unverified)` : el.from)))]
+  return {
+    name: AGENT_MESSAGE_TOOL,
+    arg: capArg(senders.join(', ')),
+    result: capResult(team.map(teammateElementText).join('\n\n'))
+  }
+}
+
+/** A teammate element as the `teammate` part the rich read draws. */
+function teammatePart(el: TeammateElement): Extract<ChatPart, { kind: 'teammate' }> {
+  return { kind: 'teammate', ...el }
+}
+
+/** What a tool call cancelled by an interrupt shows as its result (`ChatParseOptions.rich`). */
+export const INTERRUPTED_TOOL_RESULT = 'Interrupted'
+
+/** The result Claude Code writes for a tool call the user cancelled or refused. MEASURED on 2.1.285
+ *  (`__fixtures__/claude/interrupt-capture.json`): an `is_error` tool_result starting with this. */
+const TOOL_REJECTION_PREFIX = "The user doesn't want to proceed with this tool use."
+
+function isToolRejection(c: { is_error?: unknown; content?: unknown }): boolean {
+  return c.is_error === true && summarizeResult(c.content).startsWith(TOOL_REJECTION_PREFIX)
 }
 
 /** A system record's tool part (`result` only when non-empty). */
@@ -361,7 +401,91 @@ function systemPart(r: SystemRecord): Extract<ChatPart, { kind: 'tool' }> {
  *  a TITLE (recent conversations, the transcript index), where a code fence has no place. */
 export interface ChatParseOptions {
   expandPastes?: boolean
+  /**
+   * Emit a `thinking` part for each thinking block that carries readable text — the summaries
+   * claude's TUI prints between tool calls. Most thinking blocks carry only an encrypted
+   * `signature` and an empty `thinking` (measured: 137 of 913 on one machine had text); those, and
+   * every `redacted_thinking`, yield nothing either way. Off by default: the shared golden fixtures
+   * (`thinking.pages.json`) and the phone's `chat.page` keep dropping them. Each part carries `ms`,
+   * how long the model thought, when the stamps can tell (see the `ChatPart` type).
+   */
+  thinking?: boolean
+  /**
+   * Emit the parts only the desktop ⌘M panel draws. Today: an `image` part for each image block of a
+   * user record's content array — a pasted screenshot, measured (CLI 2.1.314) as
+   * `{type:'image', source:{type:'base64', media_type, data}}` — when the source is base64, its
+   * media type is in `CHAT_IMAGE_TYPES` and `data` is a non-empty string. An image inside a
+   * `tool_result` is tool output and stays out (`summarizeResult` ignores it, as before). Off by
+   * default, like `thinking`: the golden fixtures and the phone's `chat.page` never set it.
+   * Also: a `diff` on each `Edit` / `Write` tool part whose input reads (`toolDiff`), a
+   * `Compaction` chip for each context compaction (`compactionPart`) in place of the long summary
+   * record the model continues from, which is skipped, a checklist `body` on each `TodoWrite`
+   * tool part whose `todos` read (`toolBody`), and a `teammate` part for each message of an agent
+   * team's teammate (`teammateElements`) in place of the one `Agent message` chip.
+   */
+  rich?: boolean
 }
+
+/**
+ * The image types an `image` part may carry (`ChatParseOptions.rich`): the raster formats claude
+ * accepts as a pasted image. Closed on purpose — anything else (`image/svg+xml` is scriptable markup,
+ * an unknown type is unrenderable) yields no part rather than a `data:` URL of unknown content.
+ */
+export const CHAT_IMAGE_TYPES: readonly string[] = ['image/png', 'image/jpeg', 'image/gif', 'image/webp']
+
+/** An image block of a user record, as an `image` part — or null when it is not one we draw. */
+function imagePart(source: unknown): Extract<ChatPart, { kind: 'image' }> | null {
+  if (!source || typeof source !== 'object') return null
+  const { type, media_type: mediaType, data } = source as { type?: unknown; media_type?: unknown; data?: unknown }
+  if (type !== 'base64' || typeof mediaType !== 'string' || !CHAT_IMAGE_TYPES.includes(mediaType)) return null
+  if (typeof data !== 'string' || !data) return null
+  return { kind: 'image', mediaType, data }
+}
+
+/**
+ * The change an `Edit` / `Write` call asked for (`ChatParseOptions.rich`), from its INPUT — measured
+ * (CLI 2.1.314) as `Edit → {file_path, old_string, new_string, replace_all?}` and
+ * `Write → {file_path, content}`. Undefined for any other tool or shape: the plain chip, as before.
+ * An empty `new_string` is a deletion and still a diff. Each text is capped at the tool-body length
+ * (`capText`) with no markdown repair: it is file content, and is shown as it was written.
+ */
+function toolDiff(name: string, input: unknown): ChatToolDiff | undefined {
+  if (!isRecord(input)) return undefined
+  const filePath = input.file_path
+  if (typeof filePath !== 'string' || !filePath) return undefined
+  if (name === 'Edit') {
+    const { old_string: oldText, new_string: newText } = input
+    if (typeof oldText !== 'string' || typeof newText !== 'string') return undefined
+    return { filePath, oldText: capText(oldText), newText: capText(newText) }
+  }
+  if (name === 'Write') {
+    return typeof input.content === 'string' ? { filePath, oldText: '', newText: capText(input.content) } : undefined
+  }
+  return undefined
+}
+
+/**
+ * A context compaction (`ChatParseOptions.rich`) as ONE tool part, from the `compactMetadata` of the
+ * `type:'system'` record claude writes at the boundary — measured (CLI 2.1.314) as
+ * `{subtype:'compact_boundary', content:'Conversation compacted', compactMetadata:{trigger:'auto' |
+ * 'manual', preTokens, postTokens, …}}`. The trigger is the `arg` ('' when it is not a string; capped
+ * like any tool arg); the `result` is `<preTokens> → <postTokens> tokens` in plain digits, only when
+ * both are finite numbers.
+ */
+function compactionPart(meta: unknown): Extract<ChatPart, { kind: 'tool' }> {
+  const m: Record<string, unknown> = isRecord(meta) ? meta : {}
+  const part: Extract<ChatPart, { kind: 'tool' }> = {
+    kind: 'tool',
+    name: COMPACTION_TOOL,
+    arg: typeof m.trigger === 'string' ? m.trigger.slice(0, CHAT_TOOL_ARG_MAX) : ''
+  }
+  const { preTokens: pre, postTokens: post } = m
+  if (typeof pre === 'number' && Number.isFinite(pre) && typeof post === 'number' && Number.isFinite(post)) {
+    part.result = `${pre} → ${post} tokens`
+  }
+  return part
+}
+
 const userTextOf = (text: string, opts: ChatParseOptions | undefined): string =>
   opts?.expandPastes === false ? text : expandPastedContent(text)
 
@@ -507,6 +631,79 @@ export function lineTime(v: unknown): number | undefined {
   return Number.isFinite(t) ? t : undefined
 }
 
+/** The fields `abandonedPromptUuids` reads from a parsed record. */
+interface TreeFields {
+  type?: unknown
+  uuid?: unknown
+  parentUuid?: unknown
+  isSidechain?: unknown
+  isMeta?: unknown
+  message?: { content?: unknown }
+}
+
+/** A typed prompt: a non-blank string, or an array with a text part and no tool_result. */
+function isPromptContent(content: unknown): boolean {
+  if (typeof content === 'string') return content.trim() !== ''
+  if (!Array.isArray(content)) return false
+  let text = false
+  for (const c of content as Array<{ type?: unknown; text?: unknown }>) {
+    if (!c || typeof c !== 'object') continue
+    if (c.type === 'tool_result') return false
+    if (c.type === 'text' && typeof c.text === 'string' && c.text !== '') text = true
+  }
+  return text
+}
+
+function hasToolResult(content: unknown): boolean {
+  return Array.isArray(content) && content.some((c) => !!c && typeof c === 'object' && (c as { type?: unknown }).type === 'tool_result')
+}
+
+/**
+ * The uuids of prompts the model never received. A transcript is a TREE: each record names its
+ * `parentUuid`, and the model is sent the chain from the newest record back to the root. When a
+ * prompt's request is cancelled before anything answers it (Esc on a queued prompt, or Esc right
+ * after sending, which puts the text back in the input), claude leaves the prompt record in the
+ * file and attaches the next prompt to the SAME parent, so the cancelled one becomes a dead end.
+ * Measured over 133 transcripts (5,886 prompts): 6 such records, and in every one the model never
+ * saw the text (5 were re-sent after an edit, one was a raw `/compact` recorded twice).
+ *
+ * A prompt is abandoned when no record in these lines has it as its parent AND a later
+ * user/assistant record (not a sidechain, not a tool result) has the same parent. The tool-result
+ * exclusion is measured (1 of 9 matches over 306 transcripts, 2,899 prompts): a prompt typed
+ * during a pending tool call is a childless sibling of that call's result, and the request that
+ * follows carries the prompt text. Both checks see only the lines
+ * given, so on a paged read a sibling in a NEWER window is missed and the prompt is shown, as
+ * before. A prompt the model did answer is safe: claude writes its first child right after it
+ * (measured in the 10 prompts that have both a child and a later sibling), so any window holding
+ * the sibling holds the child too. Records without string `uuid` / `parentUuid` are never hidden.
+ */
+function abandonedPromptUuids(records: readonly TreeFields[]): Set<string> {
+  const hasChild = new Set<string>()
+  // Per parent, the index and uuid of each user/assistant record on the main thread.
+  const byParent = new Map<string, Array<{ i: number; uuid: unknown }>>()
+  records.forEach((o, i) => {
+    if (typeof o.parentUuid !== 'string') return
+    hasChild.add(o.parentUuid)
+    // A tool-result record is never the re-send that marks its sibling abandoned: a prompt typed
+    // while a tool call is pending shares that call's parent with the result (the interrupt marker
+    // and the answer hang off the RESULT), and the model receives both in one request.
+    if ((o.type === 'user' || o.type === 'assistant') && o.isSidechain !== true && !hasToolResult(o.message?.content)) {
+      const list = byParent.get(o.parentUuid) ?? []
+      list.push({ i, uuid: o.uuid })
+      byParent.set(o.parentUuid, list)
+    }
+  })
+  const out = new Set<string>()
+  records.forEach((o, i) => {
+    if (o.type !== 'user' || o.isSidechain === true || o.isMeta === true) return
+    if (typeof o.uuid !== 'string' || typeof o.parentUuid !== 'string') return
+    if (hasChild.has(o.uuid) || !isPromptContent(o.message?.content)) return
+    const later = (byParent.get(o.parentUuid) ?? []).some((s) => s.i > i && s.uuid !== o.uuid)
+    if (later) out.add(o.uuid)
+  })
+  return out
+}
+
 function parseChatRecords(
   records: Iterable<{ raw: string; offset: number }>,
   paged: boolean,
@@ -527,6 +724,12 @@ function parseChatRecords(
   // its output record (cleared by any other push, so output attaches only to the record right
   // before it).
   let awaitingOutput: { family: 'slash' | 'bash'; part: Extract<ChatPart, { kind: 'tool' }> } | null = null
+  // The stamp of the newest `user` record so far, hidden meta lines included: when the request a
+  // thinking record answers was made, so its `ms` (see the type). Read only on the opt-in branch.
+  let lastUserAt: number | undefined
+  // The tool part the LAST user/assistant record rejected (Claude's canned "doesn't want to proceed"
+  // result), for an interrupt marker right after it. Read only on the opt-in branch.
+  let rejectedTool: Extract<ChatPart, { kind: 'tool' }> | null = null
   const push = (m: ChatMessage, offset: number): void => {
     awaitingOutput = null
     // `at` rides BOTH paths (additive): the time the line was written, for the thread's relative
@@ -534,13 +737,20 @@ function parseChatRecords(
     const withAt = at === undefined ? m : { ...m, at }
     messages.push(paged ? { ...withAt, key: offset } : withAt)
   }
-  for (const { raw, offset } of records) {
-    if (!raw.trim()) continue
-    let o: Parameters<typeof isHiddenMetaRecord>[0] & {
+  type Rec = Parameters<typeof isHiddenMetaRecord>[0] &
+    TreeFields & {
       timestamp?: unknown
       effort?: unknown
+      subtype?: unknown
+      compactMetadata?: unknown
+      isCompactSummary?: unknown
       message?: { content?: unknown; model?: unknown }
     }
+  // Parsed once, up front: whether a prompt was abandoned depends on records AFTER it.
+  const parsed: Array<{ o: Rec; offset: number }> = []
+  for (const { raw, offset } of records) {
+    if (!raw.trim()) continue
+    let o: Rec
     try {
       o = JSON.parse(raw)
     } catch {
@@ -549,6 +759,15 @@ function parseChatRecords(
     // `null` / a number / a string parse fine and would throw on the reads below, failing the whole
     // page over one line another program wrote. One bad line costs one line (the Swift port agrees).
     if (!o || typeof o !== 'object' || Array.isArray(o)) continue
+    parsed.push({ o, offset })
+  }
+  const abandoned = abandonedPromptUuids(parsed.map((p) => p.o))
+  for (const { o, offset } of parsed) {
+    // A prompt the model never received (see `abandonedPromptUuids`). Skipped before anything else,
+    // so it moves no clock and attaches to nothing.
+    if (typeof o.uuid === 'string' && abandoned.has(o.uuid)) continue
+    // Before the meta check: a hidden user line is still a request the model answers.
+    if (o.type === 'user') lastUserAt = lineTime(o.timestamp)
     if (isHiddenMetaRecord(o)) continue
     at = lineTime(o.timestamp)
     const content = o.message?.content
@@ -556,25 +775,60 @@ function parseChatRecords(
       model = metaString(o.message?.model)
       effort = metaString(o.effort)
     }
+    // Opt-in (see `ChatParseOptions.rich`): without it the boundary yields nothing and the summary
+    // is a user message, as before. The summary is the model's own recap of the conversation so far,
+    // not the user's words: the chip carries the fact, and the summary is skipped whatever its shape.
+    if (opts?.rich && o.type === 'system' && o.subtype === 'compact_boundary') {
+      push({ role: 'assistant', parts: [compactionPart(o.compactMetadata)] }, offset)
+      continue
+    }
+    if (opts?.rich && o.type === 'user' && o.isCompactSummary === true) continue
+    // Opt-in (see `ChatParseOptions.rich`): an interrupt marker is Claude's, not the user's words.
+    // A tool call it cancelled was answered just before with a canned rejection ("The user doesn't
+    // want to proceed with this tool use…"), which reads as the tool's output; it says Interrupted.
+    const interrupt = opts?.rich && o.type === 'user' ? claudeInterruptMarkerOf(content) : null
+    if (interrupt !== null) {
+      if (interrupt === CLAUDE_TOOL_INTERRUPT_MARKER && rejectedTool) rejectedTool.result = INTERRUPTED_TOOL_RESULT
+      rejectedTool = null
+      push({ role: 'assistant', parts: [{ kind: 'interrupt' }] }, offset)
+      continue
+    }
+    if (o.type === 'user' || o.type === 'assistant') rejectedTool = null
     if (o.type === 'assistant' && Array.isArray(content)) {
       const parts: ChatPart[] = []
       for (const c of content as Array<{
         type?: string
         text?: string
+        thinking?: unknown
         name?: string
         id?: string
         input?: unknown
       }>) {
         if (!c || typeof c !== 'object') continue
         if (c.type === 'text' && c.text) parts.push({ kind: 'text', text: c.text })
+        else if (c.type === 'thinking') {
+          if (opts?.thinking && typeof c.thinking === 'string' && c.thinking.trim()) {
+            // Capped like a system record's body: one runaway block must not size the whole page.
+            const part: Extract<ChatPart, { kind: 'thinking' }> = {
+              kind: 'thinking',
+              text: c.thinking.slice(0, SYSTEM_RESULT_MAX)
+            }
+            const ms = at !== undefined && lastUserAt !== undefined ? at - lastUserAt : undefined
+            if (ms !== undefined && ms >= 0) part.ms = ms
+            parts.push(part)
+          }
+        }
         else if (c.type === 'tool_use') {
           const part: Extract<ChatPart, { kind: 'tool' }> = {
             kind: 'tool',
             name: c.name ?? 'tool',
             arg: toolArg(c.input)
           }
-          const body = toolBody(part.name, c.input)
+          const body = toolBody(part.name, c.input, { rich: opts?.rich === true })
           if (body) part.body = body
+          // Opt-in (see `ChatParseOptions.rich`): without it an Edit is the plain chip, as before.
+          const diff = opts?.rich ? toolDiff(part.name, c.input) : undefined
+          if (diff) part.diff = diff
           if (part.name === ASK_USER_QUESTION_TOOL) {
             const questions = readQuestions(c.input)
             if (questions) part.questions = questions
@@ -592,15 +846,22 @@ function parseChatRecords(
         text?: string
         tool_use_id?: string
         content?: unknown
+        source?: unknown
+        is_error?: unknown
       }>) {
         if (!c || typeof c !== 'object') continue
         // A non-string `text` is passed through as before; only a string is a paste to expand.
         if (c.type === 'text' && c.text) parts.push({ kind: 'text', text: typeof c.text === 'string' ? userTextOf(c.text, opts) : c.text })
-        else if (c.type === 'tool_result') {
+        else if (c.type === 'image') {
+          // Opt-in (see `ChatParseOptions.rich`): without it the record keeps only its text, as before.
+          const part = opts?.rich ? imagePart(c.source) : null
+          if (part) parts.push(part)
+        } else if (c.type === 'tool_result') {
           const tool = c.tool_use_id ? toolById.get(c.tool_use_id) : undefined
           const s = summarizeResult(c.content)
           if (tool) {
             if (s) tool.result = s
+            if (opts?.rich && isToolRejection(c)) rejectedTool = tool
           } else if (paged && s && typeof c.tool_use_id === 'string' && c.tool_use_id) {
             // Its tool_use is in an OLDER window (claude writes the call before its result, so it
             // can never be in a newer one). Carried so the renderer can attach it later.
@@ -612,6 +873,13 @@ function parseChatRecords(
     } else if (o.type === 'user' && typeof content === 'string' && content.trim()) {
       // Not the user's words (a background task's completion, another session's message, an
       // auto-continuation): one assistant tool part, like a local command.
+      // Opt-in (see `ChatParseOptions.rich`): a teammate's messages are drawn as the TUI draws them;
+      // without it the record is one `Agent message` chip, like any other system record.
+      const team = opts?.rich ? teammateElements(o, content) : null
+      if (team !== null) {
+        push({ role: 'assistant', parts: team.map(teammatePart) }, offset)
+        continue
+      }
       const sys = classifySystemRecord(o, content)
       if (sys) {
         push({ role: 'assistant', parts: [systemPart(sys)] }, offset)
@@ -624,12 +892,13 @@ function parseChatRecords(
         push({ role: 'assistant', parts: [part] }, offset)
         awaitingOutput = { family: cmd.family, part }
       } else if (cmd?.kind === 'output') {
-        const s = summarizeResult(cmd.text)
-        if (!s) continue
-        if (awaitingOutput && awaitingOutput.family === cmd.family) {
+        const s = commandOutputResult(cmd.family, cmd.text)
+        // A `!` command that printed nothing still gets its (empty) result, so the chat view can say
+        // so instead of looking unfinished. Any other empty output is skipped, as before.
+        if (awaitingOutput && awaitingOutput.family === cmd.family && (s !== '' || cmd.family === 'bash')) {
           awaitingOutput.part.result = s
           awaitingOutput = null
-        } else {
+        } else if (s !== '') {
           push({ role: 'assistant', parts: [{ kind: 'tool', name: COMMAND_OUTPUT_TOOL, arg: '', result: s }] }, offset)
         }
       } else {
@@ -656,6 +925,13 @@ export function parseChatMessages(rawLines: string[], opts?: ChatParseOptions): 
     false,
     opts
   ).messages
+}
+
+/** Claude's record parser with parse options bound — `parseChatWindow`'s third argument. */
+export function claudeChatRecordParser(
+  opts: ChatParseOptions
+): (records: Iterable<{ raw: string; offset: number }>, paged: true) => ChatRecordsOut {
+  return (records, paged) => parseChatRecords(records, paged, opts)
 }
 
 /** A paged chat read's answer, minus `found` (the caller knows whether anything resolved). */

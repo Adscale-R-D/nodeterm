@@ -1,10 +1,8 @@
 import { memo, useState } from 'react'
+import { sshHostKey } from '@shared/ssh'
 import type { KanbanCardMeta, KanbanColumnCategory, KanbanLabel, KanbanPriority } from '@shared/types'
-import { useAgentStatus } from '../../state/agentStatus'
+import { useAgentStatus, type AgentStatusSession } from '../../state/agentStatus'
 import { AccountChip, useAccountChip } from '../AccountChip'
-import { LiveLinkChip, showsLiveLinks } from '../LiveLinkChip'
-import type { SessionSource } from '../../session/session'
-import { useWatchLinks } from '../../state/watchLinks'
 import { ContextMeter } from '../ContextMeter'
 import { transcriptSessionFor } from '../../lib/transcriptSession'
 import { isRemoteSessionNode } from '@shared/worktree'
@@ -23,6 +21,7 @@ import type { TeamStation } from '../../lib/teamProgress'
 import { cardShowsOverdue, sessionNameRepeatsTitle } from '../../lib/cardRedundancy'
 import { PortsChip } from '../PortsChip'
 import { QueuedLaunchChip } from './QueuedLaunchChip'
+import type { SelectMods } from '../../lib/cardSelection'
 
 const PRIO_COLOR = Object.fromEntries(PRIORITIES.map((p) => [p.id, p.color])) as Record<KanbanPriority, string>
 
@@ -52,10 +51,6 @@ interface SessionCardProps {
   onTravel?: (nodeId: string) => void
   /** The lifecycle category of the column the card sits in (lib/cardRedundancy reads it). */
   columnCategory?: KanbanColumnCategory
-  /** The session the board's PROJECT belongs to (`projectSessionSource`). Only a local one shows
-   *  this machine's LIVE chip, or counts a link as card detail — a relay tab's node with the same
-   *  id is another machine's terminal (R57). */
-  liveLinkSource: SessionSource | null
   /** The card's project, when the dev-port scanner covers it (the project on the canvas). Absent =
    *  no Ports chip: the scanner scans the active project only, so an Omni lane of a background
    *  project would only ever show a stale or empty list. A stable object per board (memo). */
@@ -65,11 +60,24 @@ interface SessionCardProps {
   /** ▶ on the card's QUEUED chip: start the node's held launch now (Canvas's `run` path; on a relay
    *  tab Canvas answers with a "runs on the host" notice instead). Absent = the chip shows without ▶. */
   onRunQueued?: (nodeId: string) => void
+  /** The agent-status store of the session the card's PROJECT belongs to
+   *  (`agentStatusForProject(projectId).store`, re-resolved by the board on a registry change).
+   *  A team tab's card reads its relay session's store; its node id is the handed-off SSH
+   *  project's too, so the default store would show that project's state on this card. Absent =
+   *  the default store. A stable reference per board (SessionCard is memoized). */
+  statusStore?: AgentStatusSession['store']
+  /** This card is part of the board's multi-selection. */
+  selected?: boolean
+  /** Every click is offered to the board's selection first (⌘/Ctrl-click, Shift-click, or any
+   *  click while cards are selected). True = it was a selection gesture and the card must NOT
+   *  open. One stable function for every card (`useCardSelection`). Absent = no multi-select. */
+  onSelectClick?: (nodeId: string, mods: SelectMods) => boolean
 }
 
 export const SessionCard = memo(function SessionCard({
   session, meta, labels = [], onOpen, onDragStart, onDragEnd, onDropAt, onContext, pulls,
-  pullFreshness = 'fresh', onOpenIssue, team, onTravel, columnCategory, liveLinkSource, ports, onOpenPort, onRunQueued
+  pullFreshness = 'fresh', onOpenIssue, team, onTravel, columnCategory, ports, onOpenPort, onRunQueued,
+  statusStore, selected = false, onSelectClick
 }: SessionCardProps) {
   // THIS card's agent status, subscribed per card rather than threaded down from the board.
   // KanbanView used to hold `useAgentStatus((s) => s.byId)` and pass the map through the column:
@@ -77,13 +85,18 @@ export const SessionCard = memo(function SessionCard({
   // flip re-rendered the whole board — every column, every card. The same rule Canvas follows
   // (see its loopSig comment) and StatusAwareMiniMap demonstrates: subscribe where the value is
   // read, so the re-render is confined to the one thing that changed.
-  const status = useAgentStatus((s) => s.byId[session.id])
+  const status = (statusStore ?? useAgentStatus)((s) => s.byId[session.id])
   // The card's meter follows the same session rule as the node and the card modal.
   const cardTranscript = transcriptSessionFor({ live: status?.sessionId, persisted: session.spawn.agentSessionId, cwd: session.spawn.cwd })
   // The board is the canvas's other view of the same node (CONTRIBUTING), so the card carries the
   // node header's account chip from the same helper — created-with account, else what the session
   // was observed running as.
-  const accountChip = useAccountChip(session.spawn.accountId, status?.account)
+  const accountChip = useAccountChip(
+    session.spawn.accountId,
+    status?.account,
+    statusStore,
+    session.spawn.ssh ? sshHostKey(session.spawn.ssh) : undefined
+  )
   // Local drag state only styles THIS card (ghost look) — the drag payload lives in KanbanView.
   const [dragging, setDragging] = useState(false)
   // Which edge a drag is hovering over → shows the drop line (top = before, bottom = after).
@@ -108,21 +121,15 @@ export const SessionCard = memo(function SessionCard({
     ? status.session
     : undefined
   const priority = meta?.priority
-  // A live link counts as detail: "this terminal is being broadcast" must show on the card whatever
-  // else it has to say (a primitive selector — see LiveLinkChip).
-  const showLive = showsLiveLinks(liveLinkSource)
-  const hasLiveLink = useWatchLinks(
-    (s) => showLive && session.kind === 'terminal' && (s.byNode[session.id]?.length ?? 0) > 0
-  )
   // The account chip counts as detail in its own right: a card whose only thing to say is "this
   // one is on the other Claude login" is exactly the card that must say it.
   const hasDetail =
-    !!status?.sessionId || !!sessionName || !!accountChip || hasLiveLink || stickyPreview.includes('\n')
+    !!status?.sessionId || !!sessionName || !!accountChip || stickyPreview.includes('\n')
   return (
     <div
       className={`kanban-card kanban-card--session${dragging ? ' kanban-card--dragging' : ''}${
         dropSide ? ` kanban-card--drop-${dropSide}` : ''
-      }`}
+      }${selected ? ' kanban-card--selected' : ''}`}
       draggable
       // Focusable, and named for the board's keyboard (J/K/arrows walk these, Space opens one —
       // KanbanView's board-key handler finds the current card through this attribute).
@@ -151,7 +158,16 @@ export const SessionCard = memo(function SessionCard({
         setDropSide(null)
         onDropAt(session.id, side)
       }}
-      onClick={() => onOpen(session.id)}
+      // A Shift-click extends the selection; without this it would also sweep a text selection
+      // across every card in between.
+      onMouseDown={(e) => {
+        if (e.shiftKey && onSelectClick) e.preventDefault()
+      }}
+      onClick={(e) => {
+        const mods = { toggle: e.metaKey || e.ctrlKey, range: e.shiftKey }
+        if (onSelectClick?.(session.id, mods)) return
+        onOpen(session.id)
+      }}
       onContextMenu={(e) => {
         e.preventDefault()
         onContext(session.id, e.clientX, e.clientY)
@@ -166,7 +182,7 @@ export const SessionCard = memo(function SessionCard({
           <IssueRefChip issueRef={session.issueRef} onOpen={onOpenIssue} />
         )}
         {session.kind === 'terminal' && team && team.length > 0 && onTravel && (
-          <TeamProgressChip stations={team} onTravel={onTravel} />
+          <TeamProgressChip stations={team} onTravel={onTravel} statusStore={statusStore} />
         )}
         {session.kind === 'terminal' && session.pendingLaunch && (
           <QueuedLaunchChip
@@ -264,7 +280,6 @@ export const SessionCard = memo(function SessionCard({
             <>
               <ContextMeter sessionId={cardTranscript.sessionId ?? null} fromLaunchId={cardTranscript.fallback} nodeId={session.id} remote={isRemoteSessionNode(session.spawn)} agentId={session.agentId ?? session.spawn.agentId ?? status?.agentId} />
               <AccountChip chip={accountChip} />
-              <LiveLinkChip nodeId={session.id} source={liveLinkSource} className="kanban-card__live" />
               {sessionName && (
                 <span className="kanban-card__session" title={sessionName}>
                   {sessionName}

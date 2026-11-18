@@ -102,8 +102,16 @@ import { controlInputPlan, remoteControlInputPlan } from './pane-input'
 import {
   recordFreshSpawnOwner,
   forgetPaneOwner,
+  persistFreshSpawnStamp,
+  reprovePaneOwners,
+  setPaneOwnerMissHook,
+  hasPaneOwnerRow,
+  isCurrentFreshSpawn,
+  isPaneStamp,
+  PANE_STAMP_FORMAT,
   shouldRecordOwnership
 } from './agents/pane-ownership'
+import { isNoServerError } from './session-memory'
 import { PANE_OWNER_FMT, foregroundArgvArgs, paneOwnerFrom, parseCombinedPaneOwner, parsePaneOwner } from './agents/pane-owner'
 import { binariesFor, isAgentPane, type PaneOwner } from '../shared/agents/pane-owner-predicate'
 import { PANE_PROBE_TIMEOUT_MS, WINDOWS_PANE_PROBE_TIMEOUT_MS } from './agents/pane-probe'
@@ -3129,8 +3137,17 @@ export class PtyManager {
     // someone else spawned (incl. an app-restart re-attach) leaves the pane UNPROVEN, so a second
     // project that merely opens another's node id cannot claim it. The owner is the renderer's
     // machine-local project id, never the git-shared file id. See `agents/pane-ownership.ts`.
-    if (shouldRecordOwnership(fresh, options.persistKey, options.ownerProjectId))
-      recordFreshSpawnOwner(options.persistKey as string, options.ownerProjectId)
+    if (shouldRecordOwnership(fresh, options.persistKey, options.ownerProjectId)) {
+      const key = options.persistKey as string
+      const owner = options.ownerProjectId as string
+      const gen = recordFreshSpawnOwner(key, owner)
+      // Fork patch #6: the durable row, once tmux can tell us which session this is.
+      if (gen !== undefined) void this.persistSpawnStampWhenReady(key, owner, gen)
+    } else if (!fresh && options.persistKey && hasPaneOwnerRow(options.persistKey)) {
+      // An attach to a session an earlier run spawned: re-prove it from its durable row.
+      const key = options.persistKey
+      void this.sessionStamp(key).then((stamp) => reprovePaneOwners((id) => (id === key ? stamp : null), [key]), () => undefined)
+    }
     if (warmWindowsBackend === 'tmux') {
       // The first strict probe deliberately preceded profile resolution. Recheck after launching
       // attach-only: if the named session disappeared in that window, never return the transient
@@ -6731,6 +6748,96 @@ export class PtyManager {
    * node, an unreadable answer). The integration principal records it right after a fresh spawn and
    * compares it on `resume` to re-prove a pane after a service restart (`recordReprovedOwner`).
    */
+  /**
+   * Fork patch #6: this node's LOCAL tmux session stamp (`PANE_STAMP_FORMAT`, agents/pane-ownership),
+   * or `null` for every uncertainty — the same exclusions as `sessionCreatedAt`. A miss by the exact
+   * target expands every format to '' and reads as null, never as a stamp.
+   */
+  async sessionStamp(persistKey: string): Promise<string | null> {
+    const live = this.liveSessionForPersistKey(persistKey)
+    if (this.isZellij(persistKey, live)) return null
+    if (live?.sshRemote || live?.sessionHost || !this.tmuxPath) return null
+    try {
+      const { stdout } = await runAsync(
+        this.tmuxPath,
+        ['-L', TMUX_SOCKET, 'display-message', '-p', '-t', exactPaneTarget(sessionName(persistKey)), PANE_STAMP_FORMAT],
+        { timeout: PROBE_TIMEOUT_MS }
+      )
+      const v = stdout.trim()
+      return isPaneStamp(v) ? v : null
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * Every local tmux session's stamp in ONE call, keyed by session name. An empty map when tmux
+   * positively answered that no server runs (an answer: every row is then absent); `null` when it
+   * could not be asked (no tmux, a failure, a timeout) — which changes nothing.
+   */
+  async localSessionStamps(): Promise<Map<string, string> | null> {
+    if (!this.tmuxPath) return null
+    try {
+      const { stdout } = await runAsync(
+        this.tmuxPath,
+        ['-L', TMUX_SOCKET, 'list-sessions', '-F', `#{session_name}\t${PANE_STAMP_FORMAT}`],
+        { timeout: PROBE_TIMEOUT_MS }
+      )
+      const out = new Map<string, string>()
+      for (const line of stdout.split('\n')) {
+        const tab = line.indexOf('\t')
+        if (tab <= 0) continue
+        const stamp = line.slice(tab + 1).trim()
+        if (isPaneStamp(stamp)) out.set(line.slice(0, tab), stamp)
+      }
+      return out
+    } catch (err) {
+      return isNoServerError(err instanceof Error ? err.message : String(err)) ? new Map() : null
+    }
+  }
+
+  /**
+   * Fork patch #6: restore pane owners recorded by an earlier run whose session tmux still holds
+   * UNCHANGED (`reprovePaneOwners`). Boot calls it once; a gate that meets an unproven pane with a
+   * durable row calls it again (throttled). Answers the node ids restored.
+   */
+  async restorePaneOwnership(only?: readonly string[]): Promise<string[]> {
+    const stamps = await this.localSessionStamps()
+    if (stamps === null) return []
+    return reprovePaneOwners((nodeId) => stamps.get(sessionName(nodeId)) ?? 'absent', only)
+  }
+
+  /**
+   * The pty child is still starting `tmux new-session` when spawnNew returns: MEASURED, the first
+   * stamp read right after the spawn misses every time (cold server: the client cannot connect yet;
+   * warm: the session does not exist yet, and every format but the server pid expands empty), and
+   * the session appears ~20-30 ms later. So the read is retried, bounded (~6 s in total), and
+   * stops as soon as the pane ended or changed hands. A pane that never answers gets no row and is
+   * unproven after a restart, exactly as before this patch.
+   */
+  private async persistSpawnStampWhenReady(key: string, owner: string, gen: number): Promise<void> {
+    for (const wait of [0, 25, 50, 100, 200, 400, 800, 1600, 3000]) {
+      if (wait) await new Promise((r) => setTimeout(r, wait))
+      if (!isCurrentFreshSpawn(key, owner, gen)) return
+      const stamp = await this.sessionStamp(key).catch(() => null)
+      if (stamp) {
+        persistFreshSpawnStamp(key, owner, gen, stamp)
+        return
+      }
+    }
+  }
+
+  private paneRestoreAt = 0
+  /** Install the throttled miss hook (at most one tmux listing per 10 s). */
+  enableDurablePaneOwnership(): void {
+    setPaneOwnerMissHook(() => {
+      const now = Date.now()
+      if (now - this.paneRestoreAt < 10_000) return
+      this.paneRestoreAt = now
+      void this.restorePaneOwnership().catch(() => undefined)
+    })
+  }
+
   async sessionCreatedAt(persistKey: string): Promise<number | null> {
     const live = this.liveSessionForPersistKey(persistKey)
     if (this.isZellij(persistKey, live)) return null

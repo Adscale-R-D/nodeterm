@@ -73,7 +73,10 @@ describe('desktop main', () => {
     expect(withdraw).toBeLessThan(main.indexOf('corePlatform.broadcast(IPC.agentStatus, enriched)'))
     expect(main).toContain('flushAllDurableFactsSync()')
     // The restore waits for the workspace index, or a restore-time expiry reaches no sender.
-    expect(main.slice(queue, queue + 200)).toContain('ready: bootWorkspaceLoad')
+    expect(main.slice(queue, queue + 300)).toContain('ready: Promise.all([bootWorkspaceLoad, durablePaneOwners.ready])')
+    // …and for the durable pane owners' re-proof (fork patch #6), or a restored message meets an
+    // unproven pane and is refused for good.
+    expect(main.indexOf('const durablePaneOwners = initDurablePaneOwnership(')).toBeLessThan(queue)
     const bootLoad = main.indexOf('const bootWorkspaceLoad = workspaceStore.load({ sideline: false })')
     expect(bootLoad).toBeGreaterThan(holds)
     expect(bootLoad).toBeLessThan(queue)

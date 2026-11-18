@@ -65,7 +65,8 @@ import { issueLaunchPrompt, resolveIssueArg, type IssueRef } from '../shared/git
 import { runEndedEvent, runStartedEvent } from '../shared/issue-runs'
 import type { BoardLogEntry } from '../shared/types'
 import type { IntegrationMarker } from '../shared/integration-principal'
-import { recordReprovedOwner } from '../core/agents/pane-ownership'
+import { paneRowVerdict, recordReprovedOwner } from '../core/agents/pane-ownership'
+import type { DurableFactFile, DurableFactSpec } from '../core/durable-state'
 import { UNKNOWN_CODEX_CLI_CAPS } from '../shared/types'
 import type {
   BridgeLink,
@@ -116,6 +117,8 @@ export interface HeadlessPty {
   sessionVerdict?(persistKey: string): Promise<'present' | 'absent' | 'unknown'>
   /** tmux `#{session_created}` (epoch s) of a local session, or null. Integration pane re-proof. */
   sessionCreatedAt?(persistKey: string): Promise<number | null>
+  /** Fork patch #6: re-prove pane owners from their durable rows (agents/pane-ownership.ts). */
+  restorePaneOwnership?(only?: readonly string[]): Promise<string[]>
 }
 
 /** WorkspaceStore's mutation surface, also narrow so tests can use the real store or a fake. */
@@ -167,7 +170,7 @@ export interface HeadlessNodeFactoryDeps {
   publishMutation?: (projectId: string, m: CanvasMutation) => void
   /** The whole project, to browsers, on `workspace:server-change` (merged, never a conflict bar). */
   publishProject?: (project: Project) => void
-  /** Injectable only so tests can seed creator facts; production uses a fresh process-local ledger. */
+  /** Production passes the durable ledger (canvas-control.ts); absent = a fresh process-local one. */
   ownership?: HeadlessNodeOwnership
   /** Test seam for the launch settle; production uses core's SETTLE_* defaults. */
   launchTiming?: { quietMs: number; capMs: number }
@@ -255,21 +258,92 @@ export interface HeadlessNodeOwnership {
   ownerOf(nodeId: string): HeadlessNodeOwner | undefined
   record(nodeId: string, owner: HeadlessNodeOwner): void
   forget(nodeId: string): void
+  /** Drop what this PROCESS holds (stop). Never deletes durable rows: the next run loads them. */
   clear(): void
+  /** Was this node opened during THIS run? Restored rows answer false. Absent = every row is. */
+  spawnedThisRun?(nodeId: string): boolean
+  /** Drop rows whose node no project holds any more. Only ever called with a fully read workspace. */
+  pruneTo?(liveNodeIds: ReadonlySet<string>): void
 }
 
 /**
- * Creator proof for Server Edition canvas mutations. Deliberately process-local: after a service
- * restart, a git-shared/hand-editable project file cannot reassert who created a node. Unknown
- * ownership therefore fails closed until this server run records a fresh agent-requested spawn.
+ * Creator proof for Server Edition canvas mutations: which caller node opened which node, into
+ * which project. The project file is never read for it (git-shared, hand-editable); the record is
+ * made by this factory at the open itself.
+ *
+ * Fork patch #6: with a `file` the record is DURABLE (`<userData>/orchestration-state/
+ * headless-owners.json`, machine-local, written by this process only), so an agent keeps the right
+ * to close/rename/link/message its own team across a service restart. The caller is still proven
+ * by its node token (restart-stable), and messaging still needs the pane re-proven by its tmux
+ * stamp (agents/pane-ownership.ts). One thing a restored row deliberately does NOT do: release a
+ * persisted held launch by itself (`spawnedThisRun`, read by `refreshArmed`) — boot stays inert.
+ * Without a file (tests, old wiring) it is the process-local map it always was.
  */
-export function createHeadlessNodeOwnership(): HeadlessNodeOwnership {
-  const owners = new Map<string, HeadlessNodeOwner>()
+export interface HeadlessOwnerRecord extends HeadlessNodeOwner {
+  nodeId: string
+  at: number
+}
+
+const OWNER_ID_RE = /^[A-Za-z0-9_-]{1,128}$/
+
+export function sanitizeHeadlessOwnerRecord(raw: unknown): HeadlessOwnerRecord | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const r = raw as Record<string, unknown>
+  if (typeof r.nodeId !== 'string' || !OWNER_ID_RE.test(r.nodeId)) return null
+  if (typeof r.sourceNodeId !== 'string' || !OWNER_ID_RE.test(r.sourceNodeId)) return null
+  if (typeof r.projectId !== 'string' || !r.projectId || r.projectId.length > 128) return null
+  if (typeof r.at !== 'number' || !Number.isFinite(r.at)) return null
+  return { nodeId: r.nodeId, sourceNodeId: r.sourceNodeId, projectId: r.projectId, at: r.at }
+}
+
+export const HEADLESS_OWNER_FACT: DurableFactSpec<HeadlessOwnerRecord> = {
+  kind: 'headless-owners',
+  version: 1,
+  maxRecords: 4000,
+  sanitize: sanitizeHeadlessOwnerRecord
+}
+
+export function createHeadlessNodeOwnership(
+  file?: Pick<DurableFactFile<HeadlessOwnerRecord>, 'load' | 'save'>,
+  now: () => number = Date.now
+): HeadlessNodeOwnership {
+  const owners = new Map<string, HeadlessOwnerRecord>()
+  const thisRun = new Set<string>()
+  for (const r of file?.load() ?? []) owners.set(r.nodeId, r)
+  const save = (): void => file?.save([...owners.values()].sort((a, b) => a.at - b.at))
   return {
-    ownerOf: (nodeId) => owners.get(nodeId),
-    record: (nodeId, owner) => owners.set(nodeId, owner),
-    forget: (nodeId) => owners.delete(nodeId),
-    clear: () => owners.clear()
+    ownerOf: (nodeId) => {
+      const r = owners.get(nodeId)
+      return r ? { sourceNodeId: r.sourceNodeId, projectId: r.projectId } : undefined
+    },
+    record: (nodeId, owner) => {
+      owners.delete(nodeId)
+      owners.set(nodeId, { nodeId, sourceNodeId: owner.sourceNodeId, projectId: owner.projectId, at: now() })
+      thisRun.add(nodeId)
+      save()
+    },
+    forget: (nodeId) => {
+      thisRun.delete(nodeId)
+      if (owners.delete(nodeId)) save()
+    },
+    clear: () => {
+      owners.clear()
+      thisRun.clear()
+    },
+    spawnedThisRun: (nodeId) => thisRun.has(nodeId),
+    // Only a DURABLE ledger has rows from an earlier run to prune; without one `start()` stays a
+    // no-op that reads nothing.
+    pruneTo: !file ? undefined : (live) => {
+      let dropped = false
+      for (const id of [...owners.keys()]) {
+        if (!live.has(id)) {
+          owners.delete(id)
+          thisRun.delete(id)
+          dropped = true
+        }
+      }
+      if (dropped) save()
+    }
   }
 }
 
@@ -871,7 +945,7 @@ function ptyOptions(project: Project, node: CanvasNodeState): PtyCreateOptions {
 export class HeadlessNodeFactory {
   private serial: Promise<unknown> = Promise.resolve()
   private attached = new Set<string>()
-  /** Process-local proof that a caller created a node during THIS Server Edition run. */
+  /** Proof that a caller created a node (durable across a restart since fork patch #6). */
   private ownership: HeadlessNodeOwnership
   /** Fresh server-spawned agents that have not emitted their first real working turn yet. */
   private awaitingFirstWorking = new Set<string>()
@@ -989,18 +1063,18 @@ export class HeadlessNodeFactory {
     }
   }
 
-  /** Who opened `nodeId` during THIS server run (and into which project), or undefined — the
+  /** Who opened `nodeId` (and into which project), or undefined — the
    *  station-failure notice's recipient rule on this edition (src/core/agents/station-notice.ts). */
   openerOf(nodeId: string): HeadlessNodeOwner | undefined {
     return this.ownership.ownerOf(nodeId)
   }
 
-  /** Literal creator ownership: a caller may act only on nodes it freshly spawned this run. */
+  /** Literal creator ownership: a caller may act only on nodes it freshly spawned. */
   ownsSpawn(sourceNodeId: string, nodeId: string): boolean {
     return this.ownership.ownerOf(nodeId)?.sourceNodeId === sourceNodeId
   }
 
-  /** A verified caller may mutate only a node it freshly created during this server run. */
+  /** A verified caller may mutate only a node it freshly created. */
   private ownsMutation(sourceNodeId: string, nodeId: string): boolean {
     return this.ownsSpawn(sourceNodeId, nodeId)
   }
@@ -1014,8 +1088,8 @@ export class HeadlessNodeFactory {
     return {
       ok: false,
       error:
-        `${verb}-not-owner: ${sourceNodeId} may modify only nodes it spawned during this server ` +
-        `run; ${nodeId} was not spawned by this caller`
+        `${verb}-not-owner: ${sourceNodeId} may modify only nodes it spawned; ` +
+        `${nodeId} was not spawned by this caller`
     }
   }
 
@@ -1316,7 +1390,7 @@ export class HeadlessNodeFactory {
         if (!ownership || ownership.sourceNodeId !== sourceNodeId) {
           return {
             ok: false,
-            error: `close-not-owner: ${sourceNodeId} did not spawn ${id} during this server run`
+            error: `close-not-owner: ${sourceNodeId} did not spawn ${id}`
           }
         }
         const project = workspace.projects.find((candidate) => candidate.id === ownership.projectId)
@@ -2230,12 +2304,23 @@ export class HeadlessNodeFactory {
   }
 
   /**
-   * Boot is intentionally inert. Creator proof is process-local and empty after restart, so even
-   * sending a persisted command would control a session this process cannot attribute. Owner opens
-   * and browser views are the only cold-spawn authority; current-run agent events drive arms below.
+   * Boot is intentionally inert. Creator rows restored from disk (fork patch #6) are the right to
+   * act on a node when a proven caller asks, never a reason to start or type into one: `refreshArmed`
+   * only releases arms of nodes opened this run. Owner opens and browser views are the only
+   * cold-spawn authority; current-run agent events drive arms below.
    */
-  start(): Promise<void> {
-    return Promise.resolve()
+  async start(): Promise<void> {
+    // Fork patch #6: drop durable creator rows whose node no project holds any more (a person
+    // removed it while the server was down). Only against a workspace that loaded WHOLE: an
+    // unreadable project lists no nodes, and pruning against it would erase rows that still hold.
+    if (!this.ownership.pruneTo) return
+    try {
+      const ws = await this.readWorkspace()
+      if (ws.projects.some((p) => p.unavailable)) return
+      this.ownership.pruneTo(new Set(ws.projects.flatMap((p) => p.nodes.map((n) => n.id))))
+    } catch {
+      /* an unreadable workspace prunes nothing */
+    }
   }
 
   onAgentEvent(event: Pick<NormalizedAgentEvent, 'nodeId' | 'state' | 'errored' | 'newTurn'>): void {
@@ -2269,7 +2354,8 @@ export class HeadlessNodeFactory {
           if (!pending || pending.executor !== 'server' || !pending.command || pending.manualOnly) continue
           // A persisted arm surviving a restart is data, not creator proof. Only a node freshly
           // spawned for this caller during the current run may receive automatic input.
-          if (!this.ownership.ownerOf(node.id)) continue
+          // Fork patch #6: a creator row RESTORED from disk does not count here — boot stays inert.
+          if (!(this.ownership.spawnedThisRun?.(node.id) ?? !!this.ownership.ownerOf(node.id))) continue
           const command = pending.command
           let awaitWorking = pending.awaitWorking
           if (observed?.state === 'working' && awaitWorking?.includes(observed.nodeId)) {
@@ -2520,8 +2606,16 @@ export class HeadlessNodeFactory {
       if (verdict === 'present') {
         let outcome: 'already-running' | 'attached' = 'already-running'
         if (!this.attached.has(node.id)) {
-          const stamp = await this.stampOf(node.id)
-          if (input.sessionCreated === undefined || stamp === undefined || stamp !== input.sessionCreated)
+          // Fork patch #6: the pane-owner row's full stamp (session id + creation + tmux server pid)
+          // decides first; it also catches a same-second kill-and-recreate the bare creation stamp
+          // cannot. Only a node with no row (opened before rows existed) falls back to that stamp.
+          await this.deps.ptyManager.restorePaneOwnership?.([node.id]).catch(() => [])
+          const row = paneRowVerdict(node.id)
+          const stamp = row === 'none' ? await this.stampOf(node.id) : undefined
+          if (
+            row === 'refuted' ||
+            (row === 'none' && (input.sessionCreated === undefined || stamp === undefined || stamp !== input.sessionCreated))
+          )
             return refuse(
               'session-replaced',
               'a session with this node\'s name is running, but it is not the one this server started for it ' +

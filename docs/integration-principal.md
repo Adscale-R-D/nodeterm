@@ -17,8 +17,9 @@ name (`sink`); its tooltip carries the full "via <label> · <key>".
 ## Why it is not a node
 
 Canvas control is built around a *source node*. Every Server Edition verb needs the caller to be a
-control-capable agent node in exactly one saved project (`sourceProject` + `sourceCanControl`), and
-everything it grants is process-local:
+control-capable agent node in exactly one saved project (`sourceProject` + `sourceCanControl`). When
+this was designed, everything it granted was process-local (fork patch #6 has since made the first
+two durable for agents too):
 
 | Fact | Lost on | Effect for an outside program |
 |---|---|---|

@@ -4,7 +4,7 @@
  *
  * WHY `--set` IS REFUSED HERE. On the desktop every change is a dialog, and the user's click is the
  * consent. This edition's canvas control is HEADLESS — its admission is verified node identity plus
- * process-local creator ownership (`HeadlessNodeFactory`), and nothing on the path ever asks a
+ * creator ownership (`HeadlessNodeFactory`), and nothing on the path ever asks a
  * person. The operator's opt-in (`NODETERM_SERVER_CANVAS_CONTROL=1`, #537) decides that agents may
  * drive the canvas at all; it is not a statement about any particular setting, and treating it as
  * standing consent to grant capabilities would be exactly the waiver `settings` refuses on the

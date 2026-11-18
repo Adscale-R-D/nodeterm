@@ -219,8 +219,8 @@ export interface AgentMessagingDeps {
    */
   heldLaunch?(projectId: string, nodeId: string): boolean
   /**
-   * Optional shell-specific creator gate. Server Edition supplies its process-local caller→target
-   * proof so message delivery cannot type into a session the caller did not spawn. Desktop omits
+   * Optional shell-specific creator gate. Server Edition supplies its caller→target creator ledger
+   * (durable since fork patch #6) so message delivery cannot type into a session the caller did not spawn. Desktop omits
    * this because its control path remains user-confirmed. Checked on every queued flush too.
    */
   callerOwnsTarget?(sourceNodeId: string, targetNodeId: string): boolean
@@ -556,7 +556,7 @@ const NOT_PERMITTED_TEXT: Record<NotPermittedReason, string> = {
   'unsupported-edition': 'agent messaging does not exist on this edition.',
   'unaddressable-node-id': 'that node id cannot be addressed safely.',
   'caller-not-owner':
-    'the sending agent did not spawn the target during this Server run, so it may not type into ' +
+    'the sending agent did not spawn the target, so it may not type into ' +
     'or notify that session. This ownership refusal is permanent for this target.',
   'ambiguous-target-node-id':
     'that node id exists in more than one project, so the target pane cannot be attributed to a ' +

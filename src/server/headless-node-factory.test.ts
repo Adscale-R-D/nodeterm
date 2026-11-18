@@ -1097,6 +1097,48 @@ describe('HeadlessNodeFactory', () => {
       .find((node) => node.id === 'term-dormant')?.pendingLaunch).toBeDefined()
   })
 
+  // Fork patch #6: a durable creator row survives a restart — the caller may still close the node.
+  it('after a restart a durable creator row still lets its caller close the node; start() prunes deleted ones', async () => {
+    const rows = [
+      { nodeId: 'term-owned', sourceNodeId: 'term-source', projectId: 'project-1', at: 1 },
+      { nodeId: 'term-deleted-while-down', sourceNodeId: 'term-source', projectId: 'project-1', at: 2 }
+    ]
+    let disk = rows
+    const durable = createHeadlessNodeOwnership({ load: () => disk, save: (r) => { disk = [...r] } })
+    const restarted = new HeadlessNodeFactory({
+      ...(factory as unknown as { deps: HeadlessNodeFactoryDeps }).deps,
+      ownership: durable
+    })
+    await restarted.start()
+    expect(disk.map((r) => r.nodeId)).toEqual(['term-owned'])
+    const closed = await restarted.close('term-source', { node: 'term-owned' }, true)
+    expect(closed.ok).toBe(true)
+    expect(disk).toEqual([])
+    // Another caller still cannot.
+    disk = [{ nodeId: 'term-upstream', sourceNodeId: 'term-source', projectId: 'project-1', at: 3 }]
+    const other = new HeadlessNodeFactory({
+      ...(factory as unknown as { deps: HeadlessNodeFactoryDeps }).deps,
+      ownership: createHeadlessNodeOwnership({ load: () => disk, save: (r) => { disk = [...r] } })
+    })
+    expect((await other.close('term-owned', { node: 'term-upstream' }, true)).ok).toBe(false)
+    restarted.stop()
+    other.stop()
+  })
+
+  it('start() prunes nothing while any project failed to load', async () => {
+    let disk = [{ nodeId: 'term-elsewhere', sourceNodeId: 'term-source', projectId: 'project-2', at: 1 }]
+    const durable = createHeadlessNodeOwnership({ load: () => disk, save: (r) => { disk = [...r] } })
+    const ws = await store.load({ sideline: false })
+    vi.spyOn(store, 'load').mockResolvedValueOnce({
+      ...ws,
+      projects: [...ws.projects, { ...ws.projects[0], id: 'project-2', nodes: [], unavailable: true }]
+    })
+    const f = new HeadlessNodeFactory({ ...(factory as unknown as { deps: HeadlessNodeFactoryDeps }).deps, ownership: durable })
+    await f.start()
+    expect(disk).toHaveLength(1)
+    f.stop()
+  })
+
   it('does not adopt or control a persisted arm even when its backend survived', async () => {
     const workspace = await store.load({ sideline: false })
     workspace.projects[0].nodes.push({
@@ -2365,6 +2407,23 @@ describe('HeadlessNodeFactory — a second phase re-reads before it writes (fix 
     expect(await indexed('term-held')).toBeUndefined()
     for (const n of upsertsOf(cast.slice(castAtMove), 'term-held')) expect(n.position).toEqual({ x: 999, y: 7 })
     expect(broadcast.at(-1)?.nodes.find((n) => n.id === 'term-held')?.position).toEqual({ x: 999, y: 7 })
+  })
+
+  // Fork patch #6: the creator ledger is durable, and a RESTORED row is the right to act on a node,
+  // never a reason to release its held launch at boot or on a later hook.
+  it('refreshArmed does not release a held launch for a creator row restored from disk', async () => {
+    const rows = [
+      { nodeId: 'term-armed', sourceNodeId: 'term-source', projectId: 'project-1', at: 1 },
+      { nodeId: 'term-held', sourceNodeId: 'term-source', projectId: 'project-1', at: 2 }
+    ]
+    ownership = createHeadlessNodeOwnership({ load: () => rows, save: () => undefined })
+    expect(ownership.ownerOf('term-armed')).toEqual({ sourceNodeId: 'term-source', projectId: 'project-1' })
+    expect(ownership.spawnedThisRun?.('term-armed')).toBe(false)
+    const factory = new HeadlessNodeFactory(deps())
+    pty.live.add('term-armed')
+    await factory.refreshArmed({ nodeId: 'term-dep', state: 'done' })
+    factory.stop()
+    expect(pty.sends).toEqual([])
   })
 
   it('refreshArmed: a move made while the held launch is typed survives; the arm is cleared on the moved node', async () => {

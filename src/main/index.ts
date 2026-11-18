@@ -254,6 +254,7 @@ import {
 } from '../core/agent-status-mirror'
 import { mirrorCustomAgents } from '../core/mirror-custom-agents'
 import { paneOwnerProject } from '../core/agents/pane-ownership'
+import { initDurablePaneOwnership } from '../core/agents/pane-ownership-boot'
 import { createPushNotify, createLiveUpdatePush } from '../core/push-notify'
 import { createGrantsAccessor, type PushGrant } from '../core/push-grants'
 import { createRemoteGrantsCache } from '../core/remote-push-grants'
@@ -2405,6 +2406,12 @@ app.whenReady().then(async () => {
   if (hookStartupWarning) {
     for (const f of [deliveryQueueFile, stationOutcomesFile, stationHandoversFile]) f.standDown()
   }
+  // Fork patch #6: pane owners of an earlier run come back when tmux still holds the very same
+  // session (agents/pane-ownership.ts); the quit flush (`flushAllDurableFactsSync`) writes its file.
+  const durablePaneOwners = initDurablePaneOwnership(ptyManager, {
+    userDataDir: corePlatform.userDataDir,
+    ownsDurableState: hookStartupWarning === null
+  })
   // ---- Node identity (src/core/agents/node-auth-secret.ts) ------------------------------------
   // One secret does two jobs: it arms the hook server's per-node capability (closing the "shared
   // bearer can name any sibling node" hole) and it signs the codex thread → node records the hook
@@ -2543,7 +2550,8 @@ app.whenReady().then(async () => {
   // `workspace.load` comes later). Read-only load (`sideline: false`), like the relay path's.
   const bootWorkspaceLoad = workspaceStore.load({ sideline: false })
   void restoreDeliveryQueue(messagingDeps.queue, deliveryQueueFile, {
-    ready: bootWorkspaceLoad
+    // …and for the pane owners' re-proof (fork patch #6), or a restored message meets an unproven pane.
+    ready: Promise.all([bootWorkspaceLoad, durablePaneOwners.ready]).then(([ws]) => ws)
   })
 
   /** The one display-title rule for everything the HOST sends out (push alerts, Live Activity

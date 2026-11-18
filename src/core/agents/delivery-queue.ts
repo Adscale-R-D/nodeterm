@@ -68,10 +68,9 @@ import { INTEGRATION_MESSAGE_VERB } from '../../shared/integration-principal'
  *    the same way (nothing proves it is the same conversation); a target whose session is not known
  *    YET waits (the flush trigger is a hook event, which names it). In-run entries are unchanged.
  *  - **The whole gate chain still runs at flush**, as it always did (scope, pane ownership, grant,
- *    flow). Note what that means after a restart where tmux survived: pane ownership is recorded
- *    only on a fresh spawn (pane-ownership.ts), so the surviving pane is UNPROVEN and the flush is
- *    refused `notPermitted` — the sender is told, which is still strictly better than the silent
- *    loss it replaces. After a machine reboot the cold-restored pane IS a fresh spawn, so a message
+ *    flow). After a restart where tmux survived, a pane's owner comes back only from its durable
+ *    row when tmux's stamp of the session is unchanged (pane-ownership.ts, fork patch #6); otherwise
+ *    the pane is UNPROVEN and the flush is refused `notPermitted`, with the sender told. After a machine reboot the cold-restored pane IS a fresh spawn, so a message
  *    for a session that resumed under its old id is delivered.
  *  - **Two kinds never flush after a restart**: a board comment (only the local user, typing in THIS
  *    app, may trigger one — a message read back off disk must not be able to speak as a person) and

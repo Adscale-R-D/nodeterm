@@ -212,4 +212,87 @@ describe.skipIf(!TMUX || process.platform === 'win32')('node-keyed tmux verbs re
     expect(spawns.map((c) => c.args.includes('new-session'))).toEqual([true])
     manager.releaseHeadless(prefixKey)
   })
+
+  // Fork patch #6: the durable pane-owner rows are re-proven by THIS stamp. The one thing it must
+  // catch is a session killed and recreated under the same name in the same second — which the
+  // bare `#{session_created}` cannot tell apart.
+  it('the pane stamp changes when a session is killed and recreated under its name, same second included', async () => {
+    const own = await import('./agents/pane-ownership')
+    const key = `${base}-stamp`
+    const name = sessionName(key)
+    try {
+      await tmux(['new-session', '-d', '-s', name, '-x', '80', '-y', '20'])
+      const first = await manager.sessionStamp(key)
+      expect(own.isPaneStamp(first)).toBe(true)
+      expect(await manager.sessionStamp(key)).toBe(first)
+      const listed = await manager.localSessionStamps()
+      expect(listed?.get(name)).toBe(first)
+      // The victim session keeps the server alive, so this is the same server, maybe the same second.
+      await tmux(['kill-session', '-t', `=${name}`])
+      await tmux(['new-session', '-d', '-s', name, '-x', '80', '-y', '20'])
+      const second = await manager.sessionStamp(key)
+      expect(own.isPaneStamp(second)).toBe(true)
+      expect(second).not.toBe(first)
+      // A prefix of a live name is a miss, never a stamp (the exact target).
+      expect(await manager.sessionStamp(`${base}-stam`)).toBeNull()
+
+      // End to end through the rows: the row of the FIRST session is refuted by the second.
+      own.resetPaneOwnershipForTests()
+      const saved: unknown[] = []
+      own.attachPaneOwnershipStore({
+        load: () => [{ nodeId: key, ownerProjectId: 'p-1', stamp: first!, at: 1 }],
+        save: (rows) => saved.push(rows)
+      })
+      expect(await manager.restorePaneOwnership()).toEqual([])
+      expect(own.paneOwnerProject(key)).toBeUndefined()
+      expect(own.paneRowVerdict(key)).toBe('refuted')
+      // …and the row of the live session is restored, owner from the row.
+      own.resetPaneOwnershipForTests()
+      own.attachPaneOwnershipStore({
+        load: () => [{ nodeId: key, ownerProjectId: 'p-1', stamp: second!, at: 1 }],
+        save: () => undefined
+      })
+      expect(await manager.restorePaneOwnership()).toEqual([key])
+      expect(own.paneOwnerProject(key)).toBe('p-1')
+    } finally {
+      own.resetPaneOwnershipForTests()
+      await tmux(['kill-session', '-t', `=${name}`]).catch(() => undefined)
+    }
+  })
+
+  it('a fresh spawn writes its pane row once tmux has the session; a restart restores it from disk', async () => {
+    const own = await import('./agents/pane-ownership')
+    const { DurableFactFile } = await import('./durable-state')
+    const key = `${base}-fresh`
+    const name = sessionName(key)
+    const fileFor = () => new DurableFactFile(own.PANE_OWNER_FACT, { userDataDir: dir })
+    try {
+      own.resetPaneOwnershipForTests()
+      const f1 = fileFor()
+      own.attachPaneOwnershipStore(f1)
+      const r = await manager.createHeadless({ persistKey: key, cols: 80, rows: 24, ownerProjectId: 'p-fresh' })
+      expect(r.fresh).toBe(true)
+      // node-pty is mocked, so play the client: the session appears a moment AFTER the spawn — the
+      // measured race the stamp read has to wait out.
+      await sleep(60)
+      await tmux(['new-session', '-d', '-s', name, '-x', '80', '-y', '20'])
+      const live = await manager.sessionStamp(key)
+      for (let i = 0; i < 60 && !own.hasPaneOwnerRow(key); i++) await sleep(50)
+      expect(own.hasPaneOwnerRow(key)).toBe(true)
+      f1.dispose()
+      const onDisk = JSON.parse(readFileSync(path.join(dir, 'orchestration-state', 'pane-owners.json'), 'utf8'))
+      expect(onDisk.records).toEqual([expect.objectContaining({ nodeId: key, ownerProjectId: 'p-fresh', stamp: live })])
+
+      // "Restart": nothing in memory, a new store over the same file.
+      own.resetPaneOwnershipForTests()
+      own.attachPaneOwnershipStore(fileFor())
+      expect(own.paneOwnerProject(key)).toBeUndefined()
+      expect(await manager.restorePaneOwnership()).toContain(key)
+      expect(own.paneOwnerProject(key)).toBe('p-fresh')
+      manager.releaseHeadless(key)
+    } finally {
+      own.resetPaneOwnershipForTests()
+      await tmux(['kill-session', '-t', `=${name}`]).catch(() => undefined)
+    }
+  })
 })

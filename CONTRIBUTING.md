@@ -947,10 +947,12 @@ terminal. A new auth POST lives under `/auth/` so the shared same-origin check (
 covers it. Header trust from a loopback peer needs `NODETERM_TRUST_PROXY_SECRET`, which is read from
 the environment only and never logged.
 
-**A Server Edition agent owns only nodes it freshly opened in this server run.** The
-creator ledger is process-local and must never be rebuilt from `.nodeterm/project.json`, titles,
-hook history, or a surviving tmux name: all are writable or stale. A restart therefore clears
-ownership, performs no node/session adoption, and leaves durable queued launches dormant. Metadata
+**A Server Edition agent owns only nodes it freshly opened.** The creator ledger is written only
+at the open itself (durable across a restart since fork patch #6) and must never be rebuilt from
+`.nodeterm/project.json`, titles, hook history, or a surviving tmux name: all are writable or stale.
+A restart performs no node/session adoption and leaves durable queued launches dormant; a restored
+row lets a verified caller act, it never acts by itself. Pane owners survive a restart only when
+tmux's stamp of the live session is unchanged (`pane-ownership.ts` DURABLE ROWS). Metadata
 mutations and message delivery validate every target before writing anything; missing proof is a
 named refusal. Validate Server upgrades against a disposable data directory and port. Restarting a
 shared live service is

@@ -18,6 +18,7 @@ import { initPlatform } from '../core/platform'
 import { SettingsStore } from '../core/settings-store'
 import { WorkspaceStore } from '../core/workspace-store'
 import { registerAgentEnvIpc } from '../core/agent-env-ipc'
+import { initDurablePaneOwnership } from '../core/agents/pane-ownership-boot'
 import { PtyManager } from '../core/pty-manager'
 import { registerCoreHandlers } from './handlers'
 import { registerGitHubIntegration } from '../core/github/integration'
@@ -747,6 +748,15 @@ export async function startServer(
   registerIntegrationIpc(integrations)
   const hookStartupWarning = await hookServer.startForApp()
   if (hookStartupWarning) console.error('[nodeterm-server]', hookStartupWarning)
+  // Fork patch #6: pane owners of an earlier run come back when tmux still holds the very same
+  // session (agents/pane-ownership.ts). Follows hook-endpoint ownership, like every durable fact.
+  const durablePaneOwners = initDurablePaneOwnership(ptyManager, {
+    userDataDir: platform.userDataDir,
+    ownsDurableState: hookStartupWarning === null
+  })
+  // Before canvas control restores the message queue: a restored message meeting a pane not yet
+  // re-proven would be refused for good. One bounded tmux listing.
+  await durablePaneOwners.ready
   // Safe default and rollback path. The opt-in runtime replaces this handler only after its
   // workspace-backed services are ready; a failed initialization therefore degrades to the same
   // named permanent refusal rather than a half-wired execution surface.
@@ -1164,6 +1174,7 @@ export async function startServer(
         pressure.stop()
         ptyPressure.stop()
         canvasControl?.stop()
+        durablePaneOwners.dispose()
         workspaceWatcher.dispose()
         await contextLink.stop()
         // Every save already queued lands while the authority still governs (see the serving close).
@@ -1237,6 +1248,7 @@ export async function startServer(
       pressure.stop()
       ptyPressure.stop()
       canvasControl?.stop()
+      durablePaneOwners.dispose()
       workspaceWatcher.dispose()
       await contextLink.stop()
       // Every save already queued lands while the authority still governs, then it writes what it owes.

@@ -46,7 +46,7 @@ import {
   createServerEditionControlHandler,
   type ServerEditionControlActions
 } from './control-unsupported'
-import { HeadlessNodeFactory } from './headless-node-factory'
+import { HEADLESS_OWNER_FACT, HeadlessNodeFactory, createHeadlessNodeOwnership } from './headless-node-factory'
 import { openIntegrationLedger } from '../core/integration/ledger'
 import { PrincipalRegistryReader } from '../core/integration/registry'
 import { saveUpload } from '../core/uploads'
@@ -188,7 +188,12 @@ export async function initServerCanvasControl(
   }
   stationOutcomes.loadFromDisk()
   stationHandovers.loadFromDisk()
+  // Fork patch #6: who opened which node survives a restart (headless-node-factory.ts
+  // `createHeadlessNodeOwnership`). Same ownership rule as the other durable facts.
+  const ownersFile = new DurableFactFile(HEADLESS_OWNER_FACT, { userDataDir: platform().userDataDir })
+  if (deps.ownsDurableState === false) ownersFile.standDown()
   const factory = new HeadlessNodeFactory({
+    ownership: createHeadlessNodeOwnership(ownersFile),
     workspaceStore: deps.workspaceStore,
     ptyManager: deps.ptyManager,
     settings: deps.settings,
@@ -254,17 +259,16 @@ export async function initServerCanvasControl(
       stationHandovers.onHandover(ev)
     }
   }
-  // Durable, like the desktop's (delivery-queue.ts states what a restart does to a message). Note
-  // this edition's creator ledger is process-local, so a restored message whose caller→target proof
-  // did not survive the restart is refused `caller-not-owner` at flush — with its sender told.
+  // Durable, like the desktop's (delivery-queue.ts states what a restart does to a message). The
+  // creator ledger is durable too (fork patch #6), so a restored message from an agent to a node it
+  // opened can flush after a restart — still only into a pane re-proven by its tmux stamp.
   const queueFile = new DurableFactFile(QUEUE_FACT, { userDataDir: platform().userDataDir })
   if (deps.ownsDurableState === false) queueFile.standDown()
   const queue = createDeliveryQueue(messaging, { durable: queueFile })
   messaging.queue = queue
 
   // Station-failure notices. The recipient is the CREATOR LEDGER's answer — who opened the station
-  // during this server run — which is this edition's ownership rule for every verb; a restart
-  // clears it, so a station opened before one has nobody to tell. The pane leg is the same
+  // — which is this edition's ownership rule for every verb; durable across a restart (fork patch #6). The pane leg is the same
   // messaging service `send` uses (creator check reversed: the recipient must have opened the
   // station), and the canvas leg is the board log plus a push to every attached browser tab.
   // DROPPED arrives only from a browser tab that shows the node (its liveness check); a server with
@@ -388,8 +392,9 @@ export async function initServerCanvasControl(
     deliver: async (input) => (await deliverFromControl(input, messaging)).reply
   }
 
-  // Boot deliberately performs no canvas/session adoption. Creator proof is process-local and a
-  // restart clears it, so an owner request or browser view is the only cold-spawn authority.
+  // Boot deliberately performs no canvas/session adoption: a restored creator row is the right to
+  // act on a node, never a reason to start or type into one (`spawnedThisRun`). An owner request or
+  // a browser view is the only cold-spawn authority. `start()` only prunes rows of deleted nodes.
   await factory.start()
 
   const baseHandler = createServerEditionControlHandler(actions)
@@ -427,6 +432,7 @@ export async function initServerCanvasControl(
       queueFile.dispose()
       outcomesFile.dispose()
       handoversFile.dispose()
+      ownersFile.dispose()
       integrationLedger.dispose()
     }
   }

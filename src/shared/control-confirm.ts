@@ -10,8 +10,8 @@
 //
 // SURFACES. This is the DESKTOP gate and only the desktop gate. Server Edition canvas control
 // (opt-in, `NODETERM_SERVER_CANVAS_CONTROL=1`) is HEADLESS and has no dialog to waive: its
-// `close` is gated by verified node identity plus process-local creator ownership
-// (`HeadlessNodeFactory.close` — "did this caller spawn that node during this server run"), which
+// `close` is gated by verified node identity plus creator ownership
+// (`HeadlessNodeFactory.close` — "did this caller spawn that node"), which
 // is a different mechanism, not a weaker copy of this one. Nothing here loosens it, and a waiver
 // must never be plumbed into it: the server's rule does not ask a human at all, so "the human
 // said don't ask again" has nothing to attach to. Mobile is N/A (the phone issues no control

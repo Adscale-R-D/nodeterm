@@ -5108,10 +5108,14 @@ command-bearing opens; this does not add a human-confirm dialog or change mobile
   see **Agent-integration consent** under Agent support.
   **Server creator ownership (2026-08 incident hardening):** enabled Server control accepts only
   verified node identity. `HeadlessNodeFactory` records which source node opened each new node in a
-  process-local ledger; link/group/rename/color/sticky-update, message delivery, and close validate
-  the whole target set as current-run creations before writing or killing anything. Queued messages
-  revalidate creator ownership before flush. The ledger is intentionally empty after restart —
-  project JSON, titles, hook history and tmux names are not creator proof — so
+  creator ledger; link/group/rename/color/sticky-update, message delivery, and close validate
+  the whole target set as recorded creations before writing or killing anything. Queued messages
+  revalidate creator ownership before flush. **Fork patch #6: the ledger is DURABLE**
+  (`<userData>/orchestration-state/headless-owners.json`, written only at the open itself, never
+  rebuilt from project JSON, titles, hook history or tmux names), so an agent keeps its team across
+  a service restart; `start()` prunes rows of deleted nodes, but only against a workspace that loaded
+  whole. A RESTORED row is the right to act when a verified caller asks, never a reason to act on its
+  own: `refreshArmed` releases only arms of nodes opened this run (`spawnedThisRun`), so
   boot neither attaches/creates backends nor sends persisted queued commands. A live backend with a
   durable arm remains untouched until an explicit owner action or browser view. `open-terminal` and
   `open-agent` are verified-only at the Server handler boundary. A plain terminal keeps generic
@@ -6187,10 +6191,11 @@ command-bearing opens; this does not add a human-confirm dialog or change mobile
   answer; (4) the default is forbidden to the `settings` verb (a grant over every project, clones
   included). **This does not trip the `project-capabilities.ts` header's trigger**: the notice is not
   dropped, and what the default answers is absence, whose value lives in machine-local settings.json.
-  **Why it ships OFF:** `core/agents/pane-ownership.ts` records a pane's owner only on a FRESH spawn,
-  so after an app restart or update every surviving pane is `unproven-target-owner` and refused —
-  "on by default" would be false after every restart. The flip is a separate one-line change that
-  waits for a cross-restart ownership proof (#659's signed record is the candidate). Settings →
+  **Why it ships OFF:** `core/agents/pane-ownership.ts` used to record a pane's owner only on a FRESH
+  spawn, so after an app restart or update every surviving pane was `unproven-target-owner` and
+  refused. Fork patch #6 adds the cross-restart proof (durable rows re-proven by the tmux stamp, see
+  **Durable pane owners** under Durable orchestration state); the flip itself is still a separate
+  one-line change, not made here. Settings →
   Agents shows the machine switch, and the per-project row is a three-way choice (default / on /
   off) plus "On in <project> (this machine's default)" — a two-position switch cannot draw absence.
   Downgrade: a pre-default build writes `false` back as a deleted field, which this build then reads
@@ -6256,8 +6261,8 @@ command-bearing opens; this does not add a human-confirm dialog or change mobile
     so `safeOpenedBy` (`isSafeNodeId`) runs at both serializer seams, and a duplicate drops it. A
     node opened before this build has no `openedBy` and is never attributed (no guessing).
   - **Server Edition: the creator LEDGER is the recipient rule** (`stationRecipientFromOwner` over
-    `factory.openerOf`) — only stations opened during the current server run, the same creator rule
-    as every other verb there; a restart clears it.
+    `factory.openerOf`) — the same creator rule as every other verb there, durable across a
+    restart since fork patch #6.
   - **Two legs.** The canvas leg needs no switch: a `station-failed` board-log line on the
     RECIPIENT's card (`from` = station id, `to` = reason code, `title` = the capped one-line
     title; in `NEVER_COLLAPSE`) and a STATION FAILED chip (`components/StationFailedChip.tsx`, one
@@ -11319,12 +11324,13 @@ What a restart MEANS, per fact — decided beside each fact, stated in its heade
     agent in the pane — ends it `targetGone` with nothing typed; an entry with no recorded session is
     refused the same way; a target that has not named a session yet WAITS (TTL running). In-run
     entries are unchanged.
-  - **The whole gate chain still runs at flush.** Consequence to know: after an app restart where tmux
-    survived, pane ownership is unproven (`pane-ownership.ts` records only on a fresh spawn), so the
-    first flush is refused `notPermitted` and the sender is TOLD — still strictly better than the
-    silent loss it replaces. After a machine reboot the cold-restored pane is a fresh spawn, so a
-    message for a session that resumed under its old id delivers. The Server Edition's creator
-    ledger is process-local too, so a restored message there is refused `caller-not-owner`.
+  - **The whole gate chain still runs at flush.** After an app restart where tmux survived, the
+    pane's owner comes back from its durable row only when tmux's stamp of the session is unchanged
+    (**Durable pane owners** below, fork patch #6); a pane spawned before that code ran, or one whose
+    session was recreated, is unproven and the flush is refused `notPermitted`, with the sender TOLD.
+    After a machine reboot the cold-restored pane is a fresh spawn, so a message for a session that
+    resumed under its old id delivers. The Server Edition's creator ledger is durable too (patch #6),
+    so a restored message from an agent to a node it opened is no longer refused `caller-not-owner`.
   - **Never replayed into a pane**: a board comment (only the local user, typing in THIS app, may
     trigger one — a message read back off disk must not speak as a person) and an app-composed
     station notice; both, and a body over 256 KB (written without it), are expired at restore so
@@ -11355,6 +11361,43 @@ What a restart MEANS, per fact — decided beside each fact, stated in its heade
   attempt (claim before effect), so a crash mid-delivery loses that one message rather than typing
   it twice after the next boot. Lapsed entries at restore are never inserted into the live lists
   (so no flush can deliver one while the expiries are reported) and take no capacity slot.
+
+### Durable pane owners (fork patch #6)
+
+The pane-owner record (`core/agents/pane-ownership.ts`) is the messaging gate's answer to "which
+project spawned this pane". It is in memory, so before this patch every pane that survived an app
+or Server Edition restart read as unproven and every message to it was refused. Now a FRESH spawn
+also writes `{nodeId, ownerProjectId, stamp}` to `orchestration-state/pane-owners.json`, and a later
+run restores the owner only when the live session's stamp is byte-identical. Rules a refactor must
+keep:
+- **The stamp is `#{session_id}|#{session_created}|#{pid}`** (`PANE_STAMP_FORMAT`), read by the exact
+  target. `session_id` only ever increases within one tmux server, so a session killed and
+  recreated under the same `nt-<id>` in the same second still differs (measured, tmux 3.4:
+  `$1` → `$2`); a new server has a new pid. None of it is settable from a pane. `#{session_created}`
+  alone has one-second resolution and is not enough. `isPaneStamp` refuses a partly expanded value
+  (an unknown format expands to '').
+- **The owner comes from the ROW, never from whoever attaches.** A different stamp, or a session the
+  tmux server positively does not list, drops the row (`paneRowVerdict` → `refuted`); an unreadable
+  answer keeps it and the pane stays unproven.
+- **When it is re-proven:** once at boot for every row (one `list-sessions`), on a non-fresh attach
+  for that node, and, throttled to one listing per 10 s, when a gate meets an unproven pane that has
+  a row (`setPaneOwnerMissHook`). A Server Edition with no browser tab open therefore still proves
+  its panes.
+- **Rows go with the session:** a fresh spawn over an old row deletes it before writing the new one,
+  `forgetPaneOwner` (delete and recycle) deletes it, and a stamp read that lands after the pane
+  changed hands writes nothing (generation check).
+- **The spawn-time read is RETRIED** (`persistSpawnStampWhenReady`, ~6 s bound): MEASURED, a read
+  right after `spawnNew` always misses — the pty child is still starting `tmux new-session` — and
+  the session appears ~20-30 ms later. A single read wrote no row at all, silently
+  (`pty-exact-target.realtmux.test.ts` fails without the retry).
+- **Local tmux only.** A remote node, the Windows session host and Zellij read no stamp, write no row
+  and are unproven after a restart, exactly as before.
+- **Rows exist only for panes spawned after this code runs.** After the first deploy, existing
+  sessions are still unproven until respawned; the first restart that carries ownership across is
+  the second one. Known limit: the Server Edition's `run` on a RESTORED creator row does not check
+  the pane stamp (it types only into a shell, and only this machine's held command).
+- Both shells call `initDurablePaneOwnership` (`core/agents/pane-ownership-boot.ts`) after the hook
+  server; a second instance that lost the hook endpoint attaches no store at all.
 
 ## The test suite never touches a live tmux server
 

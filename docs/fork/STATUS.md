@@ -70,9 +70,9 @@ naming the surface it grants.
 ### The headless ownership rule — new, and it will surprise you
 
 On the Server Edition, the node-mutating verbs (`close`, `link`, `group`, `rename`, `color`,
-`sticky` update, `assign`) accept **only nodes the caller opened during the current server run**, and refuse
-the whole request before any partial mutation. A server restart resets that; nodes from a previous
-run are not yours to mutate. Desktop is unchanged (it asks the user instead).
+`sticky` update, `assign`) accept **only nodes the caller opened**, and refuse the whole request
+before any partial mutation. Since fork patch #6 that record survives a server restart (it never
+fires a held launch by itself). Desktop is unchanged (it asks the user instead).
 
 ---
 
@@ -125,7 +125,7 @@ worktree); pass **`--cwd`** when the target has neither, or they review the wron
 
 ---
 
-## 4. What the fork still adds (5 patches)
+## 4. What the fork still adds (6 patches)
 
 | Patch | Why it is still ours |
 |---|---|
@@ -134,6 +134,7 @@ worktree); pass **`--cwd`** when the target has neither, or they review the wron
 | **Claude window = 200k unless `[1m]`** | upstream still uses the `opus\|sonnet\|fable` family rule, which under-reports context pressure **5×** on every 200k session |
 | **Server Edition spawns and lanes do not overlap** | upstream's headless `placeRight` places nodes edge to edge and `group` draws its frame (28 px pad + 34 px header) over whatever is beside the members, so lanes spawned side by side end up on each other. See below. |
 | **`/session/<id>` links open a Claude session** | upstream has no browser deep link to a session (its `nodeterm://` links are desktop-only and need a confirm). See below. |
+| **Agent ownership survives a restart** | upstream keeps the Server Edition creator ledger and the pane-owner record in memory, so after every restart an agent can no longer close, rename or message its own team. See below. |
 
 **Kanban control (added 2026-09-24).** A pipeline files each lane's cards into one column per
 TASK, and the column cleans itself up:
@@ -195,6 +196,24 @@ opens that session on the canvas.
   prompt, command or folder. Tests: `recent-conversations-find.test.ts`,
   `session-link-route.test.ts`, `sessionLink.test.ts`.
 
+**Agent ownership survives a restart (fork patch #6, 2026-11-18).** Two in-memory records got a
+durable twin in `<dataDir>/orchestration-state/`:
+- `headless-owners.json`: which caller node opened which node (Server Edition). A restored row lets
+  a verified caller close/rename/link/`run`/message its nodes; it never releases a held launch by
+  itself (`refreshArmed` reads `spawnedThisRun`). Pruned at start against a workspace that loaded
+  whole.
+- `pane-owners.json`: which project spawned each local tmux pane (both shells). Restored only when
+  `#{session_id}|#{session_created}|#{pid}` of the live session is unchanged, which a session
+  recreated under the same name fails even within the same second. The integration principal's
+  `resume` uses the same rows first.
+- Only panes spawned AFTER the deploy get a row: the first restart after deploying still loses
+  ownership of older sessions; the next one keeps it. `run` on a restored row does not check the
+  pane stamp (known limit).
+- Wiring: `core/agents/pane-ownership-boot.ts` (both shells), `canvas-control.ts` (the ledger file).
+  Tests: `pane-ownership.durable.test.ts`, `headless-node-ownership.durable.test.ts`, the restart
+  cases in `headless-node-factory.test.ts`, and a real-tmux same-second recreate case in
+  `pty-exact-target.realtmux.test.ts`.
+
 Plus one UI keep: **the frame context menu's "close group and its nodes"** (`closeGroupWithChildren`
 + `groupSubtreeIds`). Upstream deleted the frame's `×` rather than implementing it, so this is the
 only way to tear a `spawn-team`/`verify` panel down from the UI in one action.
@@ -209,7 +228,7 @@ boot factory, our canvas-control installer, and the agent-facing group-subtree `
 | Thing | Status |
 |---|---|
 | `browser` verb (drive a page) | **permanently refused** — needs Electron `<webview>` + CDP |
-| Node-mutating verbs on old nodes | refused — current-run creations only (§2) |
+| Node-mutating verbs on old nodes | allowed for nodes the caller opened, also before a restart (§2, patch #6) |
 | Agent messaging | works, but the per-project switch ships **off** |
 | Dictation / speech | `smart-whisper` is not built here — reports "local whisper unavailable" |
 | SSH projects, worktree ops on remote repos | desktop-only |

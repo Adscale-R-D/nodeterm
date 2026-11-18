@@ -257,7 +257,8 @@ describe('parseControlRequest', () => {
       expect(body, name).toMatch(
         /On the Server\s+Edition `--run-now` changes\s+nothing else \(opens start at once; the\s+`--after`\s+refusal still\s+applies\)/
       )
-      expect(body, name).toMatch(/`run` reaches only\s+nodes you opened during this server run/)
+      expect(body, name).toMatch(/`run` reaches only\s+nodes you opened\./)
+      expect(body, name).toMatch(/creator record survives a server\s+restart/)
     }
   })
 
@@ -880,7 +881,7 @@ describe('parseControlRequest', () => {
       // …and the honest limit: a permission prompt is never a notice.
       expect(section).toMatch(/A PERMISSION prompt[\s\S]*is never a notice/)
       // The Server Edition's ownership rule, in the same words it keeps for every verb.
-      expect(section).toMatch(/stations you opened during this server run/)
+      expect(section).toMatch(/stations you opened \(a record that survives a server restart\)/)
     }
   })
 

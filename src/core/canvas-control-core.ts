@@ -122,7 +122,7 @@ function stationNoticeDocLines(): string[] {
       ([name, text]) => `  - ${name}: ${text.replace(/<station>/g, '<station id>')}`
     ),
     '- Nobody opened the station through you? You are not told about it. On the Server Edition you are',
-    '  told only about stations you opened during this server run, and a dead CLI (DROPPED) is noticed',
+    '  told only about stations you opened (a record that survives a server restart), and a dead CLI (DROPPED) is noticed',
     '  only while a browser tab shows that station. `list` still marks LAST TURN ERRORED and DROPPED.'
   ]
 }
@@ -894,11 +894,11 @@ export function buildCanvasControlInstructions(shimPath: string): string {
     ...requestIdDocLines(),
     '',
     'Server Edition ownership is fail-closed: every request requires verified node identity, and',
-    'a caller may mutate or message only nodes it opened during the current server run.',
-    'Restarting the server clears that creator proof; persisted nodes and queued launches are never',
-    'auto-adopted, relaunched, or controlled at boot. An unowned target receives a named refusal.',
+    'a caller may mutate or message only nodes it opened. That creator record survives a server',
+    'restart. Persisted nodes and queued launches are still never auto-adopted, relaunched, or',
+    'controlled at boot (a held launch waits for `run`). An unowned target receives a named refusal.',
     'On the Server Edition `--run-now` changes nothing else (opens start at once; the `--after`',
-    'refusal still applies) and `run` reaches only nodes you opened during this server run.',
+    'refusal still applies) and `run` reaches only nodes you opened.',
     '',
     'Verbs:',
     '- `list [--geometry on|off]` — current nodes (id, kind, title; the JSON rows also carry each node\'s',
@@ -1022,8 +1022,7 @@ export function buildCanvasControlInstructions(shimPath: string): string {
     '  they cannot read it back. The human can flip or reset a link\'s direction from its right-click menu.',
     `  Both endpoints must be in your project. A missing endpoint reports: ${LINK_ENDPOINT_NOT_FOUND}.`,
     '  This does not reveal whether the id exists in another project.',
-    '  On Server Edition the ownership rule is stricter: every endpoint must be a node you opened',
-    '  during this server run.',
+    '  On Server Edition the ownership rule is stricter: every endpoint must be a node you opened.',
     '- `verify --node <id> [--lenses correctness,security,tests] [--focus "..."] [--synthesis off]` — open a',
     '  review panel over that node\'s work: one reviewer per lens, each armed behind the target and linked',
     '  to it, plus a judge armed behind the panel that merges the findings into one verdict. Reviewers are',
@@ -1467,11 +1466,11 @@ ${dryRunDocLines().join('\n')}
 ${requestIdDocLines().join('\n')}
 
 Server Edition ownership is fail-closed: every request requires verified node identity, and a
-caller may mutate or message only nodes it opened during the current server run. Restarting
-the server clears that creator proof; persisted nodes and queued launches are never auto-adopted,
-relaunched, or controlled at boot. An unowned target receives a named refusal. On the Server
+caller may mutate or message only nodes it opened. That creator record survives a server
+restart. Persisted nodes and queued launches are still never auto-adopted, relaunched, or
+controlled at boot (a held launch waits for \`run\`). An unowned target receives a named refusal. On the Server
 Edition \`--run-now\` changes nothing else (opens start at once; the \`--after\` refusal still
-applies) and \`run\` reaches only nodes you opened during this server run.
+applies) and \`run\` reaches only nodes you opened.
 
 Verbs:
 - \`list [--geometry on|off]\` — list current nodes (id, kind, title; the JSON rows also carry each node's

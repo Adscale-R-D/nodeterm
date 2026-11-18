@@ -836,6 +836,8 @@ export async function startServer(
         ownsDurableState: hookStartupWarning === null
       })
       hookServer.setControlHandler(canvasControl.handler)
+      // Integration principals ride the canvas-control runtime: no runtime, no route (404).
+      hookServer.setIntegrationHandler(canvasControl.integration)
     } catch (error) {
       console.warn(
         '[nodeterm-server] Server Edition canvas control failed to initialize; keeping it disabled',

@@ -306,6 +306,7 @@ import { agentLaunchOverride, toggleCollapsed, type CanvasNode } from '../state/
 import { NodeColorSwatches } from '../components/NodeColorSwatches'
 import { AccountChip, useAccountChip } from '../components/AccountChip'
 import { IssueRefChip } from '../components/IssueRefChip'
+import { IntegrationChip } from '../components/IntegrationChip'
 import { TeamProgressChip } from '../components/TeamProgressChip'
 import { PortsChip } from '../components/PortsChip'
 import { useTeamStations } from '../state/teamStations'
@@ -6339,6 +6340,8 @@ export function TerminalNode({
             {status.session}
           </span>
         )}
+        {/* Opened by an integration principal (docs/integration-principal.md): display only. */}
+        <IntegrationChip marker={data.integration} />
         {/* The GitHub issue this session was started on — opens it on the board (the issue lane
             lives there), the same thing the session's board card does with its own `#N`. */}
         <IssueRefChip

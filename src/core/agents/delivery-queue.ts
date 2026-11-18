@@ -3,6 +3,7 @@ import { RETRYABLE } from './agent-message-decide'
 import type { DeliveryTraceInput } from './agent-message-trace'
 import type { DurableFactSpec } from '../durable-state'
 import { isSafeNodeId } from '../../shared/safe-id'
+import { INTEGRATION_MESSAGE_VERB } from '../../shared/integration-principal'
 
 /**
  * DELIVER-ON-IDLE — a bounded, per-target queue with a TTL, and never a silent drop.
@@ -229,7 +230,12 @@ export const QUEUE_PERSIST_TTL_MAX = 24 * 60 * 60 * 1000
 
 /** The verbs a restored entry may still deliver. See the header: a board comment and a station
  *  notice are expired at restore instead. */
-const RESTORABLE_VERBS: ReadonlySet<string> = new Set(['send', 'reply', 'notify'])
+const RESTORABLE_VERBS: ReadonlySet<string> = new Set(['send', 'reply', 'notify', INTEGRATION_MESSAGE_VERB])
+
+/** An integration principal's send is traced under `integration:<name>`, never a node id. Its
+ *  ownership is durable (core/integration/ledger.ts), so unlike a board comment it may flush after
+ *  a restart — the flush re-runs the creator check against that ledger. */
+const INTEGRATION_SOURCE_RE = /^integration:[a-z0-9][a-z0-9-]{0,31}$/
 
 const EXTRA_KEY_RE = /^[A-Za-z][A-Za-z0-9]{0,40}$/
 
@@ -244,7 +250,9 @@ export function sanitizePersistedQueueEntry(raw: unknown): PersistedQueueEntry |
   if (typeof r.sourceNodeId !== 'string' || r.sourceNodeId.length === 0 || r.sourceNodeId.length > 200)
     return null
   if (typeof r.verb !== 'string' || r.verb.length > 40) return null
-  if (RESTORABLE_VERBS.has(r.verb) && !isSafeNodeId(r.sourceNodeId)) return null
+  if (r.verb === INTEGRATION_MESSAGE_VERB) {
+    if (!INTEGRATION_SOURCE_RE.test(r.sourceNodeId)) return null
+  } else if (RESTORABLE_VERBS.has(r.verb) && !isSafeNodeId(r.sourceNodeId)) return null
   if (typeof r.sourceTitle !== 'string' || r.sourceTitle.length > 1000) return null
   if (typeof r.body !== 'string' || r.body.length > QUEUE_PERSIST_BODY_MAX) return null
   const req: QueuedDeliveryRequest = {

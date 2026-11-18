@@ -163,10 +163,18 @@ export function parseTeamArgv(argv: string[]): AdminRequest | { error: string } 
  * carried over (runTeamCli reads it anywhere), and the rest configure a boot that is not happening.
  */
 export function teamArgv(argv: string[]): string[] | null {
+  return subcommandArgv(argv, 'team')
+}
+
+/**
+ * `teamArgv`'s rule for any admin subcommand (`team`, `integration`): the subcommand's own argv
+ * (with a `--data-dir` given before it carried over), or null for a server boot.
+ */
+export function subcommandArgv(argv: string[], name: string): string[] | null {
   const carried: string[] = []
   for (let i = 0; i < argv.length; i++) {
     const tok = argv[i]
-    if (!tok.startsWith('--')) return tok === 'team' ? [...argv.slice(i + 1), ...carried] : null
+    if (!tok.startsWith('--')) return tok === name ? [...argv.slice(i + 1), ...carried] : null
     if (tok.startsWith('--data-dir=')) {
       carried.push(tok)
       continue

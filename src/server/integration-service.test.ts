@@ -1,0 +1,244 @@
+import { beforeEach, describe, expect, it } from 'vitest'
+
+import { IntegrationLedger } from '../core/integration/ledger'
+import { resetMessageFlow } from '../core/agents/agent-message-flow'
+import { resetAgentMessageTraceForTests } from '../core/agents/agent-message-trace'
+import { MANAGED_SCRIPT_REVISION } from '../core/agents/hooks/managed-script'
+import type { AgentMessagingDeps } from '../core/agents/agent-messaging'
+import type { PrincipalEntry } from '../core/integration/registry'
+import { INTEGRATION_MESSAGE_VERB } from '../shared/integration-principal'
+import type { PrincipalOpenSpec, PrincipalResumeInput } from './headless-node-factory'
+import { createIntegrationService, type IntegrationServiceDeps } from './integration-service'
+
+const SINK: PrincipalEntry = { name: 'sink', label: 'Sink', projects: ['p1', 'p2'], tokenSha256: 'a'.repeat(64), createdAt: 1 }
+const TOKEN = 'ntp_test-token-xxxxxxxxxxxx'
+
+interface World {
+  canvas: Map<string, Array<{ id: string; parentId?: string }>>
+  opens: PrincipalOpenSpec[]
+  resumes: PrincipalResumeInput[]
+  closes: Array<{ projectId: string; nodeId: string; frameId?: string }>
+  prompts: Array<{ name: string; text: string }>
+  sent: string[]
+  state: string
+}
+
+function setup(over: Partial<IntegrationServiceDeps> = {}) {
+  const w: World = { canvas: new Map([['p1', []], ['p2', []]]), opens: [], resumes: [], closes: [], prompts: [], sent: [], state: 'done' }
+  let seq = 0
+  const ledger = new IntegrationLedger(undefined, undefined, () => 5000)
+  const messaging: AgentMessagingDeps = {
+    paneOwner: async () => ({ tty: '/dev/pts/1', panePid: 1, paneId: '%1', command: 'claude', argv: ['claude'], pids: [2] }),
+    sendEnvelope: async (_id, payload) => {
+      w.sent.push(payload)
+      return true
+    },
+    hasLiveSession: () => true,
+    mirrorEntry: () => ({ state: w.state as never, updatedAt: 1, stateVerified: true, clientRevision: MANAGED_SCRIPT_REVISION }),
+    projects: () => [...w.canvas].map(([id, nodes]) => ({ id, nodes: nodes.map((n) => ({ id: n.id, agentId: 'claude' })) })),
+    isRemoteNode: () => false,
+    messagingEnabled: () => false,
+    paneOwnerProject: (id) => [...w.canvas].find(([, nodes]) => nodes.some((n) => n.id === id))?.[0],
+    principalOwnsTarget: (p, id) => ledger.owns(p, id),
+    customAgents: () => undefined,
+    appendBoardLog: async () => false,
+    subscribeReceipts: (cb) => {
+      const t = setTimeout(() => [...w.canvas.values()].flat().forEach((n) => cb({ nodeId: n.id, newTurn: true, verified: true })), 5)
+      return () => clearTimeout(t)
+    }
+  }
+  const service = createIntegrationService({
+    registry: { authenticate: (name, token) => (name === 'sink' && token === TOKEN ? SINK : undefined) },
+    ledger,
+    messaging,
+    factory: {
+      principalOpen: async (spec, beforeLaunch) => {
+        w.opens.push(spec)
+        const nodeId = `term-${++seq}`
+        let frameId: string | undefined
+        let frameCreated = false
+        if (spec.frame && 'title' in spec.frame) {
+          frameId = `group-${seq}`
+          frameCreated = true
+          w.canvas.get(spec.projectId)!.push({ id: frameId })
+        } else if (spec.frame) frameId = spec.frame.id
+        w.canvas.get(spec.projectId)!.push({ id: nodeId, ...(frameId ? { parentId: frameId } : {}) })
+        beforeLaunch({ nodeId, frameId, frameCreated, agentSessionId: `sess-${seq}-0000-0000` })
+        return { ok: true, nodeId, frameId, frameCreated, agentSessionId: `sess-${seq}-0000-0000`, session: 'started', sessionCreated: 1700 }
+      },
+      principalResume: async (input) => {
+        w.resumes.push(input)
+        return { ok: true, outcome: 'resumed', sessionCreated: 1800 }
+      },
+      principalClose: async (input) => {
+        w.closes.push(input)
+        const list = w.canvas.get(input.projectId)!
+        const next = list.filter((n) => n.id !== input.nodeId)
+        const frameRemoved = !!input.frameId && !next.some((n) => n.parentId === input.frameId)
+        w.canvas.set(input.projectId, frameRemoved ? next.filter((n) => n.id !== input.frameId) : next)
+        return { ok: true, nodeMissing: !list.some((n) => n.id === input.nodeId), frameRemoved }
+      },
+      holdsSession: () => true
+    },
+    canvases: () => [...w.canvas].map(([id, nodes]) => ({ id, nodes })),
+    sessionVerdict: async () => 'present',
+    mirror: () => ({ state: w.state }),
+    paneOwnerProject: (id) => [...w.canvas].find(([, nodes]) => nodes.some((n) => n.id === id))?.[0],
+    transcriptPresence: async () => 'present',
+    savePrompt: async (name, base64) => {
+      w.prompts.push({ name, text: Buffer.from(base64, 'base64').toString('utf8') })
+      return `/data/launch-prompts/x/${name}`
+    },
+    isDirectory: async (p) => p === '/work/repo',
+    now: () => 5000,
+    ...over
+  })
+  const call = (verb: string, body: unknown, token = TOKEN) =>
+    service.handle({ verb, name: 'sink', token, body: JSON.stringify(body) })
+  return { w, ledger, service, call }
+}
+
+beforeEach(() => {
+  resetMessageFlow()
+  resetAgentMessageTraceForTests()
+})
+
+describe('integration service — auth', () => {
+  it('one flat 403 for a wrong token or name, before anything else (even an unknown verb)', async () => {
+    const { call, service, w } = setup()
+    for (const r of [await call('open', { key: 'A' }, 'nope'), await call('nonsense', {}, 'nope'), await service.handle({ verb: 'list', name: 'x', token: TOKEN, body: '{}' })]) {
+      expect(r).toEqual({ status: 403, body: { ok: false, error: 'unauthorized', message: 'integration refused' } })
+    }
+    expect(w.opens).toEqual([])
+  })
+  it('an authenticated unknown verb is a 404; a non-object body a 400', async () => {
+    const { call, service } = setup()
+    expect((await call('write', {})).status).toBe(404)
+    expect((await service.handle({ verb: 'list', name: 'sink', token: TOKEN, body: '[1]' })).body).toMatchObject({ ok: false, error: 'bad-body' })
+  })
+})
+
+describe('integration service — open', () => {
+  it('opens into the first registered project, spills the prompt, and records ownership', async () => {
+    const { call, w, ledger } = setup()
+    const r = await call('open', { key: 'APP-1', agent: 'claude', prompt: 'line one\nline two' })
+    expect(r).toEqual({ status: 200, body: { ok: true, result: { key: 'APP-1', nodeId: 'term-1', projectId: 'p1', status: 'created', session: 'started' } } })
+    expect(w.opens[0]).toMatchObject({ principal: 'sink', label: 'Sink', key: 'APP-1', projectId: 'p1', agent: 'claude', title: 'APP-1 · Claude Code' })
+    expect(w.prompts[0].text).toBe('line one\nline two')
+    expect(w.opens[0].promptFile).toBe(`/data/launch-prompts/x/${w.prompts[0].name}`)
+    expect(w.prompts[0].name).toMatch(/^nodeterm-prompt-/)
+    expect(ledger.openNode('sink', 'APP-1')).toMatchObject({ nodeId: 'term-1', sessionCreated: 1700, agentSessionId: 'sess-1-0000-0000' })
+  })
+
+  it('is an upsert: the same key answers existing and opens nothing', async () => {
+    const { call, w } = setup()
+    await call('open', { key: 'APP-1', agent: 'claude' })
+    const r = await call('open', { key: 'APP-1', agent: 'codex' })
+    expect(r.body).toEqual({ ok: true, result: { key: 'APP-1', nodeId: 'term-1', projectId: 'p1', status: 'existing' } })
+    expect(w.opens).toHaveLength(1)
+  })
+
+  it('two concurrent opens of one key make one node', async () => {
+    const { call, w } = setup()
+    const [a, b] = await Promise.all([call('open', { key: 'APP-1', agent: 'claude' }), call('open', { key: 'APP-1', agent: 'claude' })])
+    expect(w.opens).toHaveLength(1)
+    expect([a.body, b.body].map((x) => (x as { result: { status: string } }).result.status).sort()).toEqual(['created', 'existing'])
+  })
+
+  it('a key whose node a person removed opens a NEW node', async () => {
+    const { call, w } = setup()
+    await call('open', { key: 'APP-1', agent: 'claude' })
+    w.canvas.set('p1', [])
+    const r = await call('open', { key: 'APP-1', agent: 'claude' })
+    expect(r.body).toMatchObject({ ok: true, result: { status: 'created', nodeId: 'term-2' } })
+  })
+
+  it('reuses its frame by title, and starts a new one if a person removed it', async () => {
+    const { call, w } = setup()
+    await call('open', { key: 'A', agent: 'claude', group: 'Jira' })
+    await call('open', { key: 'B', agent: 'claude', group: 'Jira' })
+    expect(w.opens[1].frame).toEqual({ id: 'group-1' })
+    w.canvas.set('p1', w.canvas.get('p1')!.filter((n) => n.id !== 'group-1'))
+    await call('open', { key: 'C', agent: 'claude', group: 'Jira' })
+    expect(w.opens[2].frame).toEqual({ title: 'Jira' })
+  })
+
+  it('refuses what it cannot honour, opening nothing', async () => {
+    const { call, w } = setup()
+    const cases: Array<[unknown, string]> = [
+      [{ key: '../x', agent: 'claude' }, 'bad-key'],
+      [{ key: 'A', agent: 'grok' }, 'bad-agent'],
+      [{ key: 'A', agent: 'claude', project: 'p9' }, 'project-not-registered'],
+      [{ key: 'A', agent: 'claude', cwd: 'relative/dir' }, 'bad-cwd'],
+      [{ key: 'A', agent: 'claude', cwd: '/not/a/dir' }, 'bad-cwd'],
+      [{ key: 'A', agent: 'claude', model: 'x; rm -rf /' }, 'bad-model'],
+      [{ key: 'A', agent: 'claude', group: 'a‮b' }, 'bad-group'],
+      [{ key: 'A', agent: 'claude', title: 'a\nb' }, 'bad-title']
+    ]
+    for (const [body, error] of cases) expect((await call('open', body)).body).toMatchObject({ ok: false, error })
+    expect(w.opens).toEqual([])
+    expect((await call('open', { key: 'A', agent: 'claude', project: 'p2', cwd: '/work/repo' })).body).toMatchObject({ ok: true, result: { projectId: 'p2' } })
+  })
+})
+
+describe('integration service — resume / send / close / list', () => {
+  it('resume passes the recorded session and stamp, and stores the new stamp', async () => {
+    const { call, w, ledger } = setup()
+    await call('open', { key: 'APP-1', agent: 'claude' })
+    const r = await call('resume', { key: 'APP-1' })
+    expect(r.body).toEqual({ ok: true, result: { key: 'APP-1', nodeId: 'term-1', outcome: 'resumed' } })
+    expect(w.resumes[0]).toMatchObject({ projectId: 'p1', nodeId: 'term-1', agent: 'claude', agentSessionId: 'sess-1-0000-0000', sessionCreated: 1700 })
+    expect(ledger.openNode('sink', 'APP-1')?.sessionCreated).toBe(1800)
+  })
+
+  it('an unknown key is a 404 for resume, send and close', async () => {
+    const { call } = setup()
+    for (const verb of ['resume', 'send', 'close']) expect((await call(verb, { key: 'NOPE', text: 'x' })).status).toBe(404)
+  })
+
+  it('send delivers into the node and reports accepted with a sendId', async () => {
+    const { call, w } = setup()
+    await call('open', { key: 'APP-1', agent: 'claude' })
+    const r = await call('send', { key: 'APP-1', text: 'new comment\x1b[31m' })
+    expect(r.body).toMatchObject({ ok: true, result: { key: 'APP-1', nodeId: 'term-1', outcome: 'delivered', accepted: true, sendId: expect.any(String) } })
+    // The control sequence was stripped before it reached the envelope.
+    expect(w.sent[0]).not.toContain('\x1b')
+  })
+
+  it('a queued send ends up in the outbox under its sendId', async () => {
+    const { call, service, ledger } = setup()
+    await call('open', { key: 'APP-1', agent: 'claude' })
+    service.onQueuedResult(
+      { verb: INTEGRATION_MESSAGE_VERB, principal: 'sink', sendId: 'S-1', sourceNodeId: 'integration:sink', targetNodeId: 'term-1', sourceTitle: '', body: '' },
+      { kind: 'expired', traceId: 't', queuedForMs: 1 }
+    )
+    // Not an integration message ⇒ ignored.
+    service.onQueuedResult({ verb: 'send', sendId: 'S-2', sourceNodeId: 'a', targetNodeId: 'term-1', sourceTitle: '', body: '' }, { kind: 'delivered' } as never)
+    expect(ledger.outboxOf('sink')).toEqual([{ sendId: 'S-1', key: 'APP-1', nodeId: 'term-1', outcome: 'expired', at: 5000 }])
+    const list = await call('list', { outboxSince: 4000 })
+    expect((list.body as { result: { outbox: unknown[] } }).result.outbox).toHaveLength(1)
+  })
+
+  it('close ends the node, closes the key, and closes a frame it emptied', async () => {
+    const { call, w, ledger } = setup()
+    await call('open', { key: 'APP-1', agent: 'claude', group: 'Jira' })
+    const r = await call('close', { key: 'APP-1' })
+    expect(r.body).toEqual({ ok: true, result: { key: 'APP-1', nodeId: 'term-1', closed: true } })
+    expect(w.closes[0]).toEqual({ projectId: 'p1', nodeId: 'term-1', frameId: 'group-1' })
+    expect(ledger.openNode('sink', 'APP-1')).toBeUndefined()
+    expect(ledger.openFrame('sink', 'p1', 'Jira')).toBeUndefined()
+  })
+
+  it('list reports live facts for open rows and marks a removed node', async () => {
+    const { call, w } = setup()
+    await call('open', { key: 'A', agent: 'claude' })
+    await call('open', { key: 'B', agent: 'claude' })
+    w.state = 'blocked'
+    w.canvas.set('p1', w.canvas.get('p1')!.filter((n) => n.id !== 'term-2'))
+    const r = await call('list', {})
+    const rows = (r.body as { result: { rows: Array<Record<string, unknown>> } }).result.rows
+    expect(rows[0]).toMatchObject({ key: 'A', state: 'open', session: 'live', attached: true, paneProven: true, agentState: 'blocked', needsYou: true })
+    expect(rows[1]).toMatchObject({ key: 'B', state: 'open', nodeMissing: true })
+    expect(rows[1]).not.toHaveProperty('session')
+  })
+})

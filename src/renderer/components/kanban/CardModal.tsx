@@ -28,6 +28,7 @@ import { isRemoteSessionNode } from '@shared/worktree'
 import { AccountChip, useAccountChip } from '../AccountChip'
 import { isBrowserRuntime } from '@renderer/bridge/runtime'
 import { IssueRefChip } from '../IssueRefChip'
+import { IntegrationChip } from '../IntegrationChip'
 import { TeamProgressChip } from '../TeamProgressChip'
 import { PortsChip } from '../PortsChip'
 import { QueuedLaunchChip } from './QueuedLaunchChip'
@@ -542,6 +543,7 @@ export function CardModal({ session, projectId, projectName, projectColor, colum
             <span className="kanban-modal__column" title={columnTitle ?? 'Ungrouped'}>{columnTitle ?? 'Ungrouped'}</span>
           </div>
           {isTerminal && onOpenIssue && <IssueRefChip issueRef={session.issueRef} onOpen={onOpenIssue} />}
+          {isTerminal && <IntegrationChip marker={session.integration} />}
           {isTerminal && team && team.length > 0 && onTravel && <TeamProgressChip stations={team} onTravel={onTravel} statusStore={agentStatusStore} />}
           {isTerminal && session.pendingLaunch && (
             <QueuedLaunchChip nodeId={session.id} pending={session.pendingLaunch} firstOpen={session.launchFirstOpen} onRun={onRunQueued} />

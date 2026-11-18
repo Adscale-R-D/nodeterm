@@ -43,7 +43,7 @@ import {
   type AgentId,
   type BuiltinAgentId
 } from '../shared/agents/config'
-import { assembleLaunchCommand } from '../shared/agents/launch'
+import { assembleLaunchCommand, assembleResumeCommand } from '../shared/agents/launch'
 import { ownedAccountId } from '../shared/agents/account-binding'
 import type { AgentState, NormalizedAgentEvent } from '../shared/agents/normalize'
 import { oneLine } from '../shared/one-line'
@@ -64,6 +64,8 @@ import { isRemoteSessionNode } from '../shared/worktree'
 import { issueLaunchPrompt, resolveIssueArg, type IssueRef } from '../shared/github-issue-ref'
 import { runEndedEvent, runStartedEvent } from '../shared/issue-runs'
 import type { BoardLogEntry } from '../shared/types'
+import type { IntegrationMarker } from '../shared/integration-principal'
+import { recordReprovedOwner } from '../core/agents/pane-ownership'
 import { UNKNOWN_CODEX_CLI_CAPS } from '../shared/types'
 import type {
   BridgeLink,
@@ -110,6 +112,10 @@ export interface HeadlessPty {
     persistKey: string,
     opts?: { everySocket?: boolean }
   ): Promise<void>
+  /** Strict tri-state existence probe (exact target). Integration `resume` only; absent ⇒ unknown. */
+  sessionVerdict?(persistKey: string): Promise<'present' | 'absent' | 'unknown'>
+  /** tmux `#{session_created}` (epoch s) of a local session, or null. Integration pane re-proof. */
+  sessionCreatedAt?(persistKey: string): Promise<number | null>
 }
 
 /** WorkspaceStore's mutation surface, also narrow so tests can use the real store or a fake. */
@@ -179,6 +185,61 @@ export interface HeadlessNodeFactoryDeps {
 
 /** The author of a run-history line this factory writes: the app acting on an agent's request. */
 const RUN_LOG_AUTHOR = { name: 'nodeterm', color: '#8b8b8b' } as const
+
+/** An integration principal's `open`, already authenticated and validated by the service
+ *  (src/server/integration-service.ts). */
+export interface PrincipalOpenSpec {
+  principal: string
+  label: string
+  key: string
+  projectId: string
+  agent: BuiltinAgentId
+  title: string
+  color?: string
+  cwd?: string
+  /** A spilled launch prompt (`<userData>/launch-prompts/…`), read by the pane at launch. */
+  promptFile?: string
+  model?: string
+  /** Place the node in this frame: an existing principal frame's id, or a title to create one. */
+  frame?: { id: string } | { title: string }
+}
+
+export type PrincipalOpenResult =
+  | {
+      ok: true
+      nodeId: string
+      frameId?: string
+      /** The frame was created by this open (the caller records it in its ledger). */
+      frameCreated?: boolean
+      agentSessionId?: string
+      session: 'started' | 'failed'
+      reason?: string
+      /** tmux `#{session_created}` of the fresh spawn, when one was read. */
+      sessionCreated?: number
+    }
+  | { ok: false; error: string; message: string }
+
+export interface PrincipalResumeInput {
+  projectId: string
+  nodeId: string
+  agent: BuiltinAgentId
+  /** The conversation to resume (the ledger's minted id, else the mirror's). */
+  agentSessionId?: string
+  /** The stamp recorded at this node's last fresh spawn. */
+  sessionCreated?: number
+  /** Claude only: is that conversation's transcript on this machine? */
+  transcriptPresence?(sessionId: string): Promise<'present' | 'absent' | 'unknown'>
+}
+
+export type PrincipalResumeResult =
+  | {
+      ok: true
+      outcome: 'attached' | 'resumed' | 'started-fresh' | 'already-running'
+      reason?: string
+      sessionCreated?: number
+      agentSessionId?: string
+    }
+  | { ok: false; outcome: 'refused'; error: string; message: string }
 
 export interface HeadlessNodeOwner {
   sourceNodeId: string
@@ -368,6 +429,114 @@ function placeRight(
     )
     if (!collides) return { x: candidate.x, y: candidate.y }
   }
+}
+
+/**
+ * The first free slot for a new node with no source to sit beside (an integration principal's
+ * open): scanned in the same three-row columns as `placeRight`, from `origin`, clear of `occupied`.
+ */
+function firstFreeSlot(
+  occupied: readonly { x: number; y: number; width: number; height: number }[],
+  origin: { x: number; y: number },
+  size: { width: number; height: number }
+): { x: number; y: number } {
+  for (let slot = 0; ; slot++) {
+    const column = Math.floor(slot / 3)
+    const row = slot % 3
+    const candidate = {
+      x: origin.x + column * (size.width + H_GAP),
+      y: origin.y + row * (size.height + V_GAP),
+      width: size.width,
+      height: size.height
+    }
+    const collides = occupied.some((rect) =>
+      candidate.x < rect.x + rect.width + PLACE_CLEARANCE &&
+      candidate.x + candidate.width + PLACE_CLEARANCE > rect.x &&
+      candidate.y < rect.y + rect.height + PLACE_CLEARANCE &&
+      candidate.y + candidate.height + PLACE_CLEARANCE > rect.y
+    )
+    if (!collides) return { x: candidate.x, y: candidate.y }
+  }
+}
+
+/** What building an agent launch line reads: the target project and this host's CLI probes. */
+interface LaunchLineContext {
+  target: Project
+  settings: Settings
+  caps: ClaudeCliCaps | null
+  grokCaps: GrokCliCaps | null
+  codexCaps: CodexCliCaps
+  codexSharedIdentity: boolean
+  env: Record<string, string | undefined>
+}
+
+/**
+ * THE one launch-line builder for an agent this factory opens — `open-agent` and an integration
+ * principal's `open` both go through it, so a permission-mode gate, a minted session id or a
+ * launch-command override cannot apply to one and not the other.
+ */
+function agentLaunchLine(
+  ctx: LaunchLineContext,
+  agentId: BuiltinAgentId,
+  input: { initialPrompt?: string; promptFile?: string; model?: string }
+): { command: string; mintedSessionId?: string } {
+  const resolvedMode = resolvePermissionMode(ctx.target, ctx.settings)
+  const permissionMode = agentId === 'claude'
+    ? gatePermissionMode(resolvedMode, ctx.caps?.autoPermissionMode === true)
+    : resolvedMode
+  const sessionIdFlagSupported = supportsSessionIdFlag(
+    agentId as AgentId,
+    ctx.caps?.sessionIdFlag === true,
+    ctx.grokCaps?.sessionIdFlag === true
+  )
+  const mintedSessionId = sessionIdFlagSupported ? randomUUID() : undefined
+  const command = assembleLaunchCommand(
+    {
+      agentId: agentId as AgentId,
+      ...(input.promptFile ? { promptFile: input.promptFile } : { initialPrompt: input.initialPrompt }),
+      permissionMode,
+      sessionId: mintedSessionId,
+      sessionIdFlagSupported,
+      launchCmdOverride: ctx.settings.agentLaunchCommands?.[agentId],
+      sharedIdentity: ctx.codexSharedIdentity,
+      approvalCaps: {
+        codexApprovalValues: ctx.codexCaps.approvalValues,
+        codexNoDaemon: ctx.codexCaps.noDaemon ?? null
+      },
+      model: input.model
+    },
+    ctx.env
+  ).command
+  return { command, ...(mintedSessionId ? { mintedSessionId } : {}) }
+}
+
+/** The RESUME line for an agent this factory opened, built like `agentLaunchLine` (same mode gate,
+ *  override, launcher and approval vocabulary). No session id ⇒ the bare launch. */
+function agentResumeLine(
+  ctx: LaunchLineContext,
+  agentId: BuiltinAgentId,
+  sessionId: string | undefined,
+  model: string | undefined
+): string {
+  const resolvedMode = resolvePermissionMode(ctx.target, ctx.settings)
+  const permissionMode = agentId === 'claude'
+    ? gatePermissionMode(resolvedMode, ctx.caps?.autoPermissionMode === true)
+    : resolvedMode
+  return assembleResumeCommand(
+    {
+      agentId: agentId as AgentId,
+      ...(sessionId ? { sessionId } : {}),
+      permissionMode,
+      launchCmdOverride: ctx.settings.agentLaunchCommands?.[agentId],
+      sharedIdentity: ctx.codexSharedIdentity,
+      approvalCaps: {
+        codexApprovalValues: ctx.codexCaps.approvalValues,
+        codexNoDaemon: ctx.codexCaps.noDaemon ?? null
+      },
+      model
+    },
+    ctx.env
+  ).command
 }
 
 function addEdge(list: BridgeLink[], source: string, target: string, prefix: string): void {
@@ -1683,39 +1852,21 @@ export class HeadlessNodeFactory {
         let title = `Terminal ${startIndex + i + 1}`
         let color: string = SYSTEM_NODE_COLORS[(startIndex + i) % SYSTEM_NODE_COLORS.length]
         let mintedSessionId: string | undefined
-        let permissionMode
         if (verb === 'open-agent') {
           const config = AGENT_CONFIG[agentId as BuiltinAgentId]
           title = config.label
           color = config.color
-          const resolvedMode = resolvePermissionMode(target, settings)
-          permissionMode = agentId === 'claude'
-            ? gatePermissionMode(resolvedMode, caps?.autoPermissionMode === true)
-            : resolvedMode
-          const sessionIdFlagSupported = supportsSessionIdFlag(
-            agentId as AgentId,
-            caps?.sessionIdFlag === true,
-            grokCaps?.sessionIdFlag === true
-          )
-          mintedSessionId = sessionIdFlagSupported ? randomUUID() : undefined
-          command = assembleLaunchCommand(
+          const built = agentLaunchLine(
+            { target, settings, caps, grokCaps, codexCaps, codexSharedIdentity, env: this.deps.env ?? process.env },
+            agentId as BuiltinAgentId,
             {
-              agentId: agentId as AgentId,
               // An issue-bound session's first prompt is the REFERENCE line, never the issue's text.
               initialPrompt: issueRef ? issueLaunchPrompt(issueRef, args.prompt) : args.prompt,
-              permissionMode,
-              sessionId: mintedSessionId,
-              sessionIdFlagSupported,
-              launchCmdOverride: settings.agentLaunchCommands?.[agentId as BuiltinAgentId],
-              sharedIdentity: codexSharedIdentity,
-              approvalCaps: {
-                codexApprovalValues: codexCaps.approvalValues,
-                codexNoDaemon: codexCaps.noDaemon ?? null
-              },
               model: args.model
-            },
-            this.deps.env ?? process.env
-          ).command
+            }
+          )
+          command = built.command
+          mintedSessionId = built.mintedSessionId
         }
 
         const id = nextId('term')
@@ -2178,6 +2329,281 @@ export class HeadlessNodeFactory {
 
       if (unsaved) await this.savePatches(patches)
       if (changedProjects.size) await this.publishPersisted(changedProjects)
+    })
+  }
+
+  // ── Integration principals (docs/integration-principal.md) ────────────────────────────────────
+  // A principal is authenticated and its ownership kept by src/server/integration-service.ts and its
+  // durable ledger; these methods only do the canvas and session work, through the same save,
+  // launch and attach paths every verb here uses. They never consult or write the node-caller
+  // ownership ledger above.
+
+  /** Did this node's LAST turn end on an API/model error (this edition's own event stream)? */
+  lastTurnErroredFor(nodeId: string): boolean {
+    return this.lastTurnErrored.has(nodeId)
+  }
+
+  /** Does this server hold a client on the node's session (it is not reaper-eligible)? */
+  holdsSession(nodeId: string): boolean {
+    return this.attached.has(nodeId)
+  }
+
+  /** The launch-line context for `target`: this host's probes, asked like `open` asks them. */
+  private async launchContext(target: Project, agent: BuiltinAgentId): Promise<LaunchLineContext> {
+    return {
+      target,
+      settings: this.deps.settings(),
+      caps: await this.deps.cliCaps(),
+      grokCaps: await this.deps.grokCaps(),
+      codexCaps: agent === 'codex' ? await this.deps.codexCaps().catch(() => UNKNOWN_CODEX_CLI_CAPS) : UNKNOWN_CODEX_CLI_CAPS,
+      codexSharedIdentity: agent === 'codex' ? await this.deps.codexSharedIdentity().catch(() => false) : false,
+      env: this.deps.env ?? process.env
+    }
+  }
+
+  /**
+   * An integration principal's open: one agent node in `spec.projectId`, written BEFORE anything is
+   * spawned, then `beforeLaunch` (the caller records its ledger row — ownership exists before the
+   * session does), then the launch through the shared echo-verified launcher. A failed launch keeps
+   * the command for the node's Run now, exactly like `open-agent`.
+   */
+  principalOpen(
+    spec: PrincipalOpenSpec,
+    beforeLaunch: (r: { nodeId: string; frameId?: string; frameCreated: boolean; agentSessionId?: string }) => void
+  ): Promise<PrincipalOpenResult> {
+    return this.runExclusive(async () => {
+      if (this.stopped) return { ok: false, error: 'stopping', message: 'canvas control is stopping; nothing was opened' }
+      const workspace = await this.loadForEdit()
+      const target = workspace.projects.find((p) => p.id === spec.projectId)
+      if (!target) return { ok: false, error: 'project-unavailable', message: `project ${spec.projectId} is not in this workspace` }
+      if (target.ssh)
+        return { ok: false, error: 'project-ssh-unsupported', message: 'Server Edition only opens local sessions; this is an SSH project' }
+
+      const ctx = await this.launchContext(target, spec.agent)
+      const { command, mintedSessionId } = agentLaunchLine(ctx, spec.agent, {
+        ...(spec.promptFile ? { promptFile: spec.promptFile } : {}),
+        model: spec.model
+      })
+      const settings = ctx.settings
+      const size = terminalSize(settings)
+      const marker: IntegrationMarker = { name: spec.principal, key: spec.key, label: spec.label }
+      const node: CanvasNodeState = {
+        id: nextId('term'),
+        kind: 'terminal',
+        position: { x: 0, y: 0 },
+        size: { ...size },
+        title: spec.title,
+        color: spec.color ?? AGENT_CONFIG[spec.agent].color,
+        group: null,
+        tags: [],
+        cwd: spec.cwd || target.cwd,
+        agentId: spec.agent as AgentId,
+        ...(spec.model ? { agentModel: spec.model } : {}),
+        ...(mintedSessionId ? { agentSessionId: mintedSessionId } : {}),
+        integration: marker,
+        pendingLaunch: { after: [], command, executor: 'server' as const, attempted: true, manualOnly: true }
+      }
+
+      let frameId: string | undefined
+      let frameCreated = false
+      const existingFrame =
+        spec.frame && 'id' in spec.frame
+          ? target.nodes.find((n) => n.id === (spec.frame as { id: string }).id && n.kind === 'group')
+          : undefined
+      if (existingFrame) {
+        // Inside the frame, in its own coordinates, clear of its children; then the frame grows.
+        frameId = existingFrame.id
+        const children = target.nodes.filter((n) => n.parentId === frameId)
+        node.parentId = frameId
+        node.position = firstFreeSlot(
+          children.map((c) => ({ x: c.position.x, y: c.position.y, width: c.size?.width || TERMINAL_SIZE.width, height: c.size?.height || TERMINAL_SIZE.height })),
+          { x: GROUP_PAD, y: GROUP_PAD + GROUP_HEADER },
+          size
+        )
+        target.nodes = groupsFirst(fitAncestorChain([...target.nodes, node], frameId))
+      } else {
+        // Top level, below everything already there (or at the origin of an empty canvas).
+        const roots = target.nodes.filter((n) => !n.parentId)
+        const rects = roots.map((n) => ({ x: n.position.x, y: n.position.y, width: n.size?.width || TERMINAL_SIZE.width, height: n.size?.height || TERMINAL_SIZE.height }))
+        const origin = rects.length
+          ? { x: Math.min(...rects.map((r) => r.x)), y: Math.max(...rects.map((r) => r.y + r.height)) + V_GAP * 2 }
+          : { x: 0, y: 0 }
+        node.position = firstFreeSlot(rects, origin, size)
+        target.nodes.push(node)
+        if (spec.frame && 'title' in spec.frame) {
+          const grouped = groupPersistedNodes(
+            target.nodes,
+            [node.id],
+            target.nodes.filter((n) => n.kind === 'group').length,
+            spec.frame.title,
+            spec.color as NodeColor | undefined
+          )
+          if (grouped) {
+            target.nodes = grouped.nodes
+            frameId = grouped.groupId
+            frameCreated = true
+          }
+        }
+      }
+
+      if (!(await this.castAndSave(workspace)))
+        return { ok: false, error: 'not-saved', message: 'nothing was opened: the canvas could not be written (canvas control is stopping)' }
+      beforeLaunch({ nodeId: node.id, ...(frameId ? { frameId } : {}), frameCreated, ...(mintedSessionId ? { agentSessionId: mintedSessionId } : {}) })
+      await this.publishPersisted([target.id])
+
+      let launched: HeadlessLaunchResult | undefined
+      try {
+        launched = await this.launch(target, node, command)
+      } catch {
+        launched = undefined
+      }
+      const delivered = launched?.outcome === 'delivered'
+      if (launched?.fresh) this.awaitingFirstWorking.add(node.id)
+      await this.savePatches([delivered ? clearLaunch(target.id, node.id, command) : claimLaunch(target.id, node.id, command, false)])
+      await this.publishPersisted([target.id])
+      const sessionCreated = delivered || launched?.fresh ? await this.stampOf(node.id) : undefined
+      return {
+        ok: true,
+        nodeId: node.id,
+        ...(frameId ? { frameId } : {}),
+        ...(frameCreated ? { frameCreated } : {}),
+        ...(mintedSessionId ? { agentSessionId: mintedSessionId } : {}),
+        session: delivered ? 'started' : 'failed',
+        ...(delivered ? {} : { reason: launched && launched.outcome !== 'delivered' ? launched.reason : 'spawn-failed' }),
+        ...(sessionCreated !== undefined ? { sessionCreated } : {})
+      }
+    })
+  }
+
+  private async stampOf(nodeId: string): Promise<number | undefined> {
+    const v = await this.deps.ptyManager.sessionCreatedAt?.(nodeId).catch(() => null)
+    return typeof v === 'number' ? v : undefined
+  }
+
+  /**
+   * Bring a principal's node back (docs/integration-principal.md §resume). Session present: attach
+   * this server's client and re-prove the pane ONLY when tmux's creation stamp equals the one
+   * recorded at the fresh spawn. Session absent (reboot, reaped): restart the agent on its saved
+   * conversation (`--resume`), or a fresh one when claude reports the transcript gone — a fresh
+   * spawn records pane ownership by itself. Unknown: refuse, never guess.
+   */
+  principalResume(input: PrincipalResumeInput): Promise<PrincipalResumeResult> {
+    return this.runExclusive(async () => {
+      const refuse = (error: string, message: string): PrincipalResumeResult => ({ ok: false, outcome: 'refused', error, message })
+      if (this.stopped) return refuse('stopping', 'canvas control is stopping')
+      const workspace = await this.readWorkspace()
+      const project = workspace.projects.find((p) => p.id === input.projectId)
+      const node = project?.nodes.find((n) => n.id === input.nodeId)
+      if (!project || !node) return refuse('node-missing', 'the node is no longer on its canvas (a person removed it)')
+      const probe = this.deps.ptyManager.sessionVerdict
+      const verdict = probe ? await probe.call(this.deps.ptyManager, node.id).catch(() => 'unknown' as const) : 'unknown'
+      if (verdict === 'unknown') return refuse('session-unreadable', 'tmux could not be asked whether the session exists; retry later')
+
+      if (verdict === 'present') {
+        if (this.attached.has(node.id)) return { ok: true, outcome: 'already-running' }
+        const stamp = await this.stampOf(node.id)
+        if (input.sessionCreated === undefined || stamp === undefined || stamp !== input.sessionCreated)
+          return refuse(
+            'session-replaced',
+            'a session with this node\'s name is running, but it is not the one this server started for it ' +
+              '(its creation stamp differs or was never recorded), so its pane cannot be proven. Close the key and open it again.'
+          )
+        const attached = await this.attach(project, node).catch(() => null)
+        if (!attached?.sessionId) return refuse('attach-failed', 'the running session could not be attached')
+        recordReprovedOwner(node.id, project.id)
+        return { ok: true, outcome: 'attached', sessionCreated: stamp }
+      }
+
+      // Absent: the session is gone. A client this server held on it died with it (the agent's own
+      // exit ended the session), so the stale mark must not turn the relaunch into a no-op attach.
+      this.attached.delete(node.id)
+      // Resume the conversation when we know it and it still exists.
+      const ctx = await this.launchContext(project, input.agent)
+      let sessionId = input.agentSessionId
+      let reason: string | undefined
+      if (sessionId && input.agent === 'claude' && input.transcriptPresence) {
+        const presence = await input.transcriptPresence(sessionId).catch(() => 'unknown' as const)
+        if (presence === 'absent') {
+          sessionId = undefined
+          reason = 'transcript-missing'
+        }
+      } else if (!sessionId) reason = 'no-session-id'
+      let command: string
+      let newSessionId: string | undefined
+      if (sessionId) {
+        command = agentResumeLine(ctx, input.agent, sessionId, node.agentModel)
+      } else {
+        const fresh = agentLaunchLine(ctx, input.agent, { model: node.agentModel })
+        command = fresh.command
+        newSessionId = fresh.mintedSessionId
+      }
+      let launched: HeadlessLaunchResult | undefined
+      try {
+        launched = await this.launch(project, node, command)
+      } catch {
+        launched = undefined
+      }
+      if (!launched) return refuse('launch-failed', 'the agent could not be started (spawn-failed)')
+      if (launched.outcome === 'failed')
+        return refuse('launch-failed', `the agent could not be started (${launched.reason})`)
+      if (launched.fresh) this.awaitingFirstWorking.add(node.id)
+      if (newSessionId) {
+        const id = newSessionId
+        await this.savePatches([{ projectId: project.id, nodeId: node.id, apply: (n) => { n.agentSessionId = id; return true } }])
+      }
+      const sessionCreated = await this.stampOf(node.id)
+      return {
+        ok: true,
+        outcome: sessionId ? 'resumed' : 'started-fresh',
+        ...(reason ? { reason } : {}),
+        ...(sessionCreated !== undefined ? { sessionCreated } : {}),
+        ...(newSessionId ? { agentSessionId: newSessionId } : {})
+      }
+    })
+  }
+
+  /**
+   * End a principal's node: kill its session, remove it (and its edges) from a FRESH read, and remove
+   * `frameId` too when this close leaves that frame empty. `nodeMissing` when a person already removed
+   * the node — the session is still ended.
+   */
+  principalClose(input: { projectId: string; nodeId: string; frameId?: string }): Promise<
+    { ok: true; nodeMissing: boolean; frameRemoved: boolean } | { ok: false; error: string; message: string }
+  > {
+    return this.runExclusive(async () => {
+      await this.deps.ptyManager.destroySession(null, input.nodeId, { everySocket: true })
+      this.attached.delete(input.nodeId)
+      this.awaitingFirstWorking.delete(input.nodeId)
+      const current = await this.loadForEdit()
+      const project = current.projects.find((p) => p.id === input.projectId)
+      const present = !!project?.nodes.some((n) => n.id === input.nodeId)
+      let frameRemoved = false
+      if (project && present) {
+        const parentId = project.nodes.find((n) => n.id === input.nodeId)?.parentId
+        project.nodes = project.nodes.filter((n) => n.id !== input.nodeId)
+        const drop = (id: string): void => {
+          if (project.ropes) project.ropes = project.ropes.filter((e) => e.source !== id && e.target !== id)
+          if (project.bridges) project.bridges = project.bridges.filter((e) => e.source !== id && e.target !== id)
+        }
+        drop(input.nodeId)
+        if (input.frameId && !project.nodes.some((n) => n.parentId === input.frameId)) {
+          if (project.nodes.some((n) => n.id === input.frameId)) {
+            project.nodes = project.nodes.filter((n) => n.id !== input.frameId)
+            drop(input.frameId)
+            frameRemoved = true
+          }
+        } else if (parentId) {
+          project.nodes = groupsFirst(fitAncestorChain(project.nodes, parentId))
+        }
+        if (!(await this.castAndSave(current)))
+          return {
+            ok: false,
+            error: 'not-saved',
+            message: 'the session was ended, but the canvas could not be written (canvas control is stopping); the node stays on the canvas'
+          }
+        await this.publishPersisted([project.id])
+      }
+      return { ok: true, nodeMissing: !present, frameRemoved }
     })
   }
 

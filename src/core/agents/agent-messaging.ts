@@ -64,6 +64,7 @@ import {
   type QueuedDeliveryRequest
 } from './delivery-queue'
 import type { DurableFactFile } from '../durable-state'
+import { INTEGRATION_MESSAGE_VERB } from '../../shared/integration-principal'
 import { randomUUID } from 'crypto'
 import { nodeTokenFilePresent } from './node-token-files'
 import { mirrorEntry as coreMirrorEntry, type MirrorEntry } from '../agent-status-mirror'
@@ -87,8 +88,35 @@ export interface BoardCommentMessage extends BoardCommentDeliverRequest {
   verb: 'board-comment'
 }
 
-/** Everything `runDelivery` can carry: an agent's verb, the app's station notice, or a board comment. */
-export type MessagingRequest = AgentMessageDeliveryInput | BoardCommentMessage
+/**
+ * An INTEGRATION PRINCIPAL's `send` (docs/integration-principal.md): a local program that owns the
+ * target node through the durable integration ledger, not through a node of its own. Like a board
+ * comment it rides every gate a `send` does, and what differs is only who it is from: the scope is
+ * "the target is in the project this principal opened it in", the creator check is the ledger's
+ * (`AgentMessagingDeps.principalOwnsTarget`), the per-project messaging switch does NOT apply
+ * (registering the principal for the project is that consent), and the envelope names the
+ * principal with `reply-to: none`. The body was cleaned by the caller (`sanitizeChatText`).
+ */
+export interface IntegrationMessage {
+  verb: typeof INTEGRATION_MESSAGE_VERB
+  principal: string
+  label: string
+  projectId: string
+  targetNodeId: string
+  body: string
+  /** One id per `send`, kept across its queued flushes: its fan-out budget is its own. */
+  sendId: string
+}
+
+/** Everything `runDelivery` can carry: an agent's verb, the app's station notice, a board comment,
+ *  or an integration principal's send. */
+export type MessagingRequest = AgentMessageDeliveryInput | BoardCommentMessage | IntegrationMessage
+
+/** The pseudo source id a principal's deliveries are traced and flow-limited under. `:` is outside
+ *  `isSafeNodeId`'s alphabet, so it can never collide with a node. */
+export function integrationSourceId(principal: string): string {
+  return `integration:${principal}`
+}
 
 /** The flow-control identity of a board: one person's budget per project. `board:` can never be a
  *  node id (no ':' in `isSafeNodeId`'s alphabet), and a project id with a control character never
@@ -106,6 +134,12 @@ function requestIdentity(
       sourceNodeId: boardCommentSourceId(req.commentId),
       sourceTitle: boardCommentFrom(req.author),
       body: req.text
+    }
+  if (req.verb === INTEGRATION_MESSAGE_VERB)
+    return {
+      sourceNodeId: integrationSourceId(req.principal),
+      sourceTitle: `integration ${req.label}`,
+      body: req.body
     }
   return { sourceNodeId: req.sourceNodeId, sourceTitle: req.sourceNodeId, body: req.body }
 }
@@ -190,6 +224,12 @@ export interface AgentMessagingDeps {
    * this because its control path remains user-confirmed. Checked on every queued flush too.
    */
   callerOwnsTarget?(sourceNodeId: string, targetNodeId: string): boolean
+  /**
+   * The integration-principal creator check (the durable integration ledger): did this principal
+   * open this node, and is it still open? Absent ⇒ a principal's send is refused
+   * `unsupported-edition`. Checked on every queued flush too.
+   */
+  principalOwnsTarget?(principal: string, targetNodeId: string): boolean
   customAgents(): readonly { id: string; launchCmd: string }[] | undefined
   appendBoardLog(projectId: string, entry: BoardLogEntry): Promise<boolean>
   /** Test seam: override the receipt subscription. Production uses the module bus below. */
@@ -359,7 +399,9 @@ export function createDeliveryQueue(
         const outcome = await runDelivery(
           qreq.verb === 'board-comment'
             ? (qreq as unknown as BoardCommentMessage)
-            : {
+            : qreq.verb === INTEGRATION_MESSAGE_VERB
+              ? (qreq as unknown as IntegrationMessage)
+              : {
                 // A queued station notice flushes as a station notice: the verb rides the queue, so
                 // its app-authored body and its reversed ownership check survive the wait.
                 verb: qreq.verb as AgentMessageDeliveryInput['verb'],
@@ -709,6 +751,7 @@ export async function runDelivery(
 ): Promise<AgentMessageOutcome> {
   const now = deps.now ?? ((): number => Date.now())
   const board = req.verb === 'board-comment' ? req : null
+  const integration = req.verb === INTEGRATION_MESSAGE_VERB ? req : null
   const ident = requestIdentity(req)
   // The app's own station-failure notice (station-notice.ts): the SOURCE is the station the notice
   // is about and the TARGET is the agent that opened it. It runs every gate below — scope, the
@@ -724,9 +767,13 @@ export async function runDelivery(
   // toward, by construction: see agent-message-scope.ts). This is also where `isSafeNodeId` runs,
   // which the pair limiter's key and the tmux session namespace both depend on. A board comment has
   // no sender node, so its scope is the comment's own board.
+  // An integration principal has no sender node either: its scope is the project it opened the
+  // target in (the "is the target on this board" rule, reused).
   const scope = board
     ? resolveBoardCommentScope(projects, board.projectId, req.targetNodeId)
-    : resolveDeliveryScope(projects, ident.sourceNodeId, req.targetNodeId)
+    : integration
+      ? resolveBoardCommentScope(projects, integration.projectId, req.targetNodeId)
+      : resolveDeliveryScope(projects, ident.sourceNodeId, req.targetNodeId)
   let notPermitted = scopeRefusal(scope)
   const projectId = scope.kind === 'same-project' ? scope.projectId : undefined
   // A shell with a creator ledger (the Server Edition) authorizes control by which AGENT spawned
@@ -735,7 +782,11 @@ export async function runDelivery(
   // A station notice asks the ledger the other way round (see `stationNotice` above). So may a
   // `reply` (#1357): a station answering the agent that opened it reaches no node the opener does
   // not already control.
-  if (!notPermitted && deps.callerOwnsTarget) {
+  if (!notPermitted && integration) {
+    // The principal's own creator proof, durable across restarts (core/integration/ledger.ts).
+    if (!deps.principalOwnsTarget) notPermitted = 'unsupported-edition'
+    else if (!deps.principalOwnsTarget(integration.principal, req.targetNodeId)) notPermitted = 'caller-not-owner'
+  } else if (!notPermitted && deps.callerOwnsTarget) {
     if (board) notPermitted = 'unsupported-edition'
     else if (
       !(stationNotice
@@ -767,10 +818,11 @@ export async function runDelivery(
         deps.heldLaunch?.(projectId, req.targetNodeId) &&
         !(await deps.hasLiveSession(req.targetNodeId))
       ) {
-        if (!deps.messagingEnabled(projectId)) notPermitted = 'switch-off'
+        // A principal's registration for the project IS its messaging consent (no switch).
+        if (!integration && !deps.messagingEnabled(projectId)) notPermitted = 'switch-off'
         else return { kind: 'targetNotStarted' }
       } else notPermitted = 'unproven-target-owner'
-    } else if (!deps.messagingEnabled(owner)) notPermitted = 'switch-off'
+    } else if (!integration && !deps.messagingEnabled(owner)) notPermitted = 'switch-off'
   }
 
   // Flow control (PR #208), taken as a RESERVATION rather than a pure read: `checkFlowLimits`
@@ -783,8 +835,14 @@ export async function runDelivery(
   // to its board (`boardFlowSource`: one comment per session per window, whichever comment), and
   // its FAN-OUT budget to the comment itself — a person's turn is one comment, so an earlier
   // comment's in-flight holds and later sends (a queued flush) never spend a newer one's.
+  // A principal never has a turn to reset a fan-out budget, so each send carries its own (keyed by
+  // its sendId, like a board comment's by its comment). The PAIR window is the principal's.
   const flowSource = board ? boardFlowSource(board.projectId) : ident.sourceNodeId
-  const fanOutKey = board ? `${flowSource}:${board.commentId}` : flowSource
+  const fanOutKey = board
+    ? `${flowSource}:${board.commentId}`
+    : integration
+      ? `${flowSource}:${integration.sendId}`
+      : flowSource
   let retryAfterMs: number | undefined
   let reservation: { release(): void } | null = null
   if (!notPermitted) {
@@ -794,7 +852,7 @@ export async function runDelivery(
   }
 
   const owner = projects.find((p) => p.id === projectId)
-  const sourceNode = board ? undefined : owner?.nodes.find((n) => n.id === ident.sourceNodeId)
+  const sourceNode = board || integration ? undefined : owner?.nodes.find((n) => n.id === ident.sourceNodeId)
   const targetNode = owner?.nodes.find((n) => n.id === req.targetNodeId)
   // A plain terminal is not Claude by default. A hand-launched agent may still prove its runtime
   // identity through a hook event; absent either stored or runtime evidence, the binary predicate
@@ -858,7 +916,7 @@ export async function runDelivery(
         // The from-line is composed HERE from the store's title (oneLine'd inside buildEnvelope);
         // the renderer never supplies a string that ends up inside the frame — except a board
         // comment's author name, which is the local user's own presence name.
-        sourceTitle: board
+        sourceTitle: board || integration
           ? ident.sourceTitle
           : stationNotice
             ? STATION_NOTICE_FROM
@@ -870,7 +928,8 @@ export async function runDelivery(
         notPermitted,
         retryAfterMs,
         targetLive: await deps.hasLiveSession(req.targetNodeId),
-        ...(board ? { origin: 'board-comment' as const } : {})
+        ...(board ? { origin: 'board-comment' as const } : {}),
+        ...(integration ? { origin: 'integration' as const } : {})
       },
       delivery
     )
@@ -938,7 +997,10 @@ export async function deliverFromControl(
  *  SAME origin's gate chain — a queued board comment flushes as a board comment. */
 async function deliverWithQueue(
   req: MessagingRequest,
-  deps: AgentMessagingDeps
+  deps: AgentMessagingDeps,
+  /** An integration principal's choices: `queue: false` answers a busy target instead of queueing
+   *  it, and `ttlMs` is how long a queued message may wait (the queue caps it at 24 h). */
+  opts: { queue?: boolean; ttlMs?: number } = {}
 ): Promise<{ outcome: AgentMessageOutcome; reply: AgentMessageReply }> {
   const answer = (
     outcome: AgentMessageOutcome
@@ -950,7 +1012,7 @@ async function deliverWithQueue(
   const outcome = await runDelivery(req, deps)
   if (WROTE.has(outcome.kind))
     deps.onHandover?.({ phase: 'landed', verb: req.verb, targetNodeId: req.targetNodeId, at: startedAt })
-  const queue = deps.queue
+  const queue = opts.queue === false ? undefined : deps.queue
   if (queue) {
     const ident = requestIdentity(req)
     const queued = (hibernated: boolean, ttlMs?: number): Promise<AgentMessageOutcome> =>
@@ -967,7 +1029,7 @@ async function deliverWithQueue(
       )
     if (QUEUE_ON_BUSY.has(outcome.kind))
       return answer(
-        await queued(false, outcome.kind === 'targetNotStarted' ? NOT_STARTED_TTL_MS : undefined)
+        await queued(false, outcome.kind === 'targetNotStarted' ? NOT_STARTED_TTL_MS : opts.ttlMs)
       )
     if (req.verb === 'board-comment' && BOARD_QUEUE_ON.has(outcome.kind)) {
       const held = await queued(false)
@@ -983,6 +1045,20 @@ async function deliverWithQueue(
       return answer(await queued(true))
   }
   return answer(outcome)
+}
+
+/**
+ * Deliver an INTEGRATION PRINCIPAL's `send` (src/server/integration-service.ts): the whole gate
+ * chain, plus deliver-on-idle unless the principal asked not to queue. The caller authenticated the
+ * principal and cleaned the body; everything else — ownership (`principalOwnsTarget`), the pane
+ * probes, the envelope, the receipt — runs here exactly as for `send`.
+ */
+export async function deliverIntegrationMessage(
+  req: IntegrationMessage,
+  deps: AgentMessagingDeps,
+  opts: { queue?: boolean; ttlMs?: number } = {}
+): Promise<{ outcome: AgentMessageOutcome; reply: AgentMessageReply }> {
+  return deliverWithQueue(req, deps, opts)
 }
 
 /**

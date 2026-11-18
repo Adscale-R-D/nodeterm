@@ -10371,6 +10371,40 @@ hidden in a browser tab. IPC is under `pairing:` so `HOST_ONLY_CHANNEL_PREFIXES`
 relay. **Mobile:** the Inbox-open gap above needs an iOS release; an iOS follow-up could also give
 `kind: 'webhook'` its own Inbox row and tap target.
 
+## Integration principals (a local program drives sessions without being a node)
+
+A registered local program (an issue-tracker poller) opens agent sessions on a **Server Edition**
+canvas, sends them updates and closes them, keyed by its own opaque key, and keeps them across a
+server restart and a VM reboot. Full contract, wire shapes and setup: **`docs/integration-principal.md`**.
+Rules a refactor must not undo:
+- **Its own route and caller kind.** `/integration/<verb>` (open, resume, send, close, list) on the
+  hook server, behind the browser guard and the app bearer, then the principal's own identity
+  (`X-Nodeterm-Integration` + `-Token`). It never passes `identityGate`, the latch,
+  `requiresVerified` or the request-id ledger, and no `/control/` verb learns about principals. Only
+  the Server Edition with canvas control on registers the handler; elsewhere 404.
+- **Credential: a random token, only its SHA-256 stored** in `<dataDir>/integrations.json`, the token
+  in `integration-tokens/<name>` (0600 / 0700). Revoke = remove the entry, rotate = new token. The
+  CLI (`main.cjs integration …`) writes the files directly and the server re-reads the registry on
+  change. The `settings` verb cannot reach it (not settings.json).
+- **Ownership is DURABLE for a principal and only for a principal** (`core/integration/ledger.ts`,
+  `orchestration-state/integration-nodes.json`). The node-caller creator ledger stays process-local
+  on purpose; the difference is provenance (a registered token + userData vs a node id + a
+  git-shared file). The node's `integration` marker in `project.json` is display only, validated at
+  both serializer seams, never read as authority. `duplicateNode` drops it.
+- **Pane re-proof after a service restart** (`recordReprovedOwner`, the ONE attach that may record
+  pane ownership): only from `principalResume`, only when the live session's tmux
+  `#{session_created}` equals the stamp recorded at this server's fresh spawn. Otherwise refused
+  `session-replaced`. A session that is gone is restarted with `--resume <id>` (a fresh spawn proves
+  itself). Boot adopts nothing; the daemon calls `resume`.
+- **Its `send` is `integration-message`**, an internal verb outside `AGENT_MESSAGE_VERBS`, through the
+  whole `runDelivery` chain: scope = the project it opened the node in, creator check =
+  `principalOwnsTarget` (the ledger, also at flush and after restore — the verb is restorable), no
+  per-project messaging switch (registration is that consent), its own fan-out key per send, envelope
+  `from: integration <label>` / `reply-to: none`. A queued send's end goes to the principal's
+  pull-based outbox via `onQueuedResult`.
+- **One launch-line builder** (`agentLaunchLine` / `agentResumeLine` in the factory) for `open-agent`
+  and a principal's open/resume: a mode gate or override cannot apply to one and not the other.
+
 ## Hosted team relay (Server Edition as a relay host)
 
 A Server Edition core can host a team over the E2EE relay: a standing listener on the tunnel

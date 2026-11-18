@@ -14,6 +14,11 @@ import { parseEndpointEnv } from './hook-endpoint-parse'
 import { hookSockPath } from './hook-sock-path'
 import { browserRequestRefusal } from './hook-browser-guard'
 import { canControlCanvas, type AgentId } from '../../shared/agents/config'
+import {
+  INTEGRATION_NAME_HEADER,
+  INTEGRATION_ROUTE_PREFIX,
+  INTEGRATION_TOKEN_HEADER
+} from '../../shared/integration-principal'
 import { normalizeFor, type NormalizedAgentEvent } from '../../shared/agents/normalize'
 import {
   createGrokPermissionGate,
@@ -451,6 +456,10 @@ export class HookServer {
   private contextLinkHandler:
     | ((req: { verb: string; nodeId: string; args: Record<string, string> }) => Promise<string>)
     | null = null
+  /** See `setIntegrationHandler`. */
+  private integrationHandler:
+    | ((req: { verb: string; name: unknown; token: unknown; body: string }) => Promise<{ status: number; body: unknown }>)
+    | null = null
   /**
    * The shared-identity spine's handlers (see core/codex-identity-proxy.ts). Both are injected by
    * the shell, and BOTH routes below additionally require a per-node capability — see
@@ -684,6 +693,17 @@ export class HookServer {
     this.controlHandler = cb
   }
 
+  /**
+   * The INTEGRATION PRINCIPAL route (`/integration/<verb>`, docs/integration-principal.md). Its own
+   * prefix, its own caller identity (a registered principal, not a node): it never passes the node
+   * identity gate, the trust-on-first-proof latch, `requiresVerified` or the request-id ledger —
+   * the handler authenticates the principal itself before it does anything. Unset ⇒ 404 (every
+   * shell but a Server Edition with canvas control on).
+   */
+  setIntegrationHandler(cb: HookServer['integrationHandler']): void {
+    this.integrationHandler = cb
+  }
+
   setContextLinkHandler(cb: NonNullable<HookServer['contextLinkHandler']>): void {
     this.contextLinkHandler = cb
   }
@@ -864,6 +884,23 @@ export class HookServer {
           await readBody(req) // drain, so the probe's body is never left unread on the socket
           res.writeHead(204)
           res.end()
+          return
+        }
+        if (reqUrl.pathname.startsWith(INTEGRATION_ROUTE_PREFIX)) {
+          const verb = decodeURIComponent(reqUrl.pathname.slice(INTEGRATION_ROUTE_PREFIX.length))
+          const body = await readBody(req)
+          req.setTimeout(CONTROL_CEILING_MS, () => req.destroy())
+          const handler = this.integrationHandler
+          const reply = handler
+            ? await handler({
+                verb,
+                name: req.headers[INTEGRATION_NAME_HEADER],
+                token: req.headers[INTEGRATION_TOKEN_HEADER],
+                body
+              })
+            : { status: 404, body: { ok: false, error: 'integration-unavailable', message: 'integration principals are not served here' } }
+          res.writeHead(reply.status, { 'content-type': 'application/json' })
+          res.end(JSON.stringify(reply.body))
           return
         }
         if (reqUrl.pathname.startsWith('/codex-thread/')) {

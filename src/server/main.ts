@@ -1,6 +1,7 @@
 import { resolveConfig, resolveDataDir } from './config'
 import { startServer } from './index'
-import { runTeamCli, teamArgv } from './team-cli'
+import { runTeamCli, subcommandArgv, teamArgv } from './team-cli'
+import { runIntegrationCli } from './integration-cli'
 
 /**
  * Script entry point for the headless server. Kept separate from index.ts so that
@@ -22,6 +23,15 @@ async function main(): Promise<void> {
     // do not apply here. A `--data-dir` on the line overrides it (runTeamCli reads that itself).
     const code = await runTeamCli(team, resolveDataDir(process.env, []), (s) => console.log(s), (s) => console.error(s))
     // Let buffered output reach a pipe before exiting (stdout to a pipe is asynchronous on macOS).
+    await new Promise<void>((resolve) => process.stdout.write('', () => resolve()))
+    await new Promise<void>((resolve) => process.stderr.write('', () => resolve()))
+    process.exit(code)
+  }
+  const integration = subcommandArgv(argv, 'integration')
+  if (integration) {
+    // `main.cjs [--data-dir X] integration <command>`: register/manage integration principals
+    // (docs/integration-principal.md). Writes the registry file directly; no running server needed.
+    const code = await runIntegrationCli(integration, resolveDataDir(process.env, []), (s) => console.log(s), (s) => console.error(s))
     await new Promise<void>((resolve) => process.stdout.write('', () => resolve()))
     await new Promise<void>((resolve) => process.stderr.write('', () => resolve()))
     process.exit(code)

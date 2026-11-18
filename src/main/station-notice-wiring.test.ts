@@ -48,8 +48,10 @@ describe('both shells feed the station-failure monitor', () => {
     expect(cc).toContain('factory.openerOf(stationNodeId)')
     expect(cc).toContain('deliverStationNotice(notice, messaging)')
     expect(cc).toContain('pendingQuestionOf: (nodeId) => mirrorEntry(nodeId)?.pendingQuestion?.toolUseId')
-    expect(cc).toContain(
-      'messaging.onQueuedResult = (req, outcome) => stationNotices.onQueuedResult(req, outcome)'
+    // One callback feeds both listeners: the station monitor and the integration principals' outbox
+    // (docs/integration-principal.md). Dropping either leg would compile.
+    expect(cc).toMatch(
+      /messaging\.onQueuedResult = \(req, outcome\) => \{\s*stationNotices\.onQueuedResult\(req, outcome\)\s*integration\.onQueuedResult\(req, outcome\)\s*\}/
     )
     const idx = read('server/index.ts')
     expect(idx).toContain('registerStationNoticeIpc(platform, () => canvasControl?.stationNotices ?? null)')

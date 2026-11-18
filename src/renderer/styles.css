@@ -12668,6 +12668,23 @@ button.pull-checks__name {
   color: var(--text);
   background: rgba(var(--tint-rgb), 0.08);
 }
+/* "via <integration> · <key>" (components/IntegrationChip): the node was opened by an integration
+   principal. Same quiet outline as `#N`, not clickable; it shrinks before the title does. */
+.integration-chip {
+  margin-left: 6px;
+  padding: 0 6px;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border: 1px solid rgba(var(--tint-rgb), 0.16);
+  border-radius: 6px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
 /* Dev-server ports a node's session listens on (components/PortsChip) — canvas node header and
    the card modal header alike. Same quiet outline as `#N`; the port is monospace so `:5173` reads
    as an address, not a count. */

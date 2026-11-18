@@ -4,6 +4,7 @@ import type { PaneOwner } from '../../shared/agents/pane-owner-predicate'
 import { agentPidIn, isAgentPane } from '../../shared/agents/pane-owner-predicate'
 import { buildEnvelope, newFrameNonce } from './agent-message-envelope'
 import { BOARD_COMMENT_REPLY_TO } from '../../shared/board-comment'
+import { INTEGRATION_REPLY_TO } from '../../shared/integration-principal'
 import { PANE_PROBE_TIMEOUT_MS, probeWithin } from './pane-probe'
 import {
   decideDelivery,
@@ -99,7 +100,7 @@ export interface DeliveryRequest {
    * `from:` names the person with no node id, and `reply-to:` says there is no node to reply to —
    * never a gate: every check below runs the same for both origins.
    */
-  origin?: 'board-comment'
+  origin?: 'board-comment' | 'integration'
 }
 
 /**
@@ -456,14 +457,20 @@ export async function deliverAgentMessage(
     // herdr :116 — framing an unaware app made OpenCode read `A != B` as shell mode; `-p` frames
     // only when the pane's app really requested bracketed paste, so that failure mode is tmux's
     // to prevent now, not ours.
-    const fromBoard = req.origin === 'board-comment'
+    // An integration principal is no node either: same shape, its own reply-to sentence.
+    const fromBoard = req.origin === 'board-comment' || req.origin === 'integration'
     const payload = buildEnvelope({
       nonce: (deps.nonce ?? newFrameNonce)(),
       // A board comment's source id is its TRACE identity (`board-comment:<id>`), not a node: it is
       // never printed as one, and `reply-to` says plainly that there is nothing to reply to.
       sourceId: fromBoard ? undefined : req.sourceNodeId,
       sourceTitle: req.sourceTitle,
-      replyTo: fromBoard ? BOARD_COMMENT_REPLY_TO : req.sourceNodeId,
+      replyTo:
+        req.origin === 'integration'
+          ? INTEGRATION_REPLY_TO
+          : fromBoard
+            ? BOARD_COMMENT_REPLY_TO
+            : req.sourceNodeId,
       body: req.body
     })
     // The receipt watch opens BEFORE the bytes go out. A fast target can submit its next turn while

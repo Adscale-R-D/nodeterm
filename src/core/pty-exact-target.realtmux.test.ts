@@ -136,6 +136,12 @@ describe.skipIf(!TMUX || process.platform === 'win32')('node-keyed tmux verbs re
     })
   })
 
+  it('the creation stamp (integration pane re-proof) is read exactly: the victim\'s for its id, none for a prefix', async () => {
+    const { stdout } = await tmux(['display-message', '-p', '-t', `=${sessionName(victimKey)}:`, '#{session_created}'])
+    expect(await manager.sessionCreatedAt(victimKey)).toBe(Number(stdout.trim()))
+    expect(await manager.sessionCreatedAt(prefixKey)).toBeNull()
+  })
+
   it('capture, pane command, pane cwd and the pane-owner read answer nothing for the prefix id', async () => {
     expect(await manager.captureSession(prefixKey)).toBe('')
     expect(await manager.captureSnapshot(prefixKey)).toBe('')

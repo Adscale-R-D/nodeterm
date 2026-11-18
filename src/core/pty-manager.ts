@@ -6726,6 +6726,30 @@ export class PtyManager {
   }
 
   /**
+   * The tmux `#{session_created}` stamp (epoch seconds) of this node's LOCAL session, by the exact
+   * target, or `null` for every uncertainty (no session, no tmux, Zellij, the session host, a remote
+   * node, an unreadable answer). The integration principal records it right after a fresh spawn and
+   * compares it on `resume` to re-prove a pane after a service restart (`recordReprovedOwner`).
+   */
+  async sessionCreatedAt(persistKey: string): Promise<number | null> {
+    const live = this.liveSessionForPersistKey(persistKey)
+    if (this.isZellij(persistKey, live)) return null
+    if (live?.sshRemote || live?.sessionHost || !this.tmuxPath) return null
+    try {
+      const { stdout } = await runAsync(
+        this.tmuxPath,
+        ['-L', TMUX_SOCKET, 'display-message', '-p', '-t', exactPaneTarget(sessionName(persistKey)), '#{session_created}'],
+        { timeout: PROBE_TIMEOUT_MS }
+      )
+      // An exact miss exits 0 with every format EMPTY (display-message), which reads as null here.
+      const v = stdout.trim()
+      return /^\d{1,12}$/.test(v) ? Number(v) : null
+    } catch {
+      return null
+    }
+  }
+
+  /**
    * Terminate the foreground agent process group in a node's tmux pane without writing anything
    * into the terminal. This is intentionally narrower than recycling the session: model switching
    * first stops the harness by PID, then uses the existing recycle path to rebuild the shell with

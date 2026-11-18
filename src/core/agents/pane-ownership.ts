@@ -69,6 +69,21 @@ export function recordFreshSpawnOwner(nodeId: string, ownerProjectId: string | u
   owners.set(nodeId, ownerProjectId)
 }
 
+/**
+ * Re-record the owner of a pane an INTEGRATION PRINCIPAL's server spawned in an EARLIER run, after a
+ * service restart where tmux survived (docs/integration-principal.md, decision D1-a). The ONE place
+ * an attach may record — and only because the caller proved, against the durable integration
+ * ledger, that the live tmux session is the very one that run freshly spawned: its
+ * `#{session_created}` stamp equals the one recorded at that spawn. A pane's shell cannot change
+ * that stamp (it is tmux server state, unlike a session-env var); a session killed and recreated
+ * under the same `nt-<id>` name carries a new stamp and is refused. Callers: the integration
+ * service's `resume` only. Never call this on a renderer's or an agent's attach.
+ */
+export function recordReprovedOwner(nodeId: string, ownerProjectId: string): void {
+  if (!nodeId || !ownerProjectId) return
+  owners.set(nodeId, ownerProjectId)
+}
+
 /** The project that provably spawned this node's pane this run, or `undefined` when unproven
  *  (never spawned here, or only ever attached — e.g. after a restart). Undefined MUST fail closed
  *  at every gate: an unprovable owner is not an absent restriction. */

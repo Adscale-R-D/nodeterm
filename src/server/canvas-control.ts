@@ -47,6 +47,11 @@ import {
   type ServerEditionControlActions
 } from './control-unsupported'
 import { HeadlessNodeFactory } from './headless-node-factory'
+import { openIntegrationLedger } from '../core/integration/ledger'
+import { PrincipalRegistryReader } from '../core/integration/registry'
+import { saveUpload } from '../core/uploads'
+import { transcriptPresence } from '../core/transcript-reader'
+import { createIntegrationService, type IntegrationHttpReply, type IntegrationRequest } from './integration-service'
 import { sendSettledEnvelope } from './settled-envelope'
 import { serverSettingsControl } from './settings-control'
 import {
@@ -91,6 +96,8 @@ export interface ServerCanvasControl {
   stationOutcomes: StationOutcomeStore
   /** Stations with unfinished handed-over work in THIS server run (plain `--after` holds on them). */
   stationHandovers: StationHandoverTracker
+  /** The `/integration/<verb>` handler (docs/integration-principal.md). */
+  integration(req: IntegrationRequest): Promise<IntegrationHttpReply>
   stop(): void
 }
 
@@ -273,6 +280,27 @@ export async function initServerCanvasControl(
     deliver: (notice: Parameters<typeof deliverStationNotice>[0]) =>
       deliverStationNotice(notice, messaging)
   }
+  // Integration principals (docs/integration-principal.md): a registered local program that owns the
+  // nodes it opened through a DURABLE ledger, not through a node of its own. Its `send` rides this
+  // same messaging service; the ledger is its creator check, on first attempt and on every flush.
+  const integrationLedger = openIntegrationLedger(platform().userDataDir, {
+    standDown: deps.ownsDurableState === false
+  })
+  messaging.principalOwnsTarget = (principal, nodeId) => integrationLedger.ledger.owns(principal, nodeId)
+  const integration = createIntegrationService({
+    registry: new PrincipalRegistryReader(platform().userDataDir),
+    ledger: integrationLedger.ledger,
+    factory,
+    messaging,
+    canvases: () => deps.workspaceStore.persistedCanvases(),
+    sessionVerdict: (nodeId) => deps.ptyManager.sessionVerdict(nodeId),
+    mirror: (nodeId) => mirrorEntry(nodeId),
+    lastTurnErrored: (nodeId) => factory.lastTurnErroredFor(nodeId),
+    paneOwnerProject,
+    transcriptPresence: (sessionId) => transcriptPresence(sessionId),
+    savePrompt: (name, base64) => saveUpload(platform().userDataDir, name, base64)
+  })
+
   const stationNotices = new StationNoticeMonitor({
     now: () => Date.now(),
     recipientFor: opener.recipientFor,
@@ -283,7 +311,10 @@ export async function initServerCanvasControl(
     exists: (nodeId) => deps.workspaceStore.projectIdsForNode(nodeId).length > 0
   })
   stationNotices.start()
-  messaging.onQueuedResult = (req, outcome) => stationNotices.onQueuedResult(req, outcome)
+  messaging.onQueuedResult = (req, outcome) => {
+    stationNotices.onQueuedResult(req, outcome)
+    integration.onQueuedResult(req, outcome)
+  }
   // Every listener is wired: bring back what the previous run queued.
   await restoreDeliveryQueue(queue, queueFile)
 
@@ -387,6 +418,7 @@ export async function initServerCanvasControl(
     stationNotices,
     stationOutcomes,
     stationHandovers,
+    integration: (req) => integration.handle(req),
     stop: () => {
       factory.stop()
       queue.resetForTests()
@@ -395,6 +427,7 @@ export async function initServerCanvasControl(
       queueFile.dispose()
       outcomesFile.dispose()
       handoversFile.dispose()
+      integrationLedger.dispose()
     }
   }
 }

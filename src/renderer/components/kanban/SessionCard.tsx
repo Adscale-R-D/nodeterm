@@ -14,6 +14,7 @@ import type { GitHubPullStatus, PullStatusFreshness } from '@shared/github-pull-
 import { PullRefChip } from './PullStatusBadges'
 import type { IssueRef } from '@shared/github-issue-ref'
 import { IssueRefChip } from '../IssueRefChip'
+import { IntegrationChip } from '../IntegrationChip'
 import { cardBadge } from '../../lib/kanbanStatusChips'
 import { cardAssignees } from '@shared/kanban-labels'
 import { TeamProgressChip } from '../TeamProgressChip'
@@ -181,6 +182,7 @@ export const SessionCard = memo(function SessionCard({
         {session.kind === 'terminal' && onOpenIssue && (
           <IssueRefChip issueRef={session.issueRef} onOpen={onOpenIssue} />
         )}
+        {session.kind === 'terminal' && <IntegrationChip marker={session.integration} />}
         {session.kind === 'terminal' && team && team.length > 0 && onTravel && (
           <TeamProgressChip stations={team} onTravel={onTravel} statusStore={statusStore} />
         )}

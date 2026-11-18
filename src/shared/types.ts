@@ -613,6 +613,13 @@ export interface CanvasNodeState {
    */
   issueRef?: import('./github-issue-ref').IssueRef
   /**
+   * Opened by an INTEGRATION PRINCIPAL (docs/integration-principal.md): which principal, and the
+   * caller's key for the item. DISPLAY ONLY — a chip on the node and its card. Git-shared, so
+   * hostile input: `normalizeIntegrationMarker` runs at both serializer seams, and nothing ever reads
+   * it as authority (the server's durable integration ledger is the authority).
+   */
+  integration?: import('./integration-principal').IntegrationMarker
+  /**
    * The node id of the agent that OPENED this node through a canvas-control open verb
    * (`open-agent`/`open-claude`/`open-terminal`, `spawn-team`, `verify`) — recorded where that verb
    * draws its lineage rope. It is what lets the app tell the right agent when this station stops

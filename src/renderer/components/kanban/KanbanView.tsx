@@ -44,6 +44,7 @@ import { IconAgent, IconBranch, IconExternal, IconNote, IconTerminal, IconWeb } 
 import { issueWorktreeMenuRow, type IssueWorktreeMenuAnswer } from '../../lib/issueWorktree'
 import type { GitHubCloseReason, GitHubIssueCardView } from '@shared/github-issues'
 import { issueKey, issueRefFromHtmlUrl, issueUrl, type IssueRef } from '@shared/github-issue-ref'
+import type { IntegrationMarker } from '@shared/integration-principal'
 import { NO_ISSUE_RUNS, boundRunsByIssue, type IssueRun } from '../../lib/issueRuns'
 import { useGitHubIssues } from '../../state/githubIssues'
 import { agentStatusForProject, useSession, useSessionRegistryVersion } from '../../session/session'
@@ -85,6 +86,8 @@ export interface KanbanSession {
    *  `CanvasNodeState.issueRef`. The issue card shows the session as a live chip, and this card shows
    *  `#N`: the board is the canvas's other view of the same binding. */
   issueRef?: IssueRef
+  /** Opened by an integration principal: shown as a chip, never read as authority. */
+  integration?: IntegrationMarker
   /** The node's user-chosen icon (see @shared/node-icon). The board is the canvas's other view of
    *  the same session, so a session the user marked with an icon carries it here too. Terminal
    *  cards only in v1 — that is the only kind whose canvas node offers the action, and a card

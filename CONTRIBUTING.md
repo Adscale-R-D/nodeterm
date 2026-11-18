@@ -1448,6 +1448,20 @@ the confirm sheet is its whole authority. It is off unless the user turns on
 - **What the human sees is what runs.** No hidden Unicode in a prompt or path (`hasHiddenText`), no
   path that can reach another machine, and the permission mode shown is re-checked at landing.
 
+## Integration principals (Server Edition)
+
+A local program can drive sessions on a Server Edition canvas through `/integration/<verb>`, without
+being a node (`docs/integration-principal.md`). Before touching it:
+
+- **Keep it a separate caller kind.** Do not route principals through `/control/`, and do not teach a
+  canvas-control verb about them. Their auth is the registry token, not node identity.
+- **Its ownership is durable, a node caller's is not.** Do not "fix" the node creator ledger to
+  survive restarts by reading `project.json`; the principal's ledger is in userData and that is the
+  whole difference. The node's `integration` field is a display marker, never authority.
+- **Only `principalResume` may record pane ownership on an attach**, and only when tmux's
+  `#{session_created}` matches the recorded stamp.
+- **The token never goes on a command line**, in code, docs or examples.
+
 ## User-owned agent settings
 
 **Nothing writes into an agent's global config except `src/core/agent-integrations.ts`** (issue

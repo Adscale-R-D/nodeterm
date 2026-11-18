@@ -12675,7 +12675,7 @@ button.pull-checks__name {
   padding: 0 6px;
   flex: 0 1 auto;
   min-width: 0;
-  max-width: 220px;
+  max-width: 140px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

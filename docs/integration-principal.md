@@ -11,8 +11,8 @@ caller's own id for one item, such as `APP-1234` or `gh:owner/repo#567`).
 Surfaces: **Server Edition only**, and only while canvas control is on
 (`NODETERM_SERVER_CANVAS_CONTROL=1` / `--canvas-control`). On any other shell, or with canvas control
 off, the route answers 404. The desktop is out of scope (its open path lives in the renderer).
-Mobile: N/A. The canvas node, its kanban card and the card modal show a "via <principal> · <key>"
-chip.
+Mobile: N/A. The canvas node, its kanban card and the card modal show a chip with the principal's
+name (`sink`); its tooltip carries the full "via <label> · <key>".
 
 ## Why it is not a node
 
@@ -240,4 +240,4 @@ same data dir stands down, like the other orchestration facts).
 | `src/server/headless-node-factory.ts` | `principalOpen` / `principalResume` / `principalClose` |
 | `src/server/integration-service.ts` | authentication, validation, the five verbs |
 | `src/server/integration-cli.ts` | `main.cjs integration …` |
-| `src/renderer/components/IntegrationChip.tsx` | the "via …" chip |
+| `src/renderer/components/IntegrationChip.tsx` | the principal-name chip (full "via … · key" in its tooltip) |

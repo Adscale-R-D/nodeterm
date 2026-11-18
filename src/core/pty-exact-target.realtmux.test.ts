@@ -142,6 +142,25 @@ describe.skipIf(!TMUX || process.platform === 'win32')('node-keyed tmux verbs re
     expect(await manager.sessionCreatedAt(prefixKey)).toBeNull()
   })
 
+  it('the creation stamp is stable across reads, and a session killed and recreated under the same name gets a new one', async () => {
+    const key = `${base}-restamp`
+    await tmux(['new-session', '-d', '-s', sessionName(key), '-x', '80', '-y', '20'])
+    try {
+      const first = await manager.sessionCreatedAt(key)
+      expect(first).toEqual(expect.any(Number))
+      expect(await manager.sessionCreatedAt(key)).toBe(first)
+      await tmux(['kill-session', '-t', `=${sessionName(key)}`])
+      // The stamp has one-second resolution (documented residual): wait past it.
+      await sleep(1100)
+      await tmux(['new-session', '-d', '-s', sessionName(key), '-x', '80', '-y', '20'])
+      const second = await manager.sessionCreatedAt(key)
+      expect(second).toEqual(expect.any(Number))
+      expect(second).not.toBe(first)
+    } finally {
+      await tmux(['kill-session', '-t', `=${sessionName(key)}`]).catch(() => {})
+    }
+  })
+
   it('capture, pane command, pane cwd and the pane-owner read answer nothing for the prefix id', async () => {
     expect(await manager.captureSession(prefixKey)).toBe('')
     expect(await manager.captureSnapshot(prefixKey)).toBe('')

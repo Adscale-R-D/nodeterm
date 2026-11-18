@@ -25,6 +25,8 @@ class FakePty implements HeadlessPty {
   readonly destroyed: string[] = []
   readonly live = new Set<string>()
   readonly stamps = new Map<string, number>()
+  /** What owns each pane: a shell until a launch line is submitted, then that agent. */
+  readonly paneCmd = new Map<string, string>()
   verdict: 'present' | 'absent' | 'unknown' | null = null
   /** Called on every createHeadless, before the session exists. */
   onCreate: (() => void) | null = null
@@ -44,7 +46,10 @@ class FakePty implements HeadlessPty {
   writeHeadless(key: string, data: string): boolean {
     if (!this.live.has(key)) return false
     if (data === '\r') {
-      this.sends.push({ nodeId: key, text: this.lines.get(key) ?? '' })
+      const line = this.lines.get(key) ?? ''
+      this.sends.push({ nodeId: key, text: line })
+      const agent = /^(claude|codex|gemini)\b/.exec(line)?.[1]
+      if (agent) this.paneCmd.set(key, agent)
       this.lines.set(key, '')
       return true
     }
@@ -63,11 +68,14 @@ class FakePty implements HeadlessPty {
     const key = options.persistKey!
     const fresh = !this.live.has(key)
     this.live.add(key)
-    if (fresh) this.stamps.set(key, this.nextStamp++)
+    if (fresh) {
+      this.stamps.set(key, this.nextStamp++)
+      this.paneCmd.delete(key)
+    }
     return { sessionId: `pty-${key}`, fresh, persistent: true }
   }
-  async paneCommand(): Promise<string | null> {
-    return 'bash'
+  async paneCommand(key: string): Promise<string | null> {
+    return this.paneCmd.get(key) ?? 'bash'
   }
   async sessionExists(key: string): Promise<boolean> {
     return this.live.has(key)
@@ -79,6 +87,7 @@ class FakePty implements HeadlessPty {
   async destroySession(_c: number | null, nodeId: string): Promise<void> {
     this.live.delete(nodeId)
     this.stamps.delete(nodeId)
+    this.paneCmd.delete(nodeId)
     this.destroyed.push(nodeId)
   }
   async sessionVerdict(key: string): Promise<'present' | 'absent' | 'unknown'> {
@@ -324,6 +333,31 @@ describe('HeadlessNodeFactory — integration principals', () => {
       ws.projects[0].nodes = []
       await store.save(ws)
       expect(await factory.principalResume({ projectId: 'project-1', nodeId, agent: 'claude' })).toMatchObject({ ok: false, error: 'node-missing' })
+    })
+
+    it('session alive but the AGENT exited (OOM, crash, /exit): relaunched on its conversation', async () => {
+      const { nodeId, sessionId, stamp } = await openOne()
+      pty.paneCmd.set(nodeId, 'bash')
+      const r = await factory.principalResume({
+        projectId: 'project-1',
+        nodeId,
+        agent: 'claude',
+        agentSessionId: sessionId,
+        sessionCreated: stamp,
+        transcriptPresence: async () => 'present'
+      })
+      expect(r).toMatchObject({ ok: true, outcome: 'resumed', reason: 'agent-exited' })
+      expect(pty.sends.at(-1)!.text).toBe(`claude --resume ${sessionId}`)
+      // The same session: no second spawn of a new one.
+      expect(pty.stamps.get(nodeId)).toBe(stamp)
+    })
+
+    it('an unreadable pane is never typed into', async () => {
+      const { nodeId, stamp } = await openOne()
+      pty.paneCommand = async () => null
+      const before = pty.sends.length
+      expect(await factory.principalResume({ projectId: 'project-1', nodeId, agent: 'claude', sessionCreated: stamp })).toMatchObject({ ok: true, outcome: 'already-running' })
+      expect(pty.sends).toHaveLength(before)
     })
 
     it('a session this server already holds is already-running', async () => {

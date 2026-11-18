@@ -69,6 +69,15 @@ describe.skipIf(process.platform === 'win32')('/integration/ on the real hook se
     expect(seen).toEqual([])
   })
 
+  it('a handler that throws answers 500 JSON, never the hooks\' empty 204', async () => {
+    hookServer.setIntegrationHandler(async () => {
+      throw new Error('boom')
+    })
+    const r = await post('/integration/open', bearer())
+    expect(r.status).toBe(500)
+    expect(JSON.parse(r.text)).toMatchObject({ ok: false, error: 'internal' })
+  })
+
   it('no handler registered (every shell but a Server Edition with canvas control): 404', async () => {
     hookServer.setIntegrationHandler(null)
     const r = await post('/integration/list', bearer())

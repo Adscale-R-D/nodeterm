@@ -10395,7 +10395,8 @@ Rules a refactor must not undo:
   pane ownership): only from `principalResume`, only when the live session's tmux
   `#{session_created}` equals the stamp recorded at this server's fresh spawn. Otherwise refused
   `session-replaced`. A session that is gone is restarted with `--resume <id>` (a fresh spawn proves
-  itself). Boot adopts nothing; the daemon calls `resume`.
+  itself); a live session whose pane positively reads as a shell (the agent died) gets the same
+  resume line typed. Boot adopts nothing; the daemon calls `resume`.
 - **Its `send` is `integration-message`**, an internal verb outside `AGENT_MESSAGE_VERBS`, through the
   whole `runDelivery` chain: scope = the project it opened the node in, creator check =
   `principalOwnsTarget` (the ledger, also at flush and after restore — the verb is restorable), no

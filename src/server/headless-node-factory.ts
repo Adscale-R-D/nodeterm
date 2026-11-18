@@ -2500,66 +2500,90 @@ export class HeadlessNodeFactory {
       if (verdict === 'unknown') return refuse('session-unreadable', 'tmux could not be asked whether the session exists; retry later')
 
       if (verdict === 'present') {
-        if (this.attached.has(node.id)) return { ok: true, outcome: 'already-running' }
-        const stamp = await this.stampOf(node.id)
-        if (input.sessionCreated === undefined || stamp === undefined || stamp !== input.sessionCreated)
-          return refuse(
-            'session-replaced',
-            'a session with this node\'s name is running, but it is not the one this server started for it ' +
-              '(its creation stamp differs or was never recorded), so its pane cannot be proven. Close the key and open it again.'
-          )
-        const attached = await this.attach(project, node).catch(() => null)
-        if (!attached?.sessionId) return refuse('attach-failed', 'the running session could not be attached')
-        recordReprovedOwner(node.id, project.id)
-        return { ok: true, outcome: 'attached', sessionCreated: stamp }
+        let outcome: 'already-running' | 'attached' = 'already-running'
+        if (!this.attached.has(node.id)) {
+          const stamp = await this.stampOf(node.id)
+          if (input.sessionCreated === undefined || stamp === undefined || stamp !== input.sessionCreated)
+            return refuse(
+              'session-replaced',
+              'a session with this node\'s name is running, but it is not the one this server started for it ' +
+                '(its creation stamp differs or was never recorded), so its pane cannot be proven. Close the key and open it again.'
+            )
+          const attached = await this.attach(project, node).catch(() => null)
+          if (!attached?.sessionId) return refuse('attach-failed', 'the running session could not be attached')
+          recordReprovedOwner(node.id, project.id)
+          outcome = 'attached'
+        }
+        // The session is alive, but is the AGENT? An OOM kill, a crash or a typed /exit leaves the
+        // pane at a bare shell (the DROPPED case). Only a positive shell answer relaunches — an
+        // unreadable pane is never typed into.
+        const pane = await this.deps.ptyManager.paneCommand(node.id).catch(() => null)
+        if (isLaunchShell(pane)) return this.relaunchAgent(project, node, input, 'agent-exited')
+        const sessionCreated = await this.stampOf(node.id)
+        return { ok: true, outcome, ...(sessionCreated !== undefined ? { sessionCreated } : {}) }
       }
 
       // Absent: the session is gone. A client this server held on it died with it (the agent's own
       // exit ended the session), so the stale mark must not turn the relaunch into a no-op attach.
       this.attached.delete(node.id)
-      // Resume the conversation when we know it and it still exists.
-      const ctx = await this.launchContext(project, input.agent)
-      let sessionId = input.agentSessionId
-      let reason: string | undefined
-      if (sessionId && input.agent === 'claude' && input.transcriptPresence) {
-        const presence = await input.transcriptPresence(sessionId).catch(() => 'unknown' as const)
-        if (presence === 'absent') {
-          sessionId = undefined
-          reason = 'transcript-missing'
-        }
-      } else if (!sessionId) reason = 'no-session-id'
-      let command: string
-      let newSessionId: string | undefined
-      if (sessionId) {
-        command = agentResumeLine(ctx, input.agent, sessionId, node.agentModel)
-      } else {
-        const fresh = agentLaunchLine(ctx, input.agent, { model: node.agentModel })
-        command = fresh.command
-        newSessionId = fresh.mintedSessionId
-      }
-      let launched: HeadlessLaunchResult | undefined
-      try {
-        launched = await this.launch(project, node, command)
-      } catch {
-        launched = undefined
-      }
-      if (!launched) return refuse('launch-failed', 'the agent could not be started (spawn-failed)')
-      if (launched.outcome === 'failed')
-        return refuse('launch-failed', `the agent could not be started (${launched.reason})`)
-      if (launched.fresh) this.awaitingFirstWorking.add(node.id)
-      if (newSessionId) {
-        const id = newSessionId
-        await this.savePatches([{ projectId: project.id, nodeId: node.id, apply: (n) => { n.agentSessionId = id; return true } }])
-      }
-      const sessionCreated = await this.stampOf(node.id)
-      return {
-        ok: true,
-        outcome: sessionId ? 'resumed' : 'started-fresh',
-        ...(reason ? { reason } : {}),
-        ...(sessionCreated !== undefined ? { sessionCreated } : {}),
-        ...(newSessionId ? { agentSessionId: newSessionId } : {})
-      }
+      return this.relaunchAgent(project, node, input)
     })
+  }
+
+  /**
+   * Start the agent again in `node`'s pane: on its conversation (`--resume <id>`) when one is known
+   * and — for claude — its transcript is not definitely gone, else a fresh agent with a new minted
+   * id (persisted on the node). Through the shared launcher: a dead session is freshly spawned (which
+   * records pane ownership), a live one is typed into only when a shell owns its pane.
+   */
+  private async relaunchAgent(
+    project: Project,
+    node: CanvasNodeState,
+    input: PrincipalResumeInput,
+    why?: string
+  ): Promise<PrincipalResumeResult> {
+    const refuse = (error: string, message: string): PrincipalResumeResult => ({ ok: false, outcome: 'refused', error, message })
+    const ctx = await this.launchContext(project, input.agent)
+    let sessionId = input.agentSessionId
+    let reason: string | undefined = why
+    if (sessionId && input.agent === 'claude' && input.transcriptPresence) {
+      const presence = await input.transcriptPresence(sessionId).catch(() => 'unknown' as const)
+      if (presence === 'absent') {
+        sessionId = undefined
+        reason = 'transcript-missing'
+      }
+    } else if (!sessionId) reason = 'no-session-id'
+    let command: string
+    let newSessionId: string | undefined
+    if (sessionId) {
+      command = agentResumeLine(ctx, input.agent, sessionId, node.agentModel)
+    } else {
+      const fresh = agentLaunchLine(ctx, input.agent, { model: node.agentModel })
+      command = fresh.command
+      newSessionId = fresh.mintedSessionId
+    }
+    let launched: HeadlessLaunchResult | undefined
+    try {
+      launched = await this.launch(project, node, command)
+    } catch {
+      launched = undefined
+    }
+    if (!launched) return refuse('launch-failed', 'the agent could not be started (spawn-failed)')
+    if (launched.outcome === 'failed')
+      return refuse('launch-failed', `the agent could not be started (${launched.reason})`)
+    if (launched.fresh) this.awaitingFirstWorking.add(node.id)
+    if (newSessionId) {
+      const id = newSessionId
+      await this.savePatches([{ projectId: project.id, nodeId: node.id, apply: (n) => { n.agentSessionId = id; return true } }])
+    }
+    const sessionCreated = await this.stampOf(node.id)
+    return {
+      ok: true,
+      outcome: sessionId ? 'resumed' : 'started-fresh',
+      ...(reason ? { reason } : {}),
+      ...(sessionCreated !== undefined ? { sessionCreated } : {}),
+      ...(newSessionId ? { agentSessionId: newSessionId } : {})
+    }
   }
 
   /**

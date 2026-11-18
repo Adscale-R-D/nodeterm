@@ -891,14 +891,25 @@ export class HookServer {
           const body = await readBody(req)
           req.setTimeout(CONTROL_CEILING_MS, () => req.destroy())
           const handler = this.integrationHandler
-          const reply = handler
-            ? await handler({
-                verb,
-                name: req.headers[INTEGRATION_NAME_HEADER],
-                token: req.headers[INTEGRATION_TOKEN_HEADER],
-                body
-              })
-            : { status: 404, body: { ok: false, error: 'integration-unavailable', message: 'integration principals are not served here' } }
+          let reply: { status: number; body: unknown }
+          try {
+            reply = handler
+              ? await handler({
+                  verb,
+                  name: req.headers[INTEGRATION_NAME_HEADER],
+                  token: req.headers[INTEGRATION_TOKEN_HEADER],
+                  body
+                })
+              : { status: 404, body: { ok: false, error: 'integration-unavailable', message: 'integration principals are not served here' } }
+          } catch (e) {
+            // NOT the hooks' fail-open 204: a principal parses every reply as JSON, and an empty 204
+            // would read as success. Whether the action happened is unknown, so say so.
+            console.warn('[hook-server] integration handler threw', e)
+            reply = {
+              status: 500,
+              body: { ok: false, error: 'internal', message: 'the request failed inside the server; its effect is unknown — check with list before retrying' }
+            }
+          }
           res.writeHead(reply.status, { 'content-type': 'application/json' })
           res.end(JSON.stringify(reply.body))
           return

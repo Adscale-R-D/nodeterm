@@ -117,7 +117,11 @@ Idempotent; call it for every open key whenever the daemon starts.
   `#{session_created}` stamp equals the one recorded at this server's fresh spawn. A pane's shell
   cannot change that stamp; a session killed and recreated under the same name carries a new one.
   Mismatch or no recorded stamp: refused `session-replaced` (409); close the key and open it again.
-- **Session gone (reboot, reaped, the agent exited)**: the agent is restarted on its conversation
+- **Session running but the agent exited** (an OOM kill, a crash, a typed `/exit`: a bare shell owns
+  the pane): after the checks above, the agent is relaunched in that same session on its
+  conversation, `resumed` / `started-fresh` with `reason: 'agent-exited'` (or `transcript-missing`).
+  An unreadable pane is never typed into.
+- **Session gone (reboot, reaped)**: the agent is restarted on its conversation
   (`claude --resume <id>`, codex/gemini likewise when an id is known): `resumed`. When claude reports
   that transcript definitely gone, or no id is known, a fresh agent starts with a new id:
   `started-fresh` with `reason: 'transcript-missing' | 'no-session-id'`. A fresh spawn proves the

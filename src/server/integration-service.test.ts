@@ -64,7 +64,10 @@ function setup(over: Partial<IntegrationServiceDeps> = {}) {
         } else if (spec.frame) frameId = spec.frame.id
         w.canvas.get(spec.projectId)!.push({ id: nodeId, ...(frameId ? { parentId: frameId } : {}) })
         beforeLaunch({ nodeId, frameId, frameCreated, agentSessionId: `sess-${seq}-0000-0000` })
-        return { ok: true, nodeId, frameId, frameCreated, agentSessionId: `sess-${seq}-0000-0000`, session: 'started', sessionCreated: 1700 }
+        return {
+          ok: true, nodeId, frameId, frameCreated, agentSessionId: `sess-${seq}-0000-0000`, session: 'started', sessionCreated: 1700,
+          ...(spec.column !== undefined ? { column: spec.column.toLowerCase() === 'jira' ? 'col-jira' : 'missing' } : {})
+        }
       },
       principalResume: async (input) => {
         w.resumes.push(input)
@@ -138,6 +141,21 @@ describe('integration service — open', () => {
     expect(w.opens).toHaveLength(1)
   })
 
+  it('passes column through and returns the column it landed in, or missing', async () => {
+    const { call, w } = setup()
+    expect((await call('open', { key: 'A', agent: 'claude', column: 'Jira' })).body).toMatchObject({ ok: true, result: { column: 'col-jira' } })
+    expect(w.opens[0].column).toBe('Jira')
+    expect((await call('open', { key: 'B', agent: 'claude', column: 'Backlog' })).body).toMatchObject({ ok: true, result: { column: 'missing' } })
+  })
+
+  it('an existing upsert does not move the card (and reports no column)', async () => {
+    const { call, w } = setup()
+    await call('open', { key: 'A', agent: 'claude', column: 'Jira' })
+    const r = await call('open', { key: 'A', agent: 'claude', column: 'PR reviews' })
+    expect(r.body).toEqual({ ok: true, result: { key: 'A', nodeId: 'term-1', projectId: 'p1', status: 'existing' } })
+    expect(w.opens).toHaveLength(1)
+  })
+
   it('two concurrent opens of one key make one node', async () => {
     const { call, w } = setup()
     const [a, b] = await Promise.all([call('open', { key: 'APP-1', agent: 'claude' }), call('open', { key: 'APP-1', agent: 'claude' })])
@@ -173,7 +191,10 @@ describe('integration service — open', () => {
       [{ key: 'A', agent: 'claude', cwd: '/not/a/dir' }, 'bad-cwd'],
       [{ key: 'A', agent: 'claude', model: 'x; rm -rf /' }, 'bad-model'],
       [{ key: 'A', agent: 'claude', group: 'a‮b' }, 'bad-group'],
-      [{ key: 'A', agent: 'claude', title: 'a\nb' }, 'bad-title']
+      [{ key: 'A', agent: 'claude', title: 'a\nb' }, 'bad-title'],
+      [{ key: 'A', agent: 'claude', column: 'x'.repeat(49) }, 'bad-column'],
+      [{ key: 'A', agent: 'claude', column: ' ' }, 'bad-column'],
+      [{ key: 'A', agent: 'claude', column: 5 }, 'bad-column']
     ]
     for (const [body, error] of cases) expect((await call('open', body)).body).toMatchObject({ ok: false, error })
     expect(w.opens).toEqual([])

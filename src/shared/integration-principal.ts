@@ -106,6 +106,9 @@ export interface IntegrationOpenRequest {
   group?: string
   /** Node title. Default: "<key> · <agent label>". */
   title?: string
+  /** File the session's kanban card at the TOP of the existing column with this title
+   *  (case-insensitive, ≤ 48 chars). Never creates a column. Ignored by an `existing` upsert. */
+  column?: string
 }
 
 export interface IntegrationOpenResult {
@@ -118,6 +121,9 @@ export interface IntegrationOpenResult {
   session?: 'started' | 'failed'
   reason?: string
   frameId?: string
+  /** Only when `column` was asked for and the node was created: the column id it was filed in, or
+   *  'missing' (no column has that title; the card is in Ungrouped). */
+  column?: string
 }
 
 export interface IntegrationKeyRequest {

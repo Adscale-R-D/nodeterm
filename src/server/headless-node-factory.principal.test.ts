@@ -206,6 +206,63 @@ describe('HeadlessNodeFactory — integration principals', () => {
     expect(overlap).toBe(false)
   })
 
+  describe('column', () => {
+    const withBoard = async (): Promise<void> => {
+      const ws = await load()
+      ws.projects[0].nodes.push({ id: 'term-human', kind: 'terminal', position: { x: 0, y: 0 }, size: { width: 640, height: 440 }, title: 'Mine', color: '#0a84ff', group: null, tags: [] })
+      ws.projects[0].kanban = {
+        columns: [
+          { id: 'col-reviews', title: 'PR reviews', color: '#0a84ff' },
+          { id: 'col-jira', title: 'Jira', color: '#30d158' }
+        ],
+        assignments: [{ nodeId: 'term-human', columnId: 'col-jira' }]
+      } as never
+      await store.save(ws)
+    }
+
+    it('files the card at the TOP of an existing column, matched by title case-insensitively', async () => {
+      await withBoard()
+      const r = await factory.principalOpen(spec({ column: '  jIRA ' }), () => {})
+      expect(r).toMatchObject({ ok: true, column: 'col-jira' })
+      const k = (await load()).projects[0].kanban!
+      const jira = k.assignments.filter((a) => a.columnId === 'col-jira').map((a) => a.nodeId)
+      expect(jira).toEqual([r.ok ? r.nodeId : '', 'term-human'])
+      expect(k.columns.map((c) => c.id)).toEqual(['col-reviews', 'col-jira'])
+    })
+
+    it('a title no column has creates nothing and leaves the card in Ungrouped', async () => {
+      await withBoard()
+      const r = await factory.principalOpen(spec({ column: 'Backlog' }), () => {})
+      expect(r).toMatchObject({ ok: true, column: 'missing' })
+      const k = (await load()).projects[0].kanban!
+      expect(k.columns.map((c) => c.title)).toEqual(['PR reviews', 'Jira'])
+      expect(k.assignments.some((a) => a.nodeId === (r.ok ? r.nodeId : ''))).toBe(false)
+    })
+
+    it('a project with no board at all answers missing and seeds no board', async () => {
+      const r = await factory.principalOpen(spec({ column: 'Jira' }), () => {})
+      expect(r).toMatchObject({ ok: true, column: 'missing' })
+      expect((await load()).projects[0].kanban).toBeUndefined()
+    })
+
+    it('without a column, the result carries no column field', async () => {
+      await withBoard()
+      const r = await factory.principalOpen(spec(), () => {})
+      expect(r.ok && 'column' in r).toBe(false)
+    })
+
+    it('closing the last card leaves the person-made column in place', async () => {
+      await withBoard()
+      const ws = await load()
+      ws.projects[0].kanban!.assignments = []
+      await store.save(ws)
+      const r = await factory.principalOpen(spec({ column: 'PR reviews' }), () => {})
+      if (!r.ok) throw new Error('open failed')
+      await factory.principalClose({ projectId: 'project-1', nodeId: r.nodeId })
+      expect((await load()).projects[0].kanban!.columns.map((c) => c.id)).toEqual(['col-reviews', 'col-jira'])
+    })
+  })
+
   it('refuses an unknown project and an SSH project, writing nothing', async () => {
     expect(await factory.principalOpen(spec({ projectId: 'nope' }), () => {})).toMatchObject({ ok: false, error: 'project-unavailable' })
     const ws = await load()

@@ -202,6 +202,9 @@ export interface PrincipalOpenSpec {
   model?: string
   /** Place the node in this frame: an existing principal frame's id, or a title to create one. */
   frame?: { id: string } | { title: string }
+  /** File the node's kanban card at the TOP of the column with this title (case-insensitive). A
+   *  title no column has creates nothing: the card stays in Ungrouped. */
+  column?: string
 }
 
 export type PrincipalOpenResult =
@@ -216,6 +219,8 @@ export type PrincipalOpenResult =
       reason?: string
       /** tmux `#{session_created}` of the fresh spawn, when one was read. */
       sessionCreated?: number
+      /** Only when a column was asked for: the id it was filed in, or 'missing'. */
+      column?: string
     }
   | { ok: false; error: string; message: string }
 
@@ -2446,6 +2451,18 @@ export class HeadlessNodeFactory {
         }
       }
 
+      // The card's column: an EXISTING column by title, case-insensitive (the `assign` verb's title
+      // rule). Never created — a principal's columns are made by a person — and so never swept.
+      let column: string | undefined
+      if (spec.column !== undefined) {
+        const want = spec.column.trim().toLowerCase()
+        const hit = target.kanban?.columns.find((c) => typeof c.title === 'string' && c.title.trim().toLowerCase() === want)
+        if (hit && target.kanban) {
+          target.kanban = assignNode(target.kanban, node.id, hit.id, null)
+          column = hit.id
+        } else column = 'missing'
+      }
+
       if (!(await this.castAndSave(workspace)))
         return { ok: false, error: 'not-saved', message: 'nothing was opened: the canvas could not be written (canvas control is stopping)' }
       beforeLaunch({ nodeId: node.id, ...(frameId ? { frameId } : {}), frameCreated, ...(mintedSessionId ? { agentSessionId: mintedSessionId } : {}) })
@@ -2470,7 +2487,8 @@ export class HeadlessNodeFactory {
         ...(mintedSessionId ? { agentSessionId: mintedSessionId } : {}),
         session: delivered ? 'started' : 'failed',
         ...(delivered ? {} : { reason: launched && launched.outcome !== 'delivered' ? launched.reason : 'spawn-failed' }),
-        ...(sessionCreated !== undefined ? { sessionCreated } : {})
+        ...(sessionCreated !== undefined ? { sessionCreated } : {}),
+        ...(column !== undefined ? { column } : {})
       }
     })
   }

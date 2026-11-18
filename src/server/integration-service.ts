@@ -155,6 +155,8 @@ export function createIntegrationService(deps: IntegrationServiceDeps): {
       return fail(400, 'bad-group', 'group: one printable line of at most 48 characters')
     if (b.title !== undefined && (typeof b.title !== 'string' || !b.title.trim() || b.title.length > 120 || TITLE_BAD.test(b.title)))
       return fail(400, 'bad-title', 'title: one printable line of at most 120 characters')
+    if (b.column !== undefined && (typeof b.column !== 'string' || !b.column.trim() || b.column.length > 48 || TITLE_BAD.test(b.column)))
+      return fail(400, 'bad-column', 'column: one printable line of at most 48 characters')
 
     return withKeyLock(`${p.name}|${key}`, async () => {
       const existing = liveRow(p.name, key)
@@ -193,7 +195,8 @@ export function createIntegrationService(deps: IntegrationServiceDeps): {
           ...(typeof b.cwd === 'string' ? { cwd: b.cwd } : {}),
           ...(promptFile ? { promptFile } : {}),
           ...(typeof b.model === 'string' ? { model: b.model } : {}),
-          ...(frame ? { frame } : {})
+          ...(frame ? { frame } : {}),
+          ...(typeof b.column === 'string' ? { column: b.column } : {})
         },
         (r) => {
           const at = now()
@@ -221,7 +224,8 @@ export function createIntegrationService(deps: IntegrationServiceDeps): {
         status: 'created',
         session: opened.session,
         ...(opened.reason ? { reason: opened.reason } : {}),
-        ...(opened.frameId ? { frameId: opened.frameId } : {})
+        ...(opened.frameId ? { frameId: opened.frameId } : {}),
+        ...(opened.column !== undefined ? { column: opened.column } : {})
       }
       return ok(result)
     })

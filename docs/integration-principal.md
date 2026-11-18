@@ -88,17 +88,28 @@ or token); 404 `unknown-key` / `unknown-verb` / `integration-unavailable`; 409 a
   project?: string,   // a registered project id; default: the principal's first
   cwd?: string,       // absolute existing directory; default: the project's folder
   prompt?: string,    // ≤ 256 KiB; written to a file the launch reads, so newlines survive
-  model?: string, group?: string /* frame title, ≤ 48 chars */, title?: string /* ≤ 120 */ }
+  model?: string, group?: string /* frame title, ≤ 48 chars */, title?: string /* ≤ 120 */,
+  column?: string /* an existing kanban column's title, ≤ 48 chars */ }
 // result
 { key, nodeId, projectId, status: 'created' | 'existing',
-  session?: 'started' | 'failed', reason?: string, frameId?: string }
+  session?: 'started' | 'failed', reason?: string, frameId?: string,
+  column?: string /* the column id, or 'missing'; only when `column` was asked and the node created */ }
 ```
 
 An upsert by key: if the principal already has an open node for the key, it answers `existing` and
 changes nothing — it does not look at the session, so call `resume` when the daemon (re)starts. A key whose node a person removed opens a new node. `group` creates a frame with
 that title on first use and puts later nodes into the same frame. The default title is
 `<key> · <agent label>`. The node is written and the ledger row recorded **before** anything is
-spawned. `session: 'failed'` keeps the launch on the node for its Run now, with `reason`
+spawned.
+
+`column` files the new session's kanban card at the **top** of the target project's existing column
+with that title, matched case-insensitively (the `assign` verb's title rule). It never creates a
+column: when no column has that title the node opens normally, its card stays in Ungrouped, and the
+result says `column: 'missing'`. Create the columns by hand; a person-made column is never removed
+automatically, so it stays even when its last card closes. An `existing` upsert does not move the
+card and returns no `column`.
+
+`session: 'failed'` keeps the launch on the node for its Run now, with `reason`
 (`no-shell`, `line-too-long`, `spawn-failed`, …).
 
 ### `POST /integration/resume`

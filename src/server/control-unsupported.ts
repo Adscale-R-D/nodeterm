@@ -107,6 +107,13 @@ export interface ServerEditionControlActions {
   /** `issues` / `prs` (core/github/control-read.ts): the board's GitHub lane, read-only, from the
    *  GitHub service's cache. The caller's own project only (this edition keeps no grant ledger). */
   githubRead(verb: 'issues' | 'prs', sourceNodeId: string, args: Record<string, string>): Promise<ServerControlReply>
+  /** A node grants itself to an integration principal, revokes, or lists its grants
+   *  (src/server/integration-grant.ts). The CALLER is the only node a grant can name. */
+  integrationGrant(
+    verb: 'integration-grant' | 'integration-revoke' | 'integration-grants',
+    sourceNodeId: string,
+    args: Record<string, string>
+  ): Promise<ServerControlReply>
   deliver(input: {
     verb: 'send' | 'reply' | 'notify'
     sourceNodeId: string
@@ -134,7 +141,10 @@ const SERVER_V1_VERBS: ReadonlySet<string> = new Set([
   'run',
   'report-outcome',
   'issues',
-  'prs'
+  'prs',
+  'integration-grant',
+  'integration-revoke',
+  'integration-grants'
 ])
 
 /** A permanent, verb-specific refusal used only while canvas control itself is enabled. */
@@ -210,6 +220,10 @@ export function createServerEditionControlHandler(actions: ServerEditionControlA
       case 'issues':
       case 'prs':
         return actions.githubRead(command.verb, nodeId, command.args)
+      case 'integration-grant':
+      case 'integration-revoke':
+      case 'integration-grants':
+        return actions.integrationGrant(command.verb, nodeId, command.args)
       case 'send':
       case 'reply':
       case 'notify':

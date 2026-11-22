@@ -1,4 +1,5 @@
 import { registerUpdatePrepIpc } from './update-prep'
+import { INTEGRATION_GRANT_VERBS } from '../shared/integration-principal'
 import { installOpenLinks } from './open-link-wiring'
 import { nodetermUrlFromArgv } from '../shared/open-link'
 import { createRemoteContextEnsure } from '../core/remote-context-ensure'
@@ -4606,6 +4607,12 @@ app.whenReady().then(async () => {
     // framed node out to the top level, and a bad `--width` would be the renderer's to explain.
     const geometryRefusal = geometryArgsRefusal(verb, args)
     if (geometryRefusal) return { ok: false, error: geometryRefusal, message: geometryRefusal }
+    // Integration principals live on the Server Edition only (docs/integration-principal.md): there is
+    // no ledger here to grant a node to. A permanent, named refusal — never a forward.
+    if ((INTEGRATION_GRANT_VERBS as readonly string[]).includes(verb)) {
+      const msg = `${verb}-unsupported: integration principals are a nodeterm Server Edition feature; this desktop has none. Do not retry.`
+      return { ok: false, error: msg, message: msg }
+    }
     // A station's report about ITSELF: recorded in main's store, board-logged on its own card, and
     // never forwarded — there is no canvas work in it, and the renderer hears the store's push.
     if (verb === 'report-outcome') {

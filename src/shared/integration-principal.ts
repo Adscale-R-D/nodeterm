@@ -34,6 +34,11 @@ export function isIntegrationVerb(v: string): v is IntegrationVerb {
   return (INTEGRATION_VERBS as readonly string[]).includes(v)
 }
 
+/** The CANVAS-CONTROL verbs a node uses to grant ITSELF to a principal (src/server/integration-grant.ts).
+ *  Node-authenticated, verified-only, Server Edition only. */
+export const INTEGRATION_GRANT_VERBS = ['integration-grant', 'integration-revoke', 'integration-grants'] as const
+export type IntegrationGrantVerb = (typeof INTEGRATION_GRANT_VERBS)[number]
+
 /** The agents a principal may open: exactly the Server Edition's own open allowlist. */
 export const INTEGRATION_AGENTS = ['claude', 'codex', 'gemini'] as const
 export type IntegrationAgent = (typeof INTEGRATION_AGENTS)[number]
@@ -248,6 +253,8 @@ export interface IntegrationCloseResult {
   closed: true
   /** The node had already been removed from the canvas (by a person); the ledger row is closed. */
   nodeMissing?: boolean
+  /** An adopted row: only the grant ended; the node and its session were not touched. */
+  adopted?: true
 }
 
 export interface IntegrationListRequest {
@@ -261,7 +268,10 @@ export interface IntegrationListRow {
   key: string
   nodeId: string
   projectId: string
-  agent: IntegrationAgent
+  /** Absent on an adopted row whose node runs another agent. */
+  agent?: IntegrationAgent
+  /** The node granted itself to the principal (`integration-grant`); it was not opened by it. */
+  adopted?: true
   agentSessionId?: string
   state: 'open' | 'closed'
   createdAt: number

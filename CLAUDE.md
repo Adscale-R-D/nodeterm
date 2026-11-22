@@ -10421,6 +10421,14 @@ Rules a refactor must not undo:
   no path from a log entry to a pane exists (the board-comment rule), and a mention token in its text
   is flattened to plain `@label` anyway. No local board log (a cwd-less or SSH project) is 409
   `board-log-unavailable`, never a silent `false`.
+- **A NODE can grant itself to a principal** (`integration-grant` / `integration-revoke` /
+  `integration-grants`, `src/server/integration-grant.ts`, verified-only, Server Edition only — the
+  desktop refuses them by name). The grant is an `adopted: true` ledger row for the CALLER; nothing
+  can name another node, and no principal verb claims one. The principal's creator check
+  (`ledger.owns`) then passes for `send`/`comment`/`link-pull`, but `close` ends only the grant and
+  `resume` is refused (`adopted-node`): an adopted node's lifecycle stays with whoever opened it.
+  Latest grant wins (`moved`); a key the principal opened itself is `key-owned`; one open row per
+  node (`node-held`). Revocation is immediate because the queue's flush re-asks `ledger.owns`.
 - **It can DECLARE a card's pull requests** (`open.pulls`, `link-pull`, `unlink-pull`): the board's
   third PR link source beside the worktree branch and the issue. Rules: (1) the declaration lives on
   the principal's ledger row (`pulls` + `pullRepository`), never in `project.json`, and a closed key

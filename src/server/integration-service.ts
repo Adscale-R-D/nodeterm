@@ -303,6 +303,9 @@ export function createIntegrationService(deps: IntegrationServiceDeps): {
     return withKeyLock(`${p.name}|${key}`, async () => {
       const row = deps.ledger.openNode(p.name, key)
       if (!row) return unknownKey(key)
+      // A node that granted itself is not the principal's to relaunch: its lifecycle stays with
+      // whoever opened it.
+      if (row.adopted) return fail(409, 'adopted-node', `key ${key} is a node that granted itself to this principal; resume is for nodes the principal opened`)
       const r = await deps.factory.principalResume({
         projectId: row.projectId,
         nodeId: row.nodeId,
@@ -370,6 +373,12 @@ export function createIntegrationService(deps: IntegrationServiceDeps): {
     return withKeyLock(`${p.name}|${key}`, async () => {
       const row = deps.ledger.openNode(p.name, key)
       if (!row) return unknownKey(key)
+      // An adopted node: end the grant only. The node and its session stay with whoever opened it.
+      if (row.adopted) {
+        deps.ledger.close(row.nodeId)
+        const result: IntegrationCloseResult = { key, nodeId: row.nodeId, closed: true, adopted: true }
+        return ok(result)
+      }
       const parentId = nodeOnCanvas(row.projectId, row.nodeId)?.parentId
       const frameRow = parentId ? deps.ledger.ownerOf(parentId) : undefined
       const frameId = frameRow && frameRow.kind === 'frame' && frameRow.principal === p.name ? frameRow.nodeId : undefined
@@ -467,7 +476,8 @@ export function createIntegrationService(deps: IntegrationServiceDeps): {
         key: r.key,
         nodeId: r.nodeId,
         projectId: r.projectId,
-        agent: r.agentId as IntegrationAgent,
+        ...(r.agentId ? { agent: r.agentId } : {}),
+        ...(r.adopted ? { adopted: true as const } : {}),
         ...(r.agentSessionId ? { agentSessionId: r.agentSessionId } : {}),
         state: r.state,
         createdAt: r.createdAt,

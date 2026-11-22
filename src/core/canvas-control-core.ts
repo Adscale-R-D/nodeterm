@@ -2,6 +2,7 @@ import { LINK_ENDPOINT_NOT_FOUND } from '../shared/canvas-link'
 // Pure core for agent canvas control: the verb model, request validation, and the standalone
 // CLI source. No electron imports, so this module + CONTROL_CLI_SCRIPT are unit-testable.
 // Electron/ipc/server wiring lives in canvas-control.ts + index.ts + hook-server.ts.
+import { INTEGRATION_GRANT_VERBS } from '../shared/integration-principal'
 import { HOOK_CURL_HEADERS_SH } from './agents/hook-curl-config-sh'
 import { CODEX_SANDBOX_HINT_SH } from './agents/hook-sandbox-hint-sh'
 import {
@@ -186,6 +187,28 @@ function issueBindingDocLines(): string[] {
  * serve, shared by both agent-facing bodies. The filter values, limits and the untrusted-text
  * sentence are RENDERED from the module that enforces them, so the text cannot drift from the gate.
  */
+/**
+ * A node granting ITSELF to an integration principal (src/server/integration-grant.ts). The verb names
+ * come from `INTEGRATION_GRANT_VERBS`, so a renamed verb cannot leave stale help.
+ */
+function integrationGrantDocLines(): string[] {
+  const [grant, revoke, grants] = INTEGRATION_GRANT_VERBS
+  return [
+    'Integration grants (nodeterm Server Edition only; the desktop refuses them by name):',
+    `- \`${grant} --principal <name> --key <key>\` — let a registered local integration (e.g. a ticket`,
+    '  poller) deliver events for its KEY to THIS node: it can then `send` you updates, post card comments',
+    '  and link pull requests to your card, as on sessions it opened itself. It can never close your node',
+    '  or relaunch your session. Only you can grant yourself; nothing can grant another node. The',
+    '  integration must be registered for your project. Replies `granted`, `already-granted` or `moved`',
+    '  (the key was granted to another node and now points here: the latest grant wins). Refused:',
+    '  `key-owned` (the integration opened a node for that key itself), `node-held` (you already have a',
+    '  grant; revoke it first), `principal-not-registered`.',
+    `- \`${revoke} --principal <name> --key <key>\` — end your own grant (only the node that holds it can).`,
+    `- \`${grants}\` — list your grants (principal and key).`,
+    '  Every flag takes a value.'
+  ]
+}
+
 function githubReadDocLines(): string[] {
   return [
     'The board\'s GitHub lane (read-only; this project\'s repository, from what the board has already',
@@ -517,6 +540,9 @@ export type ControlVerb =
   | 'report-outcome'
   | 'issues'
   | 'prs'
+  | 'integration-grant'
+  | 'integration-revoke'
+  | 'integration-grants'
 
 export interface ControlCommand {
   verb: ControlVerb
@@ -583,7 +609,13 @@ const VERBS: ControlVerb[] = [
   // linked cards. Answered by the shell's control handler from the GitHub service's cache — no
   // GitHub request, no canvas. Verified-only; `--project` own-or-granted.
   'issues',
-  'prs'
+  'prs',
+  // A node grants ITSELF to an integration principal (docs/integration-principal.md), lists or
+  // revokes its own grants. Answered by the Server Edition's control handler from the durable
+  // integration ledger; refused by name on the desktop (no principals there). Verified-only.
+  'integration-grant',
+  'integration-revoke',
+  'integration-grants'
 ]
 
 /**
@@ -734,6 +766,9 @@ export function parseControlRequest(
   if (browserRefusal) return { error: browserRefusal }
   if (v === 'close' && !args.node) return { error: 'close requires --node <id>' }
   if (v === 'run' && !args.node) return { error: 'run requires --node <id>' }
+  if ((v === 'integration-grant' || v === 'integration-revoke') && (!args.principal || !args.key)) {
+    return { error: `${v} requires --principal <name> --key <key>` }
+  }
   if (v === 'write' && !args.node) return { error: 'write requires --node <id>' }
   if (v === 'write' && !args.text) return { error: 'write requires --text' }
   if ((v === 'show-image' || v === 'show-video') && !args.path) {
@@ -1105,6 +1140,7 @@ export function buildCanvasControlInstructions(shimPath: string): string {
     '  board metadata only — it never moves the node on the canvas or changes its group. On Server',
     '  Edition you may assign only cards you opened (the ownership rule above).',
     ...githubReadDocLines(),
+    ...integrationGrantDocLines(),
     ...settingsVerbDocLines(),
     ...reportIssueDocLines(),
     ...browserVerbDocLines(),
@@ -1753,6 +1789,8 @@ ${boardCommentGuidanceLines().map((l) => `  ${l}`).join('\n')}
   changes its group, or touches the running session. On Server Edition you may assign only cards
   you opened (the ownership rule above).
 ${githubReadDocLines().join('\n')}
+
+${integrationGrantDocLines().join('\n')}
 ${settingsVerbDocLines().join('\n')}
 ${reportIssueDocLines().join('\n')}
 ${browserVerbDocLines().join('\n')}

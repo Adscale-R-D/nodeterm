@@ -1463,6 +1463,8 @@ being a node (`docs/integration-principal.md`). Before touching it:
 - **Only `principalResume` may record pane ownership on an attach**, and only when tmux's
   `#{session_created}` matches the recorded stamp.
 - **The token never goes on a command line**, in code, docs or examples.
+- **A principal never claims a node.** Only the node grants itself (`integration-grant`, verified),
+  and an adopted row must never reach `principalClose` / `principalResume`.
 - **Declared PR links (`link-pull`) live on the ledger row, never in `project.json`**, and reach the
   board only through `GitHubPullBoard.declared`. Add a new PR link source to `pullsForCard`
   (`src/shared/pull-card-links.ts`), not to a component: the card, the modal, auto-move and the `prs`

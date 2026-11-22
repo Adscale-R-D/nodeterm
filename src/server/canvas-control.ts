@@ -52,6 +52,7 @@ import { PrincipalRegistryReader } from '../core/integration/registry'
 import { saveUpload } from '../core/uploads'
 import { transcriptPresence } from '../core/transcript-reader'
 import { createIntegrationService, type IntegrationHttpReply, type IntegrationRequest } from './integration-service'
+import { createIntegrationGrantHandler } from './integration-grant'
 import { sendSettledEnvelope } from './settled-envelope'
 import { serverSettingsControl } from './settings-control'
 import {
@@ -301,8 +302,9 @@ export async function initServerCanvasControl(
     standDown: deps.ownsDurableState === false
   })
   messaging.principalOwnsTarget = (principal, nodeId) => integrationLedger.ledger.owns(principal, nodeId)
+  const principalRegistry = new PrincipalRegistryReader(platform().userDataDir)
   const integration = createIntegrationService({
-    registry: new PrincipalRegistryReader(platform().userDataDir),
+    registry: principalRegistry,
     ledger: integrationLedger.ledger,
     factory,
     messaging,
@@ -338,6 +340,19 @@ export async function initServerCanvasControl(
   // Every listener is wired: bring back what the previous run queued.
   await restoreDeliveryQueue(queue, queueFile)
 
+  // A node granting ITSELF to a principal (`integration-grant`): the same durable ledger, the same
+  // registry the principal authenticates against.
+  const grantHandler = createIntegrationGrantHandler({
+    registry: principalRegistry,
+    ledger: integrationLedger.ledger,
+    placements: (nodeId) =>
+      deps.workspaceStore.persistedCanvases().flatMap((c) => {
+        const node = c.nodes.find((n) => n.id === nodeId)
+        return node ? [{ projectId: c.id, ...(node.agentId ? { agentId: node.agentId } : {}) }] : []
+      }),
+    agentIdOf: (nodeId) => mirrorEntry(nodeId)?.agentId
+  })
+
   const actions: ServerEditionControlActions = {
     openProject: (sourceNodeId, args, verified) =>
       factory.openProject(sourceNodeId, args, verified),
@@ -372,6 +387,7 @@ export async function initServerCanvasControl(
       ),
     // The board's GitHub lane, read-only, from the GitHub service's cache — the same core module the
     // desktop answers with. Own project only: this edition keeps no `open-project` grant ledger.
+    integrationGrant: async (verb, sourceNodeId, args) => grantHandler(verb, sourceNodeId, args),
     githubRead: async (verb, sourceNodeId, args) => {
       const read = deps.githubRead
       if (!read) {

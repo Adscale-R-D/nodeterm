@@ -35,8 +35,12 @@ export interface IntegrationNodeRecord {
   nodeId: string
   /** Machine-local project entry id. */
   projectId: string
-  /** node only. */
+  /** node only. Absent on an ADOPTED row whose node runs another agent. */
   agentId?: IntegrationAgent
+  /** node only: the node GRANTED itself to the principal (`integration-grant`, a verified node
+   *  acting for itself) rather than being opened by it. The principal may send, comment and link PRs
+   *  on it; it never closes the node or relaunches its session — `close` ends only the grant. */
+  adopted?: true
   /** node only: the conversation id minted at open (resume target after a reboot). */
   agentSessionId?: string
   createdAt: number
@@ -94,8 +98,11 @@ export function sanitizeNodeRecord(raw: unknown): IntegrationNodeRecord | null {
     state: r.state
   }
   if (r.kind === 'node') {
-    if (typeof r.agentId !== 'string' || !(INTEGRATION_AGENTS as readonly string[]).includes(r.agentId)) return null
-    out.agentId = r.agentId as IntegrationAgent
+    const knownAgent = typeof r.agentId === 'string' && (INTEGRATION_AGENTS as readonly string[]).includes(r.agentId)
+    if (r.adopted === true) out.adopted = true
+    // An opened node always runs one of the principal's agents; an adopted one may run anything.
+    else if (!knownAgent) return null
+    if (knownAgent) out.agentId = r.agentId as IntegrationAgent
     if (typeof r.agentSessionId === 'string' && SESSION_ID_RE.test(r.agentSessionId)) out.agentSessionId = r.agentSessionId
     if (isFiniteNumber(r.sessionCreated)) out.sessionCreated = r.sessionCreated
     if (r.state === 'open' && typeof r.pullRepository === 'string' && REPOSITORY_RE.test(r.pullRepository)) {
@@ -259,6 +266,67 @@ export class IntegrationLedger {
     }
     if (gone.length) this.save()
     return gone
+  }
+
+  /**
+   * A node GRANTS itself to a principal for a key (`integration-grant`). The caller has already been
+   * checked (verified node, principal registered for its project). The latest grant wins:
+   *  - the key is open on THIS node, adopted → `already-granted`;
+   *  - the key is open on another node, adopted → that row closes and the key MOVES here (its
+   *    declared PRs move with it: a restarted lane continues the same work) → `moved`;
+   *  - the key is open on a node the principal OPENED → `key-owned`, nothing changes;
+   *  - this node already holds another open row (a different key or principal, or it was opened by a
+   *    principal) → `node-held`, nothing changes: one open row per node.
+   */
+  grant(input: {
+    principal: string
+    key: string
+    nodeId: string
+    projectId: string
+    agentId?: IntegrationAgent
+  }): 'granted' | 'already-granted' | 'moved' | 'key-owned' | 'node-held' {
+    const existing = this.openNode(input.principal, input.key)
+    if (existing && !existing.adopted) return 'key-owned'
+    if (existing && existing.nodeId === input.nodeId) return 'already-granted'
+    const held = this.ownerOf(input.nodeId)
+    if (held) return 'node-held'
+    let carried: Pick<IntegrationNodeRecord, 'pulls' | 'pullRepository'> = {}
+    if (existing) {
+      if (existing.pulls?.length && existing.pullRepository) {
+        carried = { pulls: [...existing.pulls], pullRepository: existing.pullRepository }
+      }
+      existing.state = 'closed'
+      existing.closedAt = this.now()
+      withoutPulls(existing)
+    }
+    this.rows.push({
+      principal: input.principal,
+      kind: 'node',
+      key: input.key,
+      nodeId: input.nodeId,
+      projectId: input.projectId,
+      ...(input.agentId ? { agentId: input.agentId } : {}),
+      adopted: true,
+      createdAt: this.now(),
+      state: 'open',
+      ...carried
+    })
+    this.save()
+    return existing ? 'moved' : 'granted'
+  }
+
+  /** The node ends its own grant. `not-yours` when the key's open adopted row is another node's. */
+  revokeGrant(principal: string, key: string, nodeId: string): 'revoked' | 'unknown-key' | 'not-yours' {
+    const row = this.openNode(principal, key)
+    if (!row || !row.adopted) return 'unknown-key'
+    if (row.nodeId !== nodeId) return 'not-yours'
+    this.close(row.nodeId)
+    return 'revoked'
+  }
+
+  /** The open adopted rows of a node. */
+  grantsOf(nodeId: string): IntegrationNodeRecord[] {
+    return this.rows.filter((r) => r.kind === 'node' && r.state === 'open' && r.adopted && r.nodeId === nodeId)
   }
 
   /** The pull requests declared on an open node row, for `repository` (another repository's = none). */

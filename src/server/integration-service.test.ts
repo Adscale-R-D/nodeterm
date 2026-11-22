@@ -4,7 +4,7 @@ import { IntegrationLedger } from '../core/integration/ledger'
 import { resetMessageFlow } from '../core/agents/agent-message-flow'
 import { resetAgentMessageTraceForTests } from '../core/agents/agent-message-trace'
 import { MANAGED_SCRIPT_REVISION } from '../core/agents/hooks/managed-script'
-import type { AgentMessagingDeps } from '../core/agents/agent-messaging'
+import { createDeliveryQueue, onMessagingAgentEvent, type AgentMessagingDeps } from '../core/agents/agent-messaging'
 import type { PrincipalEntry } from '../core/integration/registry'
 import { INTEGRATION_COMMENT_TEXT_MAX, INTEGRATION_MESSAGE_VERB } from '../shared/integration-principal'
 import { BOARD_LOG_TEXT_MAX, type BoardLogEntry } from '../shared/types'
@@ -117,7 +117,7 @@ function setup(over: Partial<IntegrationServiceDeps> = {}) {
   })
   const call = (verb: string, body: unknown, token = TOKEN) =>
     service.handle({ verb, name: 'sink', token, body: JSON.stringify(body) })
-  return { w, ledger, service, call }
+  return { w, ledger, service, call, messaging }
 }
 
 beforeEach(() => {
@@ -458,4 +458,88 @@ describe('integration service — declared pull requests', () => {
     expect(await call('link-pull', { key: 'PR-12', pull: 13 })).toMatchObject({ status: 404 })
     expect(ledger.declaredForProject('p1')).toEqual([])
   })
+})
+
+
+describe('integration service — a node that granted itself (adopted rows)', () => {
+  /** A `/ship` lane the sink did NOT open, on p1, granted to the sink for key LANE-1. */
+  function adopted() {
+    const t = setup()
+    t.w.canvas.get('p1')!.push({ id: 'lane-1' })
+    expect(t.ledger.grant({ principal: 'sink', key: 'LANE-1', nodeId: 'lane-1', projectId: 'p1' })).toBe('granted')
+    return t
+  }
+  const result = (r: { body: unknown }) => (r.body as { result: Record<string, unknown> }).result
+
+  it('send passes the creator check and delivers; comment and link-pull work', async () => {
+    const { call, w } = adopted()
+    expect(result(await call('send', { key: 'LANE-1', text: 'PR #12 got a review' }))).toMatchObject({ nodeId: 'lane-1', outcome: 'delivered', accepted: true })
+    expect(w.sent).toHaveLength(1)
+    expect((await call('comment', { key: 'LANE-1', text: 'see PR #12' })).status).toBe(200)
+    expect(result(await call('link-pull', { key: 'LANE-1', pull: 12 }))).toEqual({ key: 'LANE-1', nodeId: 'lane-1', pulls: [12] })
+  })
+
+  it('list marks the row adopted', async () => {
+    const { call } = adopted()
+    const rows = (result(await call('list', {})) as { rows: Array<Record<string, unknown>> }).rows
+    expect(rows).toEqual([expect.objectContaining({ key: 'LANE-1', nodeId: 'lane-1', adopted: true })])
+    expect(rows[0]).not.toHaveProperty('agent')
+  })
+
+  it('close ends the grant only: the node and its session are untouched', async () => {
+    const { call, w, ledger } = adopted()
+    expect(await call('close', { key: 'LANE-1' })).toEqual({ status: 200, body: { ok: true, result: { key: 'LANE-1', nodeId: 'lane-1', closed: true, adopted: true } } })
+    expect(w.closes).toEqual([])
+    expect(w.canvas.get('p1')!.some((n) => n.id === 'lane-1')).toBe(true)
+    expect(ledger.openNode('sink', 'LANE-1')).toBeUndefined()
+  })
+
+  it('resume is refused: the principal never relaunches a node it did not open', async () => {
+    const { call, w } = adopted()
+    expect(await call('resume', { key: 'LANE-1' })).toMatchObject({ status: 409, body: { error: 'adopted-node' } })
+    expect(w.resumes).toEqual([])
+  })
+
+  it('open with the adopted key answers existing and does nothing else', async () => {
+    const { call, w } = adopted()
+    const r = await call('open', { key: 'LANE-1', agent: 'claude', title: 'renamed', column: 'Jira' })
+    expect(r.body).toEqual({ ok: true, result: { key: 'LANE-1', nodeId: 'lane-1', projectId: 'p1', status: 'existing' } })
+    expect(w.opens).toEqual([])
+  })
+
+  it('a node removed from the canvas closes its adopted row', async () => {
+    const { call, w, ledger } = adopted()
+    w.canvas.set('p1', [])
+    expect(await call('send', { key: 'LANE-1', text: 'x' })).toMatchObject({ status: 404 })
+    expect(ledger.grantsOf('lane-1')).toEqual([])
+  })
+
+  it('control: with the grant intact the same queued send IS delivered at the flush', async () => {
+    const { call, w, messaging } = adopted()
+    messaging.queue = createDeliveryQueue(messaging)
+    w.state = 'working'
+    expect(result(await call('send', { key: 'LANE-1', text: 'later' }))).toMatchObject({ outcome: 'queued' })
+    w.state = 'done'
+    onMessagingAgentEvent({ nodeId: 'lane-1', state: 'done', verified: true }, messaging.queue)
+    await new Promise((r) => setTimeout(r, 50))
+    expect(w.sent).toHaveLength(1)
+  })
+
+  for (const how of ['revoked', 'moved'] as const) {
+    it(`a queued send whose grant was ${how} before the flush is not delivered`, async () => {
+      const { call, w, ledger, messaging } = adopted()
+      messaging.queue = createDeliveryQueue(messaging)
+      w.state = 'working'
+      expect(result(await call('send', { key: 'LANE-1', text: 'later' }))).toMatchObject({ outcome: 'queued' })
+      if (how === 'revoked') expect(ledger.revokeGrant('sink', 'LANE-1', 'lane-1')).toBe('revoked')
+      else {
+        w.canvas.get('p1')!.push({ id: 'lane-2' })
+        expect(ledger.grant({ principal: 'sink', key: 'LANE-1', nodeId: 'lane-2', projectId: 'p1' })).toBe('moved')
+      }
+      w.state = 'done'
+      onMessagingAgentEvent({ nodeId: 'lane-1', state: 'done', verified: true }, messaging.queue)
+      await new Promise((r) => setTimeout(r, 50))
+      expect(w.sent).toEqual([])
+    })
+  }
 })

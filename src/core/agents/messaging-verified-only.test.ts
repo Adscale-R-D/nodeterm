@@ -199,7 +199,12 @@ describe('where the verbs sit in the routing tables', () => {
     // `--after-success`: only a verified caller is provably the station the report is about.
     // `issues` / `prs` resolve the project to read from the CALLER's node, so a forgeable caller
     // could read any project's GitHub lane (bound sessions, dispatch state); new verbs.
+    // `integration-grant` / `-revoke` / `-grants`: a grant lets a local integration type into THIS
+    // node's pane, so only a caller provably this node may make it; new verbs.
     expect([...requiresVerified].sort()).toEqual([
+      'integration-grant',
+      'integration-grants',
+      'integration-revoke',
       'issues',
       'notify',
       'open-project',

@@ -290,6 +290,55 @@ The **outbox** is how a queued `send` reports its end: `delivered`, `stalled`, `
 or board log to be told in, so it pulls. The outbox is bounded to 500 entries per principal for 7
 days. Closed rows are kept 30 days.
 
+## Granting a node to a principal
+
+A principal can also work with an agent session it did NOT open (for example a `/ship` lane opened by
+another node), but only when that node asks for it. The node grants ITSELF, with three canvas-control
+verbs (Server Edition only; the desktop refuses them by name):
+
+```sh
+nodeterm.sh integration-grant  --principal sink --key LANE-1   # deliver events for LANE-1 to me
+nodeterm.sh integration-revoke --principal sink --key LANE-1   # stop (only the node holding it)
+nodeterm.sh integration-grants                                  # my grants
+```
+
+Replies (JSON with `Accept: application/json`, else one line of text):
+
+```ts
+// integration-grant
+{ principal, key, nodeId /* the caller */, status: 'granted' | 'already-granted' | 'moved' }
+// integration-revoke
+{ principal, key, revoked: true }
+// integration-grants
+{ grants: Array<{ principal, key }> }
+```
+
+- **Who may grant:** a verified agent node, for itself only. There is no flag naming another node,
+  and no principal-side verb that claims one. An unverified caller is refused (`Integration grant
+  refused.`). The principal must be registered for the caller's project; an unknown principal and one
+  registered elsewhere get the same refusal, `principal-not-registered`.
+- **The latest grant wins:** granting a key that another node holds moves it here (`moved`); the
+  previous grant closes, and the key's declared pull requests move with it.
+- **Refusals:** `key-owned` (the principal opened a node for that key itself; it cannot be granted),
+  `node-held` (this node already holds a grant, or was opened by a principal; revoke first),
+  `not-your-grant` / `unknown-key` (revoke).
+- **Durable:** the grant is a row in `integration-nodes.json` (`adopted: true`), so it survives a
+  restart and a reboot. A node removed from the canvas closes it.
+
+What the principal can do with an adopted row:
+
+| Verb | On an adopted row |
+|---|---|
+| `send` | allowed: same delivery path, gates, queue, outbox and envelope. The pane must be proven like for any sender (`notPermitted` otherwise); no bypass |
+| `comment`, `link-pull`, `unlink-pull` | allowed |
+| `list` | listed with `adopted: true` (`agent` only when it is claude, codex or gemini) |
+| `close` | ends the GRANT only: `{ key, nodeId, closed: true, adopted: true }`. The node and its session are untouched |
+| `resume` | refused, 409 `adopted-node`: the principal never relaunches a node it did not open |
+| `open` (same key) | answers `existing`; no spawn, no title or column change (declared `pulls` still union) |
+
+A revoked or moved grant stops authorizing at once: a `send` queued before the revoke is refused when
+the queue flushes, because the creator check reads the ledger again.
+
 ## Ownership and restarts
 
 `<dataDir>/orchestration-state/integration-nodes.json` and `integration-outbox.json` (the

@@ -96,7 +96,12 @@ const STORE_ANSWERED_VERBS: ReadonlySet<string> = new Set([
   // (core/github/control-read.ts). A read needs no canvas at either end, and a background
   // orchestrator polling `prs` must never travel the user's view.
   'issues',
-  'prs'
+  'prs',
+  // A node's grant to an integration principal: a ledger write on the Server Edition, refused by name
+  // on the desktop. No canvas at either end.
+  'integration-grant',
+  'integration-revoke',
+  'integration-grants'
 ])
 
 /**

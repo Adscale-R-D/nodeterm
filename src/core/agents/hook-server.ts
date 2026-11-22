@@ -317,7 +317,12 @@ export const requiresVerified: ReadonlySet<string> = new Set([
   // CALLER's node, so a caller nobody can verify could name any node and read another project's
   // lane — bound sessions and dispatch state included. NEW verbs: fail-closed strands nobody.
   'issues',
-  'prs'
+  'prs',
+  // A node granting ITSELF to an integration principal: the grant lets that principal type into this
+  // node's pane, so only a caller provably this node may make it (or list or revoke it).
+  'integration-grant',
+  'integration-revoke',
+  'integration-grants'
 ])
 
 /**
@@ -345,6 +350,9 @@ export const REPORT_ISSUE_CONTROL_REFUSAL = 'Issue reporting refused.'
 export const RUN_CONTROL_REFUSAL = 'Run refused.'
 /** Same posture for `report-outcome` (defined beside its grammar, @shared/station-outcome). */
 export { REPORT_OUTCOME_CONTROL_REFUSAL }
+
+/** The flat refusal for an unverified integration grant verb (src/server/integration-grant.ts). */
+export const INTEGRATION_GRANT_CONTROL_REFUSAL = 'Integration grant refused.'
 
 /** The flat refusal for an unverified `issues` / `prs` read (core/github/control-read.ts). */
 export const GITHUB_READ_CONTROL_REFUSAL = 'GitHub lane read refused.'
@@ -376,6 +384,7 @@ export function verifiedRefusalFor(verb: string): string {
   if (verb === 'run') return RUN_CONTROL_REFUSAL
   if (verb === 'report-outcome') return REPORT_OUTCOME_CONTROL_REFUSAL
   if (verb === 'issues' || verb === 'prs') return GITHUB_READ_CONTROL_REFUSAL
+  if (verb.startsWith('integration-')) return INTEGRATION_GRANT_CONTROL_REFUSAL
   return MESSAGING_CONTROL_REFUSAL
 }
 

@@ -1,9 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import type {
-  GitHubAuthProvider,
-  GitHubAuthStatus,
-  GitHubControlView,
-  ProjectKanbanGitHub
+import {
+  columnLabelProblem,
+  defaultColumnLabel,
+  GITHUB_LABEL_MAX,
+  type GitHubAuthProvider,
+  type GitHubAuthStatus,
+  type GitHubControlView,
+  type ProjectKanbanGitHub
 } from '@shared/github-issues'
 import type { KanbanColumn } from '@shared/types'
 import { defaultCompletionColumnId } from '@shared/kanban-category'
@@ -85,11 +88,15 @@ function defaultGitHub(columns: Array<Pick<KanbanColumn, 'id' | 'title' | 'categ
   // The board's own Done column when its categories say which one that is; the last column only
   // for an uncategorized board (the pre-category default). See @shared/kanban-category.
   const completionColumnId = defaultCompletionColumnId(columns)
+  // Every default label fits GitHub's limit and is unique: a column title longer than ~43
+  // characters used to produce a label the host refuses, and the host then refuses approval too.
+  const taken = new Set<string>()
   return {
-    columnMappings: columns.map((column) => ({
-      columnId: column.id,
-      label: `status:${column.title.trim().toLocaleLowerCase('en-US').replace(/\s+/g, '-')}`
-    })),
+    columnMappings: columns.map((column) => {
+      const label = defaultColumnLabel(column.title, taken)
+      taken.add(label.toLocaleLowerCase('en-US'))
+      return { columnId: column.id, label }
+    }),
     ...(completionColumnId ? { completionColumnId } : {})
   }
 }
@@ -114,7 +121,7 @@ function messageFor(error: unknown): string {
   // The settings edit is saved on a debounce, so a click within that window reaches a host that
   // has not seen it yet. Name the wait rather than the generic failure.
   if (code.includes('invalid-configuration') || code.includes('repository-not-found')) {
-    return 'These settings have not finished saving. Try again in a moment.'
+    return 'nodeterm cannot use these settings yet. If you just changed them, try again in a moment; otherwise check the repository and the column labels below.'
   }
   return 'The GitHub action could not be completed. Please try again.'
 }
@@ -380,6 +387,18 @@ export function GitHubIssuesSection({ isActive }: { isActive: boolean }): React.
   const completionReady = !!githubConfig?.completionColumnId &&
     mappings.has(githubConfig.completionColumnId)
   const ready = approved && mappingApproved && authenticated && completionReady
+  // The host refuses an invalid mapping outright (approval included), so say which label is wrong.
+  const labelProblem = githubConfig ? columnLabelProblem(githubConfig.columnMappings) : null
+  const labelProblemColumn = labelProblem
+    ? board.columns.find((column) => column.id === labelProblem.columnId)?.title ?? 'a column'
+    : ''
+  const labelProblemText = !labelProblem
+    ? ''
+    : labelProblem.reason === 'label-too-long'
+      ? `The label for “${labelProblemColumn}” is ${labelProblem.label.length} characters; GitHub allows at most ${GITHUB_LABEL_MAX}. Shorten it below before approving.`
+      : labelProblem.reason === 'duplicate-label'
+        ? `Two columns use the label “${labelProblem.label}”. Give “${labelProblemColumn}” its own label below before approving.`
+        : `The label for “${labelProblemColumn}” is empty. Fill it in below before approving.`
   const approveRepository = (): Promise<void> => run('approve', async () => {
     const status = await window.nodeTerminal.githubControl.status(projectId)
     await window.nodeTerminal.githubControl.approve({
@@ -537,7 +556,9 @@ export function GitHubIssuesSection({ isActive }: { isActive: boolean }): React.
               <div className="flex items-center gap-2 text-[13px]">
                 <span className={`size-2 rounded-full ${ready ? 'bg-green-500' : 'bg-amber-500'}`} />
                 <span className="text-muted">
-                  {ready
+                  {labelProblem
+                    ? labelProblemText
+                    : ready
                     ? `Ready as ${view?.auth.login ?? 'GitHub user'}`
                     : approved && !mappingApproved
                       ? 'The column labels changed since this machine approved them. Approve them to let the board change issues on GitHub.'
@@ -547,12 +568,12 @@ export function GitHubIssuesSection({ isActive }: { isActive: boolean }): React.
                         : 'Repository approved. Authentication is still needed.'
                       : 'Approval is required before nodeterm reads the repository.'}
                 </span>
-                {!view?.project?.approved && repository && (
+                {!labelProblem && !view?.project?.approved && repository && (
                   <Button variant="primary" disabled={busy !== ''} onClick={() => void approveRepository()}>
                     Approve this machine
                   </Button>
                 )}
-                {approved && !mappingApproved && repository && (
+                {!labelProblem && approved && !mappingApproved && repository && (
                   <Button variant="primary" disabled={busy !== ''} onClick={() => void approveRepository()}>
                     Approve column labels
                   </Button>
@@ -670,7 +691,8 @@ export function GitHubIssuesSection({ isActive }: { isActive: boolean }): React.
                       id={`github-label-${column.id}`}
                       className="w-56"
                       value={mappings.get(column.id) ?? ''}
-                      maxLength={50}
+                      maxLength={GITHUB_LABEL_MAX}
+                      aria-invalid={labelProblem?.columnId === column.id || undefined}
                       placeholder={`status:${column.title.toLocaleLowerCase('en-US')}`}
                       onChange={(event) => {
                         const label = event.target.value

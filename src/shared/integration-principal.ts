@@ -154,8 +154,9 @@ export interface IntegrationOpenResult {
   column?: string
   /** Only when the request carried `pulls`: the key's declared set after this call. */
   pulls?: number[]
-  /** `pulls` were not recorded because the project's board has no GitHub repository. */
-  pullsIgnored?: 'no-repository'
+  /** `pulls` were not recorded: the project's kanban board is not connected to GitHub, or no
+   *  repository resolves. */
+  pullsIgnored?: 'board-not-connected' | 'no-repository'
 }
 
 /** `link-pull` / `unlink-pull`. */

@@ -82,6 +82,9 @@ export interface ServerCanvasControlDeps {
    *  `declaredPullsChanged`: the boards re-read, a single-PR read is started). Absent = boards see
    *  the change on their next poll. */
   onDeclaredPullsChanged?: (projectId: string) => void
+  /** Where a project's board stands for PR links (the GitHub host controller's `boardRepository`).
+   *  Absent = every project answers `no-repository`. */
+  boardRepository?: (projectId: string) => Promise<{ repository: string } | { refused: 'board-not-connected' | 'no-repository' }>
   /**
    * Does this process own the hook endpoint (`hookServer.startForApp()` returned no warning)? The
    * durable orchestration facts (queue, station reports, hand-over holds) belong to the owning
@@ -312,8 +315,9 @@ export async function initServerCanvasControl(
     savePrompt: (name, base64) => saveUpload(platform().userDataDir, name, base64),
     boardLogReachable: (projectId) => deps.workspaceStore.boardLogRootForProject(projectId) !== undefined,
     appendBoardLog: (projectId, entry) => deps.boardLog.append(projectId, entry),
-    // The repository the board syncs with — the same answer `open-agent --issue #N` resolves against.
-    boardRepository: (projectId) => deps.issueRepository?.(projectId) ?? Promise.resolve(null),
+    // Whether the board is connected to GitHub, and the repository it syncs with.
+    boardRepository: (projectId) =>
+      deps.boardRepository?.(projectId) ?? Promise.resolve({ refused: 'no-repository' as const }),
     ...(deps.onDeclaredPullsChanged ? { onPullsChanged: deps.onDeclaredPullsChanged } : {})
   })
 

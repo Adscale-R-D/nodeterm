@@ -265,3 +265,15 @@ describe('GitHubHostController', () => {
     expect(secret.save).not.toHaveBeenCalled()
   })
 })
+
+describe('GitHubHostController.boardRepository (integration PR links)', () => {
+  it('answers the repository for a connected board, refuses one that is not connected, and needs no credential', async () => {
+    const { controller, resolver, setProject } = fixture()
+    expect(await controller.boardRepository(project.id)).toEqual({ repository: 'owner/repo' })
+    setProject({ ...project, kanban: { ...project.kanban!, github: undefined } })
+    expect(await controller.boardRepository(project.id)).toEqual({ refused: 'board-not-connected' })
+    expect(await controller.boardRepository('no-such-project')).toEqual({ refused: 'board-not-connected' })
+    expect(resolver.resolve).not.toHaveBeenCalled()
+    expect(resolver.status).not.toHaveBeenCalled()
+  })
+})

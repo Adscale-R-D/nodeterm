@@ -1,8 +1,9 @@
 import { createHash } from 'node:crypto'
 import type { KanbanColumn } from '../../shared/types'
-import type {
-  GitHubConfigResult,
-  NormalisedProjectKanbanGitHub
+import {
+  GITHUB_LABEL_MAX,
+  type GitHubConfigResult,
+  type NormalisedProjectKanbanGitHub
 } from '../../shared/github-issues'
 import { GITHUB_OWNER_PATTERN } from '../../shared/github-issue-ref'
 
@@ -73,7 +74,7 @@ export function normaliseProjectKanbanGitHub(
     if (!columnIds.has(columnId)) return { ok: false, reason: 'unknown-column' }
     if (seenColumns.has(columnId)) return { ok: false, reason: 'duplicate-column' }
     if (!label) return { ok: false, reason: 'empty-label' }
-    if (label.length > 50) return { ok: false, reason: 'label-too-long' }
+    if (label.length > GITHUB_LABEL_MAX) return { ok: false, reason: 'label-too-long' }
     const folded = label.toLocaleLowerCase('en-US')
     if (seenLabels.has(folded)) return { ok: false, reason: 'duplicate-label' }
     seenColumns.add(columnId)

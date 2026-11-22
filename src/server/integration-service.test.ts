@@ -27,11 +27,12 @@ interface World {
   noBoardLog: Set<string>
   boardLogFails: boolean
   repositories: Map<string, string>
+  notConnected: Set<string>
   pullsChanged: string[]
 }
 
 function setup(over: Partial<IntegrationServiceDeps> = {}) {
-  const w: World = { canvas: new Map([['p1', []], ['p2', []]]), opens: [], resumes: [], closes: [], prompts: [], sent: [], state: 'done', boardLog: [], noBoardLog: new Set(), boardLogFails: false, repositories: new Map([['p1', 'Adscale-R-D/app_ms']]), pullsChanged: [] }
+  const w: World = { canvas: new Map([['p1', []], ['p2', []]]), opens: [], resumes: [], closes: [], prompts: [], sent: [], state: 'done', boardLog: [], noBoardLog: new Set(), boardLogFails: false, repositories: new Map([['p1', 'Adscale-R-D/app_ms']]), notConnected: new Set(), pullsChanged: [] }
   let seq = 0
   const ledger = new IntegrationLedger(undefined, undefined, () => 5000)
   const messaging: AgentMessagingDeps = {
@@ -55,7 +56,11 @@ function setup(over: Partial<IntegrationServiceDeps> = {}) {
     }
   }
   const service = createIntegrationService({
-    boardRepository: async (projectId) => w.repositories.get(projectId) ?? null,
+    boardRepository: async (projectId) => {
+      const repository = w.repositories.get(projectId)
+      if (repository) return { repository }
+      return { refused: w.notConnected.has(projectId) ? 'board-not-connected' : 'no-repository' }
+    },
     onPullsChanged: (projectId) => w.pullsChanged.push(projectId),
     registry: { authenticate: (name, token) => (name === 'sink' && token === TOKEN ? SINK : undefined) },
     ledger,
@@ -391,6 +396,16 @@ describe('integration service — declared pull requests', () => {
     expect(result(r)).toMatchObject({ status: 'created', pulls: [], pullsIgnored: 'no-repository' })
     expect(ledger.declaredForProject('p2')).toEqual([])
     expect(w.pullsChanged).toEqual([])
+  })
+
+  it('a board not connected to GitHub: link-pull says so (409), open records nothing and says why', async () => {
+    const { call, ledger, w } = setup()
+    w.notConnected.add('p2')
+    await call('open', { key: 'A', agent: 'claude', project: 'p2' })
+    expect(await call('link-pull', { key: 'A', pull: 1 })).toMatchObject({ status: 409, body: { error: 'board-not-connected' } })
+    expect(await call('unlink-pull', { key: 'A', pull: 1 })).toMatchObject({ status: 409, body: { error: 'board-not-connected' } })
+    expect(result(await call('open', { key: 'A', agent: 'claude', pulls: [1] }))).toMatchObject({ status: 'existing', pulls: [], pullsIgnored: 'board-not-connected' })
+    expect(ledger.declaredForProject('p2')).toEqual([])
   })
 
   it('open refuses a malformed pulls list before opening anything', async () => {

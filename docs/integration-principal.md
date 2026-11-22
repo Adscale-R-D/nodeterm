@@ -97,7 +97,7 @@ or token); 404 `unknown-key` / `unknown-verb` / `integration-unavailable`; 409 a
   session?: 'started' | 'failed', reason?: string, frameId?: string,
   column?: string /* the column id, or 'missing'; only when `column` was asked and the node created */,
   pulls?: number[] /* only when `pulls` was sent: the key's declared set after this call */,
-  pullsIgnored?: 'no-repository' /* `pulls` not recorded: the board has no GitHub repository */ }
+  pullsIgnored?: 'board-not-connected' | 'no-repository' /* `pulls` not recorded, and why */ }
 ```
 
 An upsert by key: if the principal already has an open node for the key, it answers `existing` and
@@ -115,9 +115,9 @@ card and returns no `column`.
 
 `pulls` is recorded for the key, also on an `existing` upsert, where it is UNIONED into the set
 already declared (the only thing an `existing` upsert changes). A malformed list is 400 `bad-pull`
-before anything opens; a union past 20 is 409 `too-many-pulls`. On a project whose board has no
-GitHub repository `pulls` is ignored, never refused: the node opens and the result says
-`pullsIgnored: 'no-repository'`.
+before anything opens; a union past 20 is 409 `too-many-pulls`. On a project whose kanban board is
+not connected to GitHub, or has no repository, `pulls` is ignored, never refused: the node opens and
+the result says `pullsIgnored: 'board-not-connected'` or `'no-repository'`.
 
 `session: 'failed'` keeps the launch on the node for its Run now, with `reason`
 (`no-shell`, `line-too-long`, `spawn-failed`, …).
@@ -226,8 +226,12 @@ Add or remove one declared pull request on the key's card. Both are idempotent: 
 declared, or unlinking one that is not, answers the current set and changes nothing.
 
 - Errors: 400 `bad-key` / `bad-pull` (not a positive integer ≤ 2³¹−1); 404 `unknown-key`; 409
-  `no-repository` (the project's board has no GitHub repository); 409 `too-many-pulls` (a key
-  declares at most 20).
+  `board-not-connected` (the project's kanban board is not connected to GitHub — Settings → GitHub
+  Issues — so no card on it can show a pull request); 409 `no-repository` (connected, but no
+  repository resolves); 409 `too-many-pulls` (a key declares at most 20).
+- A PR shows only on a board connected to GitHub AND approved on this machine: the approval is what
+  lets the server read the repository's pull request status. A link recorded while the board is
+  connected but not yet approved shows once it is.
 
 ### Declared pull requests
 

@@ -844,6 +844,7 @@ export async function startServer(
         },
         // Principal-declared PR links (docs/integration-principal.md): a change re-reads the boards.
         onDeclaredPullsChanged: (projectId) => github.service.declaredPullsChanged(projectId),
+        boardRepository: (projectId) => github.controller.boardRepository(projectId),
         // The durable orchestration facts follow hook-endpoint ownership, like the request ledger.
         ownsDurableState: hookStartupWarning === null
       })

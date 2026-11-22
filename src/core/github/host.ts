@@ -98,6 +98,23 @@ export class GitHubHostController {
 
   constructor(private readonly dependencies: HostDependencies) {}
 
+  /**
+   * Where a project's board stands for PR links, with no credential: `not-connected` = the board has
+   * no GitHub block (nothing on it can show a PR), else the repository it syncs with (configured,
+   * else the git remote), or `no-repository`. A connected board whose mapping is invalid still has
+   * its repository: links recorded now show once the mapping is fixed and approved.
+   */
+  async boardRepository(projectId: string): Promise<{ repository: string } | { refused: 'board-not-connected' | 'no-repository' }> {
+    const record = await this.dependencies.project(projectId)
+    if (!record?.project.kanban?.github) return { refused: 'board-not-connected' }
+    const configured = record.project.kanban.github.repository
+      ? parseGitHubRepository(record.project.kanban.github.repository) ?? undefined
+      : undefined
+    const repository = configured ??
+      parseGitHubRepository(await this.dependencies.detectRepository(record.project)) ?? undefined
+    return repository ? { repository } : { refused: 'no-repository' }
+  }
+
   async status(projectId?: string): Promise<GitHubControlView> {
     const state = await this.dependencies.controls.load()
     if (!projectId) {

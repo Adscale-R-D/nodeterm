@@ -10433,6 +10433,10 @@ Rules a refactor must not undo:
   inside its bound — without the pin such a chip vanishes on the next pass; (6) auto-move gets no new
   rule: a wait note is taken only for a PR the host holds open, so a PR declared after its merge never
   moves a card. Every hop is optional, so `server/declared-pulls-wiring.test.ts` pins the wiring.
+  (7) "has a repository" is the BOARD's connection, not the git remote: `link-pull` asks
+  `GitHubHostController.boardRepository`, which answers `board-not-connected` for a board with no
+  `kanban.github` (no card there can show a PR — the board code skips PR links entirely and the host
+  reads no pull status). Checking the remote alone accepted links that could never render.
 
 ## Hosted team relay (Server Edition as a relay host)
 

@@ -29,6 +29,41 @@ export type GitHubConfigError =
   | 'duplicate-label'
   | 'invalid-completion-column'
 
+/** GitHub refuses a label longer than this. */
+export const GITHUB_LABEL_MAX = 50
+
+/** The label rules of a column mapping, the same ones the host's `normaliseProjectKanbanGitHub`
+ *  enforces. Shared so the settings UI can NAME a bad mapping instead of reporting the host's
+ *  refusal as a save still in flight (the host refuses approval for an invalid mapping). */
+export function columnLabelProblem(
+  mappings: ReadonlyArray<{ columnId: string; label: string }>
+): { reason: 'empty-label' | 'label-too-long' | 'duplicate-label'; columnId: string; label: string } | null {
+  const seen = new Set<string>()
+  for (const mapping of mappings) {
+    const label = mapping.label.trim().normalize('NFKC')
+    if (!label) return { reason: 'empty-label', columnId: mapping.columnId, label }
+    if (label.length > GITHUB_LABEL_MAX) return { reason: 'label-too-long', columnId: mapping.columnId, label }
+    const folded = label.toLocaleLowerCase('en-US')
+    if (seen.has(folded)) return { reason: 'duplicate-label', columnId: mapping.columnId, label }
+    seen.add(folded)
+  }
+  return null
+}
+
+/** The label a column gets when GitHub sync is switched on: `status:<title>`, lower-case, spaces as
+ *  dashes, cut to fit GitHub's 50-character limit, and made unique (`-2`, `-3`, …) among `taken`
+ *  (case-insensitive) — so the default mapping is always one the host accepts. */
+export function defaultColumnLabel(title: string, taken: ReadonlySet<string> = new Set()): string {
+  const base = `status:${title.trim().toLocaleLowerCase('en-US').replace(/\s+/g, '-')}`.normalize('NFKC')
+  const fit = (text: string, max: number): string => text.slice(0, max).replace(/-+$/, '') || 'status:column'
+  let label = fit(base, GITHUB_LABEL_MAX)
+  for (let n = 2; taken.has(label.toLocaleLowerCase('en-US')); n++) {
+    const suffix = `-${n}`
+    label = fit(base, GITHUB_LABEL_MAX - suffix.length) + suffix
+  }
+  return label
+}
+
 export type GitHubConfigResult =
   | { ok: true; value: NormalisedProjectKanbanGitHub }
   | { ok: false; reason: GitHubConfigError }

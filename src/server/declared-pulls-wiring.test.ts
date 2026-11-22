@@ -18,7 +18,8 @@ describe('declared pull links: the Server Edition wiring', () => {
   it('canvas-control.ts gives the integration service the board repository and the change hook', () => {
     const src = read('canvas-control.ts')
     const integration = src.slice(src.indexOf('createIntegrationService({'), src.indexOf('const stationNotices'))
-    expect(integration).toMatch(/boardRepository:\s*\(projectId\)\s*=>\s*deps\.issueRepository/)
+    expect(integration).toMatch(/boardRepository:\s*\(projectId\)\s*=>\s*deps\.boardRepository/)
+    expect(read('index.ts')).toMatch(/boardRepository:\s*\(projectId\)\s*=>\s*github\.controller\.boardRepository\(projectId\)/)
     expect(integration).toMatch(/onPullsChanged:\s*deps\.onDeclaredPullsChanged/)
     expect(src).toMatch(/declaredPulls:\s*\(projectId\)\s*=>\s*integrationLedger\.ledger\.declaredForProject\(projectId\)/)
   })

@@ -67,9 +67,11 @@ export interface IntegrationServiceDeps {
   boardLogReachable(projectId: string): boolean
   /** Append one entry to a project's board log (the shared `boardLog.append`); false on failure. */
   appendBoardLog(projectId: string, entry: BoardLogEntry): Promise<boolean>
-  /** The GitHub repository (`owner/name`) this project's board syncs with, or null. Declared pull
-   *  numbers are recorded against it. Production: the GitHub host controller (no credential). */
-  boardRepository(projectId: string): Promise<string | null>
+  /** The GitHub repository (`owner/name`) this project's board syncs with — declared pull numbers are
+   *  recorded against it — or why there is none: the board is not connected to GitHub (no card on it
+   *  can show a PR), or no repository resolves. Production: the GitHub host controller (no
+   *  credential). */
+  boardRepository(projectId: string): Promise<{ repository: string } | { refused: 'board-not-connected' | 'no-repository' }>
   /** A key's declared pull requests changed: the project's open boards re-read. */
   onPullsChanged?(projectId: string): void
   now?(): number
@@ -154,11 +156,17 @@ export function createIntegrationService(deps: IntegrationServiceDeps): {
     }
   }
 
-  const repositoryOf = (projectId: string): Promise<string | null> =>
-    deps.boardRepository(projectId).then((r) => (typeof r === 'string' && r ? r : null), () => null)
+  type Refusal = 'board-not-connected' | 'no-repository'
+  const repositoryOf = (projectId: string): Promise<{ repository: string } | { refused: Refusal }> =>
+    deps.boardRepository(projectId).then(
+      (r) => ('repository' in r && typeof r.repository === 'string' && r.repository ? r : { refused: 'refused' in r ? r.refused : 'no-repository' }),
+      () => ({ refused: 'no-repository' as const })
+    )
 
-  const noRepository = (projectId: string): IntegrationHttpReply =>
-    fail(409, 'no-repository', `project ${projectId}'s board has no GitHub repository to link pull requests in`)
+  const refusedRepository = (projectId: string, refused: Refusal): IntegrationHttpReply =>
+    refused === 'board-not-connected'
+      ? fail(409, 'board-not-connected', `project ${projectId}'s kanban board is not connected to GitHub, so no card on it can show a pull request (connect it in the board's GitHub settings)`)
+      : fail(409, 'no-repository', `project ${projectId}'s board has no GitHub repository to link pull requests in`)
 
   const tooManyPulls = (): IntegrationHttpReply =>
     fail(409, 'too-many-pulls', `a key declares at most ${INTEGRATION_PULLS_MAX} pull requests`)
@@ -169,9 +177,10 @@ export function createIntegrationService(deps: IntegrationServiceDeps): {
     nodeId: string,
     projectId: string,
     pulls: number[]
-  ): Promise<{ pulls: number[]; pullsIgnored?: 'no-repository' } | 'too-many'> => {
-    const repository = await repositoryOf(projectId)
-    if (!repository) return { pulls: [], pullsIgnored: 'no-repository' }
+  ): Promise<{ pulls: number[]; pullsIgnored?: Refusal } | 'too-many'> => {
+    const answer = await repositoryOf(projectId)
+    if ('refused' in answer) return { pulls: [], pullsIgnored: answer.refused }
+    const repository = answer.repository
     const before = deps.ledger.declaredPulls(nodeId, repository)
     const next = deps.ledger.declarePulls(nodeId, repository, pulls)
     if (next === 'too-many') return 'too-many'
@@ -433,8 +442,9 @@ export function createIntegrationService(deps: IntegrationServiceDeps): {
     return withKeyLock(`${p.name}|${key}`, async () => {
       const row = liveRow(p.name, key)
       if (!row) return unknownKey(key)
-      const repository = await repositoryOf(row.projectId)
-      if (!repository) return noRepository(row.projectId)
+      const answer = await repositoryOf(row.projectId)
+      if ('refused' in answer) return refusedRepository(row.projectId, answer.refused)
+      const repository = answer.repository
       const before = deps.ledger.declaredPulls(row.nodeId, repository)
       const next = add
         ? deps.ledger.declarePulls(row.nodeId, repository, [pull])

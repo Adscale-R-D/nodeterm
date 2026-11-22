@@ -97,7 +97,7 @@ or token); 404 `unknown-key` / `unknown-verb` / `integration-unavailable`; 409 a
   session?: 'started' | 'failed', reason?: string, frameId?: string,
   column?: string /* the column id, or 'missing'; only when `column` was asked and the node created */,
   pulls?: number[] /* only when `pulls` was sent: the key's declared set after this call */,
-  pullsIgnored?: 'board-not-connected' | 'no-repository' /* `pulls` not recorded, and why */ }
+  pullsIgnored?: 'no-repository' /* `pulls` not recorded: the project has no GitHub repository */ }
 ```
 
 An upsert by key: if the principal already has an open node for the key, it answers `existing` and
@@ -115,9 +115,9 @@ card and returns no `column`.
 
 `pulls` is recorded for the key, also on an `existing` upsert, where it is UNIONED into the set
 already declared (the only thing an `existing` upsert changes). A malformed list is 400 `bad-pull`
-before anything opens; a union past 20 is 409 `too-many-pulls`. On a project whose kanban board is
-not connected to GitHub, or has no repository, `pulls` is ignored, never refused: the node opens and
-the result says `pullsIgnored: 'board-not-connected'` or `'no-repository'`.
+before anything opens; a union past 20 is 409 `too-many-pulls`. On a project with no GitHub
+repository (no board repository and no GitHub git remote) `pulls` is ignored, never refused: the node
+opens and the result says `pullsIgnored: 'no-repository'`.
 
 `session: 'failed'` keeps the launch on the node for its Run now, with `reason`
 (`no-shell`, `line-too-long`, `spawn-failed`, …).
@@ -226,12 +226,8 @@ Add or remove one declared pull request on the key's card. Both are idempotent: 
 declared, or unlinking one that is not, answers the current set and changes nothing.
 
 - Errors: 400 `bad-key` / `bad-pull` (not a positive integer ≤ 2³¹−1); 404 `unknown-key`; 409
-  `board-not-connected` (the project's kanban board is not connected to GitHub — Settings → GitHub
-  Issues — so no card on it can show a pull request); 409 `no-repository` (connected, but no
-  repository resolves); 409 `too-many-pulls` (a key declares at most 20).
-- A PR shows only on a board connected to GitHub AND approved on this machine: the approval is what
-  lets the server read the repository's pull request status. A link recorded while the board is
-  connected but not yet approved shows once it is.
+  `no-repository` (no board repository and no GitHub git remote); 409 `too-many-pulls` (a key
+  declares at most 20).
 
 ### Declared pull requests
 
@@ -260,7 +256,14 @@ the card modal's "Pull requests" section, with the same CI and merge state.
   read leaves a floor of). A finished PR is read once; a number that is not a PR is not asked again
   for an hour. The first read after `link-pull` starts at once when a board for the project is open;
   otherwise the PR is read when one opens.
-- **Auto-move on merge** treats declared links like the others. It is off unless this machine turned
+- **The board does not need GitHub sync.** On a board that is not connected to GitHub (or not approved
+  on this machine) the declared PRs are the only PRs read: one GraphQL request per declared PR, at most
+  once a minute per project and only while the board is open in a browser. No GitHub lane appears and
+  the repository's issues and PR list are never read. The repository is the project's git remote, and
+  the server uses its GitHub sign-in (the gh CLI). Registering the principal for the project is the
+  consent for these reads. On such a board the PR's state is kept in memory only, and auto-move on
+  merge does not run (it needs a synced board's column settings).
+- **Auto-move on merge** (synced boards) treats declared links like the others. It is off unless this machine turned
   it on, and a card moves only for a merge this machine observed after it saw the PR open on that
   card: a PR declared after it merged never moves the card.
 

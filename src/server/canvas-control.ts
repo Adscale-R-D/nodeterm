@@ -84,7 +84,7 @@ export interface ServerCanvasControlDeps {
   onDeclaredPullsChanged?: (projectId: string) => void
   /** Where a project's board stands for PR links (the GitHub host controller's `boardRepository`).
    *  Absent = every project answers `no-repository`. */
-  boardRepository?: (projectId: string) => Promise<{ repository: string } | { refused: 'board-not-connected' | 'no-repository' }>
+  boardRepository?: (projectId: string) => Promise<{ repository: string } | { refused: 'no-repository' }>
   /**
    * Does this process own the hook endpoint (`hookServer.startForApp()` returned no warning)? The
    * durable orchestration facts (queue, station reports, hand-over holds) belong to the owning

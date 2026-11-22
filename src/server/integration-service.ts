@@ -67,11 +67,10 @@ export interface IntegrationServiceDeps {
   boardLogReachable(projectId: string): boolean
   /** Append one entry to a project's board log (the shared `boardLog.append`); false on failure. */
   appendBoardLog(projectId: string, entry: BoardLogEntry): Promise<boolean>
-  /** The GitHub repository (`owner/name`) this project's board syncs with — declared pull numbers are
-   *  recorded against it — or why there is none: the board is not connected to GitHub (no card on it
-   *  can show a PR), or no repository resolves. Production: the GitHub host controller (no
-   *  credential). */
-  boardRepository(projectId: string): Promise<{ repository: string } | { refused: 'board-not-connected' | 'no-repository' }>
+  /** The GitHub repository (`owner/name`) declared pull numbers are recorded against: the board's
+   *  configured repository, else the project's git remote; or `no-repository`. The board need not be
+   *  synced with GitHub. Production: the GitHub host controller (no credential). */
+  boardRepository(projectId: string): Promise<{ repository: string } | { refused: 'no-repository' }>
   /** A key's declared pull requests changed: the project's open boards re-read. */
   onPullsChanged?(projectId: string): void
   now?(): number
@@ -156,17 +155,15 @@ export function createIntegrationService(deps: IntegrationServiceDeps): {
     }
   }
 
-  type Refusal = 'board-not-connected' | 'no-repository'
+  type Refusal = 'no-repository'
   const repositoryOf = (projectId: string): Promise<{ repository: string } | { refused: Refusal }> =>
     deps.boardRepository(projectId).then(
       (r) => ('repository' in r && typeof r.repository === 'string' && r.repository ? r : { refused: 'refused' in r ? r.refused : 'no-repository' }),
       () => ({ refused: 'no-repository' as const })
     )
 
-  const refusedRepository = (projectId: string, refused: Refusal): IntegrationHttpReply =>
-    refused === 'board-not-connected'
-      ? fail(409, 'board-not-connected', `project ${projectId}'s kanban board is not connected to GitHub, so no card on it can show a pull request (connect it in the board's GitHub settings)`)
-      : fail(409, 'no-repository', `project ${projectId}'s board has no GitHub repository to link pull requests in`)
+  const refusedRepository = (projectId: string, _refused: Refusal): IntegrationHttpReply =>
+    fail(409, 'no-repository', `project ${projectId} has no GitHub repository (no board repository and no GitHub git remote) to link pull requests in`)
 
   const tooManyPulls = (): IntegrationHttpReply =>
     fail(409, 'too-many-pulls', `a key declares at most ${INTEGRATION_PULLS_MAX} pull requests`)

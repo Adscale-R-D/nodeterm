@@ -267,13 +267,21 @@ describe('GitHubHostController', () => {
 })
 
 describe('GitHubHostController.boardRepository (integration PR links)', () => {
-  it('answers the repository for a connected board, refuses one that is not connected, and needs no credential', async () => {
+  it('answers the board repository, else the git remote even for a board without GitHub sync, with no credential', async () => {
     const { controller, resolver, setProject } = fixture()
     expect(await controller.boardRepository(project.id)).toEqual({ repository: 'owner/repo' })
     setProject({ ...project, kanban: { ...project.kanban!, github: undefined } })
-    expect(await controller.boardRepository(project.id)).toEqual({ refused: 'board-not-connected' })
-    expect(await controller.boardRepository('no-such-project')).toEqual({ refused: 'board-not-connected' })
+    expect(await controller.boardRepository(project.id)).toEqual({ repository: 'owner/repo' })
+    expect(await controller.boardRepository('no-such-project')).toEqual({ refused: 'no-repository' })
     expect(resolver.resolve).not.toHaveBeenCalled()
     expect(resolver.status).not.toHaveBeenCalled()
+  })
+
+  it('declaredContext resolves a credential WITHOUT the repository approval', async () => {
+    const { controller, setProject } = fixture()
+    setProject({ ...project, kanban: { ...project.kanban!, github: undefined } })
+    const context = await controller.declaredContext(project.id)
+    expect(context.userId).toBe('1')
+    await expect(controller.declaredContext('no-such-project')).rejects.toMatchObject({ code: 'project-not-found' })
   })
 })

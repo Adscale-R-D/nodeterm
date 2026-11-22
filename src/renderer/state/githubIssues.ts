@@ -35,6 +35,10 @@ interface GitHubIssuesState {
    *  events, and it rides the board's refcounted host subscription — the existing 60 s conditional
    *  heartbeat, not a poller of its own. */
   pullWatch: Record<string, GitHubPullBoard>
+  /** The pull board of a board WITHOUT GitHub sync whose cards carry integration-principal DECLARED
+   *  PRs (only those PRs; see `useDeclaredPullBoard`). Absent = none declared, or not asked yet. */
+  declaredBoards: Record<string, GitHubPullBoard>
+  setDeclaredBoard(projectId: string, board: GitHubPullBoard | undefined): void
   watchPulls(api: GitHubIssuesApi, projectId: string): Promise<() => void>
   connect(api: GitHubIssuesApi, projectId: string, columns: string[], labelFilter?: string[]): Promise<() => void>
   reload(api: GitHubIssuesApi, projectId: string): Promise<void>
@@ -251,6 +255,19 @@ export async function lookupPullRequests(
 export const useGitHubIssues = create<GitHubIssuesState>((set, get) => ({
   projects: {},
   pullWatch: {},
+  declaredBoards: {},
+
+  setDeclaredBoard(projectId, board) {
+    set((state) => {
+      if (!board) {
+        if (!(projectId in state.declaredBoards)) return state
+        const declaredBoards = { ...state.declaredBoards }
+        delete declaredBoards[projectId]
+        return { declaredBoards }
+      }
+      return { declaredBoards: { ...state.declaredBoards, [projectId]: board } }
+    })
+  },
 
   async watchPulls(api, projectId) {
     let watches = pullWatches.get(api)

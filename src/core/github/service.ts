@@ -146,7 +146,14 @@ type ServiceOptions = {
   setInterval?: (fn: () => void, milliseconds: number) => TimerId
   clearInterval?: (timer: TimerId) => void
   onDelta?: (uiId: number, projectId: string, changedIssueNumbers: number[]) => void
+  /** A client for a project's DECLARED pull requests that needs no board approval (the host
+   *  controller's `declaredContext`). Absent = a board without GitHub sync shows no declared PRs. */
+  declaredContext?(projectId: string): Promise<{ userId: string; client: GitHubIssuesClientLike }>
 }
+
+/** A board without GitHub sync reads its declared PRs at most this often, and only while a board
+ *  asks (`pullStatus`). */
+export const DECLARED_ONLY_READ_MS = 60_000
 
 type RepositoryState = {
   snapshot?: GitHubCompleteSnapshot
@@ -262,6 +269,10 @@ export class GitHubIssueService {
   private operationSequence = 0
   /** Late-bound: the GitHub service is registered before the integration ledger exists. */
   private declaredPullsProvider: DeclaredPullsProvider | undefined
+  /** Declared PRs of boards WITHOUT GitHub sync, keyed `${projectId}\0${repository}`. In memory
+   *  only: no list read, no harvest, no persisted memory — just the declared numbers, one by one. */
+  private readonly declaredOnly: GitHubPullStatusTracker
+  private readonly declaredOnlyReadAt = new Map<string, number>()
   private readonly now: () => number
   private readonly schedule: NonNullable<ServiceOptions['setInterval']>
   private readonly unschedule: NonNullable<ServiceOptions['clearInterval']>
@@ -293,6 +304,82 @@ export class GitHubIssueService {
       },
       pinned: (key) => this.pinnedForKey(key)
     })
+    this.declaredOnly = new GitHubPullStatusTracker({
+      coordinator: options.coordinator,
+      now: this.now,
+      onChanged: () => undefined,
+      pinned: (key) => {
+        const at = key.indexOf('\0')
+        return new Set(this.declaredFor(key.slice(0, at), key.slice(at + 1)).flatMap((row) => row.pulls))
+      }
+    })
+  }
+
+  /**
+   * The pull board of a project whose board is NOT synced with GitHub (not connected, or not
+   * approved here) but whose cards carry principal-declared PRs: only those PRs, read one by one in
+   * the background (at most once per `DECLARED_ONLY_READ_MS`), never the repository's PR list.
+   * Null when the project declares nothing.
+   */
+  private declaredOnlyBoard(projectId: string): GitHubPullBoard | null {
+    let rows: ReturnType<DeclaredPullsProvider>
+    try {
+      rows = this.declaredPullsProvider?.(projectId) ?? []
+    } catch {
+      return null
+    }
+    const counts = new Map<string, number>()
+    for (const row of rows) if (row.pulls.length) counts.set(row.repository, (counts.get(row.repository) ?? 0) + 1)
+    const repository = [...counts].sort((a, b) => b[1] - a[1])[0]?.[0]
+    if (!repository) return null
+    const key = `${projectId}\0${repository}`
+    this.readDeclaredOnlySoon(projectId, key, repository)
+    return { ...this.declaredOnly.board(key), declared: this.declaredFor(projectId, repository) }
+  }
+
+  private readDeclaredOnlySoon(projectId: string, key: string, repository: string): void {
+    const at = this.declaredOnlyReadAt.get(key)
+    if (at !== undefined && this.now() - at < DECLARED_ONLY_READ_MS) return
+    const declaredContext = this.options.declaredContext
+    if (!declaredContext) return
+    this.declaredOnlyReadAt.set(key, this.now())
+    void (async () => {
+      const context = await declaredContext(projectId)
+      await this.declaredOnly.read(key, context.userId, 'heartbeat', () => this.readDeclaredOnly(context, key, repository))
+    })().catch(() => undefined)
+  }
+
+  /** The single-PR reads of a declared-only board, shaped as a list read with nothing listed. */
+  private async readDeclaredOnly(
+    context: { userId: string; client: GitHubIssuesClientLike },
+    key: string,
+    repository: string
+  ): Promise<PullStatusRead> {
+    const empty: PullStatusRead = { open: [], recent: [], access: { ci: true, merge: true }, truncated: false }
+    const readOne = context.client.pullRequestStatus?.bind(context.client)
+    if (!readOne) return empty
+    const wanted = await this.declaredOnly.declaredToRead(key, empty)
+    const open: PullStatusRead['open'] = []
+    const recent: PullStatusRead['recent'] = []
+    const access = { ci: true, merge: true }
+    for (const number of wanted) {
+      if (this.options.coordinator.throttle(context.userId, this.now(), 'graphql')) break
+      let one: PullOneRead
+      try {
+        one = await this.options.coordinator.runRead(context.userId, () => readOne(repository, number))
+      } catch (error) {
+        if ((error as { code?: unknown } | null)?.code === 'rate-limited') break
+        continue
+      }
+      if (one.kind === 'missing') this.declaredOnly.noteMissing(key, number)
+      else if (one.kind === 'finished') recent.push(one.pull)
+      else {
+        open.push(one.facts)
+        access.ci &&= one.access.ci
+        access.merge &&= one.access.merge
+      }
+    }
+    return { open, recent, access, truncated: false }
   }
 
   /** Wire the declared-links source (Server Edition: the integration ledger). */
@@ -341,6 +428,10 @@ export class GitHubIssueService {
    */
   declaredPullsChanged(projectId: string): void {
     this.notifyProject(projectId)
+    // A board without GitHub sync reads the new numbers on its next `pullStatus`, not a minute later.
+    for (const key of [...this.declaredOnlyReadAt.keys()]) {
+      if (key.startsWith(`${projectId}\0`)) this.declaredOnlyReadAt.delete(key)
+    }
     const key = this.projectKeys.get(projectId)
     if (!key || key.startsWith('unbound:')) return
     this.pulls.markOwed(key)
@@ -836,7 +927,16 @@ export class GitHubIssueService {
   /** What the board knows about this project's pull requests beyond the issues harvest. Read from
    *  memory only — it never sends a request. */
   async pullStatus(request: { projectId: string }): Promise<GitHubPullBoard> {
-    const context = await this.cacheContext(request.projectId)
+    let context: GitHubIssueProjectContext
+    try {
+      context = await this.cacheContext(request.projectId)
+    } catch (error) {
+      // No GitHub sync here (not connected, or not approved on this machine): the declared PRs
+      // alone, if a principal declared any.
+      const declared = this.declaredOnlyBoard(request.projectId)
+      if (declared) return declared
+      throw error
+    }
     const { key } = await this.cachedState(context)
     return this.boardFor(key, request.projectId, context.repository)
   }

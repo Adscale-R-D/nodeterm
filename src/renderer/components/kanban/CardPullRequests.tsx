@@ -45,14 +45,17 @@ export function CardPullRequests({
   const activeProjectId = useProjects((state) => state.activeProjectId)
   const projectId = owningProjectId ?? activeProjectId
   const ssh = useProjects((state) => !!state.projects.find((item) => item.id === projectId)?.ssh)
-  const pullBoard = useGitHubIssues((state) => state.projects[projectId]?.pullBoard)
+  // A board without GitHub sync has no subscription pull board, only the declared-only one.
+  const pullBoard = useGitHubIssues((state) => board.github
+    ? state.projects[projectId]?.pullBoard
+    : state.declaredBoards[projectId])
   const autoMoveRaw = useSettings((state) => state.settings.kanbanPullAutoMove)
   const target = useMemo(() => {
     const entry = sanitizeKanbanPullAutoMove(autoMoveRaw).projects[projectId]
     return entry ? board.columns.find((column) => column.id === entry.columnId) : undefined
   }, [autoMoveRaw, projectId, board.columns])
-  if (!board.github) return null
   const declared = declaredPullsFor(session.id, pullBoard)
+  if (!board.github && declared.size === 0) return null
   // On SSH only the branch half is unavailable: an issue-bound session still links through its
   // issue, and a principal's declared links need no worktree at all.
   if (ssh && !session.issueRef && declared.size === 0) {
@@ -118,7 +121,7 @@ export function CardPullRequests({
           </button>
         </div>
       ))}
-      {target && links.linked.length > 0 && (
+      {board.github && target && links.linked.length > 0 && (
         <>
           {abandoned.length > 0 && !optedOut && (
             <p className="card-pulls__note card-pulls__note--warn">

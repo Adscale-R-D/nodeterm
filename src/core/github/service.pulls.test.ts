@@ -3,7 +3,7 @@ import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { GitHubIssueCache } from './cache'
 import { testTmpDir } from '../test-tmp'
-import { GitHubIssueService, type GitHubIssueServiceContext, type GitHubIssuesClientLike } from './service'
+import { DECLARED_ONLY_READ_MS, GitHubIssueService, type GitHubIssueServiceContext, type GitHubIssuesClientLike } from './service'
 import { GitHubRequestCoordinator } from './request-coordinator'
 import { DECLARED_RETRY_MS } from './pull-status-tracker'
 import type { PullOneRead, PullStatusRead } from './graphql-pulls'
@@ -447,5 +447,81 @@ describe('GitHubIssueService — principal-declared pull requests', () => {
       expect((await h.service.pullStatus({ projectId: 'project-1' })).pulls.some((p) => p.number === 900)).toBe(true))
     expect(await h.service.notePullWaits({ projectId: 'project-1', cardId: 'term-2', pulls: [900] })).toBe(0)
     expect(await h.service.claimPullAutoMove({ projectId: 'project-1', cardId: 'term-2', pulls: [900] })).toBe(false)
+  })
+})
+
+describe('GitHubIssueService — declared PRs on a board WITHOUT GitHub sync', () => {
+  /** The board is not connected (cacheContext refuses), so only `declaredContext` can read. */
+  function unsynced(declared: Array<{ nodeId: string; pulls: number[] }>) {
+    let now = 2_000_000
+    const client = new (class extends PullClient {
+      singleReads: number[] = []
+      async pullRequestStatus(_repository: string, number: number): Promise<PullOneRead> {
+        this.singleReads.push(number)
+        return number === 900
+          ? { kind: 'finished', pull: { number: 900, headRefName: 'old', crossRepository: false, lifecycle: 'merged' } }
+          : { kind: 'open', facts: facts(number, { rollup: 'FAILURE' }), access: { ci: true, merge: true } }
+      }
+    })()
+    let declaredContexts = 0
+    const service = new GitHubIssueService({
+      cache: new GitHubIssueCache(userDataDir),
+      coordinator: new GitHubRequestCoordinator({ now: () => now }),
+      contextForProject: async () => { throw Object.assign(new Error('invalid-configuration'), { code: 'invalid-configuration' }) },
+      projectContextForCache: async () => { throw Object.assign(new Error('invalid-configuration'), { code: 'invalid-configuration' }) },
+      declaredContext: async () => { declaredContexts += 1; return { userId: 'user-1', client } },
+      now: () => now,
+      setInterval: () => 1,
+      clearInterval: () => undefined
+    })
+    service.setDeclaredPulls((projectId) => projectId === 'project-1'
+      ? declared.map((d) => ({ ...d, repository: 'Adscale-R-D/app_ms' }))
+      : [])
+    return { service, client, advance: (ms: number) => { now += ms }, declaredContexts: () => declaredContexts }
+  }
+
+  it('answers only the declared PRs: no list read, no harvest, and the cards carry them', async () => {
+    const h = unsynced([{ nodeId: 'sink-1', pulls: [1420, 900] }])
+    const first = await h.service.pullStatus({ projectId: 'project-1' })
+    expect(first.declared).toEqual([{ nodeId: 'sink-1', pulls: [1420, 900] }])
+    await vi.waitFor(() => expect(h.client.singleReads.sort()).toEqual([1420, 900]))
+    await flush()
+    const board = await h.service.pullStatus({ projectId: 'project-1' })
+    expect(board.pulls.find((p) => p.number === 1420)).toMatchObject({ lifecycle: 'open', ci: 'failed' })
+    expect(board.pulls.find((p) => p.number === 900)).toMatchObject({ lifecycle: 'merged' })
+    expect(h.client.statusReads).toBe(0)
+    expect(h.client.heartbeats).toBe(0)
+  })
+
+  it('reads at most once a minute however often the board asks, and only the open PRs again', async () => {
+    const h = unsynced([{ nodeId: 'sink-1', pulls: [1420, 900] }])
+    await h.service.pullStatus({ projectId: 'project-1' })
+    await vi.waitFor(() => expect(h.client.singleReads).toHaveLength(2))
+    await flush()
+    h.client.singleReads = []
+    for (let i = 0; i < 5; i++) await h.service.pullStatus({ projectId: 'project-1' })
+    await flush()
+    expect(h.client.singleReads).toEqual([])
+    h.advance(DECLARED_ONLY_READ_MS)
+    await h.service.pullStatus({ projectId: 'project-1' })
+    await vi.waitFor(() => expect(h.client.singleReads).toEqual([1420]))
+  })
+
+  it('a declaration change reads at once', async () => {
+    const declared = [{ nodeId: 'sink-1', pulls: [1420] }]
+    const h = unsynced(declared)
+    await h.service.pullStatus({ projectId: 'project-1' })
+    await vi.waitFor(() => expect(h.client.singleReads).toEqual([1420]))
+    await flush()
+    declared.push({ nodeId: 'sink-2', pulls: [1421] })
+    h.service.declaredPullsChanged('project-1')
+    await h.service.pullStatus({ projectId: 'project-1' })
+    await vi.waitFor(() => expect(h.client.singleReads).toContain(1421))
+  })
+
+  it('nothing declared: the host refuses as before, and resolves no credential', async () => {
+    const h = unsynced([])
+    await expect(h.service.pullStatus({ projectId: 'project-1' })).rejects.toMatchObject({ code: 'invalid-configuration' })
+    expect(h.declaredContexts()).toBe(0)
   })
 })

@@ -70,6 +70,7 @@ export function registerGitHubIntegration(dependencies: Dependencies): {
     projectContextForCache: (projectId) => controller.projectContextForCache(projectId),
     projectContextForCacheDeletion: (projectId) => controller.projectContextForCacheDeletion(projectId),
     avatarFetcher: new GitHubAvatarFetcher(),
+    declaredContext: (projectId) => controller.declaredContext(projectId),
     onDelta: (uiId, projectId, changedIssueNumbers) =>
       dependencies.platform.sendTo(uiId, IPC.githubIssuesChanged(projectId), changedIssueNumbers)
   })

@@ -99,15 +99,14 @@ export class GitHubHostController {
   constructor(private readonly dependencies: HostDependencies) {}
 
   /**
-   * Where a project's board stands for PR links, with no credential: `not-connected` = the board has
-   * no GitHub block (nothing on it can show a PR), else the repository it syncs with (configured,
-   * else the git remote), or `no-repository`. A connected board whose mapping is invalid still has
-   * its repository: links recorded now show once the mapping is fixed and approved.
+   * The repository integration-principal PR links are recorded against, with no credential: the
+   * board's configured repository when it has one, else the project's git remote. A board does NOT
+   * need GitHub sync for declared links (they are read on their own, see `declaredContext`).
    */
-  async boardRepository(projectId: string): Promise<{ repository: string } | { refused: 'board-not-connected' | 'no-repository' }> {
+  async boardRepository(projectId: string): Promise<{ repository: string } | { refused: 'no-repository' }> {
     const record = await this.dependencies.project(projectId)
-    if (!record?.project.kanban?.github) return { refused: 'board-not-connected' }
-    const configured = record.project.kanban.github.repository
+    if (!record) return { refused: 'no-repository' }
+    const configured = record.project.kanban?.github?.repository
       ? parseGitHubRepository(record.project.kanban.github.repository) ?? undefined
       : undefined
     const repository = configured ??
@@ -245,6 +244,25 @@ export class GitHubHostController {
     this.credentialGeneration += 1
     this.dependencies.onCredentialBoundaryChange?.()
     return this.status()
+  }
+
+  /**
+   * A client for the pull requests an integration principal DECLARED on a project's cards, WITHOUT
+   * the board's repository approval. Registering a principal for a project (`main.cjs integration
+   * add … --project`) is the consent: it lets the server read the state of exactly the PR numbers the
+   * principal names, one at a time — never the repository's issues or its PR list. Throws
+   * `project-not-found` / `not-authenticated`.
+   */
+  async declaredContext(projectId: string): Promise<{ userId: string; client: GitHubIssuesClientLike }> {
+    const record = await this.dependencies.project(projectId)
+    if (!record) throw new GitHubHostError('project-not-found')
+    const state = await this.dependencies.controls.load()
+    const credential = await this.dependencies.resolver.resolve(state.authProvider)
+    if (!credential) throw new GitHubHostError('not-authenticated')
+    return {
+      userId: credential.userId,
+      client: this.dependencies.client({ token: credential.token, userId: credential.userId })
+    }
   }
 
   async contextForProject(projectId: string): Promise<GitHubIssueServiceContext> {

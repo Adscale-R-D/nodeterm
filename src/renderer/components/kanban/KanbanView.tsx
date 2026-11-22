@@ -1,4 +1,5 @@
 import { KanbanScopeSwitch } from './KanbanScopeSwitch'
+import { useDeclaredPullBoard } from './useDeclaredPullBoard'
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { KanbanColumnCategory, KanbanLabel, KanbanSavedView, KanbanViewQuery, PendingLaunch, ProjectKanban } from '@shared/types'
 import { deleteView, renameView, sameViewQuery, saveView, updateView, viewQuery } from '@shared/kanban-views'
@@ -366,7 +367,9 @@ export const KanbanView = memo(function KanbanView({
   // legitimately be a subset. Say so — a silently short list reads as "this repo has few PRs".
   const pullsTruncated = Object.values(github?.pullPages ?? {}).some((page) => page.partial)
   // Pull request CI/mergeability + the PR ↔ issue / PR ↔ session links.
-  const pullBoard = github?.pullBoard
+  // A board without GitHub sync still shows the PRs an integration principal DECLARED on its cards.
+  const declaredBoard = useDeclaredPullBoard(api.githubIssues, projectId, !board.github)
+  const pullBoard = board.github ? github?.pullBoard : declaredBoard
   const pullNow = useMinuteTick(!!pullBoard?.stale)
   const pullFreshness = pullBoard ? pullStatusFreshness(pullBoard, pullNow) : 'fresh'
   const pullByNumber = useMemo(() => pullStatusByNumber(pullBoard), [pullBoard])
@@ -574,7 +577,7 @@ export const KanbanView = memo(function KanbanView({
   const pullLinksKey = JSON.stringify(board.pullLinks ?? null)
   const pullsByCard = useMemo(() => {
     const byCard = new Map<string, GitHubPullStatus[]>()
-    if (!board.github) return byCard
+    if (!board.github && !pullBoard?.declared?.length) return byCard
     for (const session of sessions) {
       const linked = pullsForCard(session, pullBoard, board).linked
       if (linked.length) byCard.set(session.id, linked)

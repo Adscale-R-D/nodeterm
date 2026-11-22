@@ -67,6 +67,16 @@ describe('CardPullRequests — declared', () => {
     expect(render()).toContain('has not been read yet')
   })
 
+  it('a board WITHOUT GitHub sync shows declared PRs from the declared-only board (no auto-move offer)', () => {
+    const { github: _g, ...unsynced } = board
+    world.github = { projects: {}, declaredBoards: { p1: base } }
+    const html = render(unsynced)
+    expect(html).toContain('PR #1045')
+    expect(html).not.toContain('when its pull requests merge')
+    world.github = { projects: {}, declaredBoards: {} }
+    expect(render(unsynced)).toBe('')
+  })
+
   it('nothing declared, no branch, no issue: no section', () => {
     setPullBoard({ ...base, declared: undefined })
     expect(render()).toBe('')

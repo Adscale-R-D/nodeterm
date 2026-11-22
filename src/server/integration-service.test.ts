@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { IntegrationLedger } from '../core/integration/ledger'
 import { resetMessageFlow } from '../core/agents/agent-message-flow'
@@ -46,7 +46,7 @@ function setup(over: Partial<IntegrationServiceDeps> = {}) {
     isRemoteNode: () => false,
     messagingEnabled: () => false,
     paneOwnerProject: (id) => [...w.canvas].find(([, nodes]) => nodes.some((n) => n.id === id))?.[0],
-    principalOwnsTarget: (p, id) => ledger.owns(p, id),
+    principalOwnsTarget: (p, id, key) => ledger.owns(p, id, key),
     customAgents: () => undefined,
     appendBoardLog: async () => false,
     subscribeReceipts: (cb) => {
@@ -542,4 +542,39 @@ describe('integration service — a node that granted itself (adopted rows)', ()
       expect(w.sent).toEqual([])
     })
   }
+})
+
+describe('integration service — one node, several granted keys', () => {
+  it('each key reaches the node; revoking one stops only its queued send; the outbox names the right key', async () => {
+    const t = setup()
+    t.w.canvas.get('p1')!.push({ id: 'lane-1' })
+    t.ledger.grant({ principal: 'sink', key: 'gh:1283', nodeId: 'lane-1', projectId: 'p1' })
+    t.ledger.grant({ principal: 'sink', key: 'gh:1379', nodeId: 'lane-1', projectId: 'p1' })
+    const outcomes: Array<{ key: string; outcome: string }> = []
+    t.messaging.onQueuedResult = (req, outcome) => {
+      t.service.onQueuedResult(req, outcome)
+      outcomes.push({ key: String(req.key), outcome: outcome.kind })
+    }
+    t.messaging.queue = createDeliveryQueue(t.messaging)
+    t.w.state = 'working'
+    for (const key of ['gh:1283', 'gh:1379']) {
+      const r = await t.call('send', { key, text: `event for ${key}` })
+      expect((r.body as { result: { outcome: string; nodeId: string } }).result).toMatchObject({ outcome: 'queued', nodeId: 'lane-1' })
+    }
+    expect(t.ledger.revokeGrant('sink', 'gh:1283', 'lane-1')).toBe('revoked')
+    t.w.state = 'done'
+    onMessagingAgentEvent({ nodeId: 'lane-1', state: 'done', verified: true }, t.messaging.queue)
+    await vi.waitFor(() => expect(outcomes.length).toBeGreaterThanOrEqual(1))
+    // The pair limit (one message per 10 s from a principal to one node) holds the second message
+    // in the queue; clear it, then the next idle edge releases it.
+    resetMessageFlow()
+    onMessagingAgentEvent({ nodeId: 'lane-1', state: 'done', verified: true }, t.messaging.queue)
+    await vi.waitFor(() => expect(outcomes).toHaveLength(2))
+    expect(t.w.sent).toHaveLength(1)
+    expect(t.w.sent[0]).toContain('event for gh:1379')
+    expect(t.w.sent[0]).not.toContain('gh:1283')
+    const outbox = t.ledger.outboxOf('sink')
+    expect(outbox.find((e) => e.key === 'gh:1379')?.outcome).toBe('delivered')
+    expect(outbox.find((e) => e.key === 'gh:1283')?.outcome).toBe('notPermitted')
+  })
 })

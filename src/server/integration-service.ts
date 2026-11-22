@@ -139,7 +139,7 @@ export function createIntegrationService(deps: IntegrationServiceDeps): {
   const liveRow = (principal: string, key: string): IntegrationNodeRecord | undefined => {
     const row = deps.ledger.openNode(principal, key)
     if (row && !nodeOnCanvas(row.projectId, row.nodeId)) {
-      deps.ledger.close(row.nodeId)
+      deps.ledger.close(row)
       return undefined
     }
     return row
@@ -171,15 +171,15 @@ export function createIntegrationService(deps: IntegrationServiceDeps): {
   /** Unions `pulls` into the key's declared set for `open`. Ignored (never refused) without a
    *  repository. */
   const declareOnOpen = async (
-    nodeId: string,
+    row: IntegrationNodeRecord,
     projectId: string,
     pulls: number[]
   ): Promise<{ pulls: number[]; pullsIgnored?: Refusal } | 'too-many'> => {
     const answer = await repositoryOf(projectId)
     if ('refused' in answer) return { pulls: [], pullsIgnored: answer.refused }
     const repository = answer.repository
-    const before = deps.ledger.declaredPulls(nodeId, repository)
-    const next = deps.ledger.declarePulls(nodeId, repository, pulls)
+    const before = deps.ledger.declaredPulls(row, repository)
+    const next = deps.ledger.declarePulls(row, repository, pulls)
     if (next === 'too-many') return 'too-many'
     const after = next ?? []
     if (after.join(',') !== before.join(',')) deps.onPullsChanged?.(projectId)
@@ -216,7 +216,7 @@ export function createIntegrationService(deps: IntegrationServiceDeps): {
     return withKeyLock(`${p.name}|${key}`, async () => {
       const existing = liveRow(p.name, key)
       if (existing) {
-        const declared = pulls ? await declareOnOpen(existing.nodeId, existing.projectId, pulls) : undefined
+        const declared = pulls ? await declareOnOpen(existing, existing.projectId, pulls) : undefined
         if (declared === 'too-many') return tooManyPulls()
         const result: IntegrationOpenResult = {
           key,
@@ -281,7 +281,8 @@ export function createIntegrationService(deps: IntegrationServiceDeps): {
       if (!opened.ok) return fail(opened.error === 'not-saved' || opened.error === 'stopping' ? 503 : 409, opened.error, opened.message)
       if (opened.sessionCreated !== undefined) deps.ledger.update(opened.nodeId, { sessionCreated: opened.sessionCreated })
       // A fresh key: at most INTEGRATION_PULLS_MAX by validation, so it cannot overflow.
-      const declared = pulls ? await declareOnOpen(opened.nodeId, projectId, pulls) : undefined
+      const ownRow = deps.ledger.openNode(p.name, key)
+      const declared = pulls && ownRow ? await declareOnOpen(ownRow, projectId, pulls) : undefined
       const result: IntegrationOpenResult = {
         key,
         nodeId: opened.nodeId,
@@ -315,7 +316,7 @@ export function createIntegrationService(deps: IntegrationServiceDeps): {
         transcriptPresence: (sid) => deps.transcriptPresence(sid)
       })
       if (!r.ok) {
-        if (r.error === 'node-missing') deps.ledger.close(row.nodeId)
+        if (r.error === 'node-missing') deps.ledger.close(row)
         return fail(r.error === 'stopping' ? 503 : 409, r.error, r.message)
       }
       const patch: { sessionCreated?: number; agentSessionId?: string } = {}
@@ -347,7 +348,8 @@ export function createIntegrationService(deps: IntegrationServiceDeps): {
         projectId: row.projectId,
         targetNodeId: row.nodeId,
         body: sanitizeChatText(b.text),
-        sendId
+        sendId,
+        key: row.key
       },
       deps.messaging,
       { queue: b.queue !== false, ...(ttlMs !== undefined ? { ttlMs } : {}) }
@@ -375,7 +377,7 @@ export function createIntegrationService(deps: IntegrationServiceDeps): {
       if (!row) return unknownKey(key)
       // An adopted node: end the grant only. The node and its session stay with whoever opened it.
       if (row.adopted) {
-        deps.ledger.close(row.nodeId)
+        deps.ledger.close(row)
         const result: IntegrationCloseResult = { key, nodeId: row.nodeId, closed: true, adopted: true }
         return ok(result)
       }
@@ -384,7 +386,7 @@ export function createIntegrationService(deps: IntegrationServiceDeps): {
       const frameId = frameRow && frameRow.kind === 'frame' && frameRow.principal === p.name ? frameRow.nodeId : undefined
       const r = await deps.factory.principalClose({ projectId: row.projectId, nodeId: row.nodeId, ...(frameId ? { frameId } : {}) })
       if (!r.ok) return fail(503, r.error, r.message)
-      deps.ledger.close(row.nodeId)
+      deps.ledger.close(row)
       if (r.frameRemoved && frameId) deps.ledger.close(frameId)
       const result: IntegrationCloseResult = { key, nodeId: row.nodeId, closed: true, ...(r.nodeMissing ? { nodeMissing: true } : {}) }
       return ok(result)
@@ -451,10 +453,10 @@ export function createIntegrationService(deps: IntegrationServiceDeps): {
       const answer = await repositoryOf(row.projectId)
       if ('refused' in answer) return refusedRepository(row.projectId, answer.refused)
       const repository = answer.repository
-      const before = deps.ledger.declaredPulls(row.nodeId, repository)
+      const before = deps.ledger.declaredPulls(row, repository)
       const next = add
-        ? deps.ledger.declarePulls(row.nodeId, repository, [pull])
-        : deps.ledger.undeclarePull(row.nodeId, repository, pull)
+        ? deps.ledger.declarePulls(row, repository, [pull])
+        : deps.ledger.undeclarePull(row, repository, pull)
       if (next === 'too-many') return tooManyPulls()
       if (next === undefined) return unknownKey(key)
       if (next.join(',') !== before.join(',')) deps.onPullsChanged?.(row.projectId)
@@ -539,8 +541,12 @@ export function createIntegrationService(deps: IntegrationServiceDeps): {
       const principal = typeof req.principal === 'string' ? req.principal : undefined
       const sendId = typeof req.sendId === 'string' ? req.sendId : undefined
       if (!principal || !sendId) return
-      // Any state: a message may end after its key was closed, and its sender still asks.
-      const key = deps.ledger.rowsOf(principal, true).find((r) => r.nodeId === req.targetNodeId)?.key
+      // The key the send was made for (a node may hold several grants); an entry queued by an older
+      // build carries none, and falls back to the node's row. Any state: a message may end after its
+      // key was closed, and its sender still asks.
+      const key = isSafePrincipalKey(req.key)
+        ? req.key
+        : deps.ledger.rowsOf(principal, true).find((r) => r.nodeId === req.targetNodeId)?.key
       if (!key) return
       deps.ledger.recordOutcome({ principal, sendId, key, nodeId: req.targetNodeId, outcome: outcome.kind, at: now() })
     }

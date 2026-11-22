@@ -1,6 +1,6 @@
 // A node grants ITSELF to an integration principal (src/server/integration-grant.ts).
 import { describe, expect, it } from 'vitest'
-import { IntegrationLedger, openIntegrationLedger } from '../core/integration/ledger'
+import { GRANTS_PER_NODE_MAX, IntegrationLedger, openIntegrationLedger } from '../core/integration/ledger'
 import type { PrincipalEntry } from '../core/integration/registry'
 import { testTmpDir } from '../core/test-tmp'
 import { createServerEditionControlHandler, type ServerEditionControlActions } from './control-unsupported'
@@ -31,7 +31,7 @@ describe('integration-grant', () => {
     expect(grant('lane-1')).toMatchObject({ ok: true, result: { principal: 'sink', key: 'LANE-1', nodeId: 'lane-1', status: 'granted' } })
     expect(ledger.openNode('sink', 'LANE-1')).toMatchObject({ nodeId: 'lane-1', adopted: true, projectId: 'p1', agentId: 'claude' })
     expect(grant('lane-1')).toMatchObject({ ok: true, result: { status: 'already-granted' } })
-    ledger.declarePulls('lane-1', 'o/r', [12])
+    ledger.declarePulls(ledger.openNode('sink', 'LANE-1')!, 'o/r', [12])
     expect(grant('lane-2')).toMatchObject({ ok: true, result: { nodeId: 'lane-2', status: 'moved' } })
     expect(ledger.grantsOf('lane-1')).toEqual([])
     expect(ledger.openNode('sink', 'LANE-1')).toMatchObject({ nodeId: 'lane-2', pulls: [12] })
@@ -44,10 +44,28 @@ describe('integration-grant', () => {
     expect(ledger.openNode('sink', 'APP-1')?.nodeId).toBe('term-9')
   })
 
-  it('refuses a node that already holds a grant (node-held)', () => {
+  it('a node may hold several grants (several keys); a node a principal OPENED is node-held', () => {
+    const { grant, handle, ledger } = setup()
+    expect(grant('lane-1', 'gh:1283')).toMatchObject({ ok: true, result: { status: 'granted' } })
+    expect(grant('lane-1', 'gh:1379')).toMatchObject({ ok: true, result: { status: 'granted' } })
+    expect(handle('integration-grants', 'lane-1', {})).toMatchObject({
+      result: { grants: [{ principal: 'sink', key: 'gh:1283' }, { principal: 'sink', key: 'gh:1379' }] }
+    })
+    expect(ledger.owns('sink', 'lane-1', 'gh:1283')).toBe(true)
+    expect(ledger.owns('sink', 'lane-1', 'gh:1379')).toBe(true)
+    // Revoking one key leaves the other; the per-key creator check follows.
+    handle('integration-revoke', 'lane-1', { principal: 'sink', key: 'gh:1283' })
+    expect(ledger.owns('sink', 'lane-1', 'gh:1283')).toBe(false)
+    expect(ledger.owns('sink', 'lane-1', 'gh:1379')).toBe(true)
+    // A node the principal opened itself takes no grants.
+    ledger.add({ principal: 'sink', kind: 'node', key: 'APP-1', nodeId: 'lane-2', projectId: 'p1', agentId: 'codex', createdAt: 1, state: 'open' })
+    expect(grant('lane-2', 'gh:1')).toMatchObject({ ok: false, error: 'node-held' })
+  })
+
+  it('caps the grants on one node', () => {
     const { grant } = setup()
-    grant('lane-1', 'LANE-1')
-    expect(grant('lane-1', 'LANE-2')).toMatchObject({ ok: false, error: 'node-held' })
+    for (let i = 0; i < GRANTS_PER_NODE_MAX; i++) expect(grant('lane-1', `gh:${i + 1}`)).toMatchObject({ ok: true })
+    expect(grant('lane-1', 'gh:9999')).toMatchObject({ ok: false, error: 'too-many-grants' })
   })
 
   it('refuses an unregistered principal, and one not registered for the caller\'s project, alike', () => {

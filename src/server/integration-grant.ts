@@ -14,7 +14,7 @@ import {
   isSafePrincipalName,
   type IntegrationAgent
 } from '../shared/integration-principal'
-import type { IntegrationLedger } from '../core/integration/ledger'
+import { GRANTS_PER_NODE_MAX, type IntegrationLedger } from '../core/integration/ledger'
 import type { PrincipalEntry } from '../core/integration/registry'
 import type { ServerControlReply } from './headless-node-factory'
 
@@ -100,13 +100,10 @@ export function createIntegrationGrantHandler(deps: IntegrationGrantDeps): (
       return refuse('key-owned', `key ${key} belongs to a node ${principal} opened itself; it cannot be granted to another node`)
     }
     if (status === 'node-held') {
-      const held = deps.ledger.ownerOf(nodeId)
-      return refuse(
-        'node-held',
-        held?.adopted
-          ? `this node is already granted to ${held.principal} for key ${held.key}; revoke that first (integration-revoke)`
-          : 'this node was opened by an integration and already belongs to it'
-      )
+      return refuse('node-held', 'this node was opened by an integration and already belongs to it')
+    }
+    if (status === 'too-many-grants') {
+      return refuse('too-many-grants', `this node already holds ${GRANTS_PER_NODE_MAX} grants; revoke some first (integration-revoke)`)
     }
     const result: IntegrationGrantResult = { principal, key, nodeId, status }
     const said = status === 'moved' ? `moved ${principal} ${key} to this node` : `${status} ${principal} ${key}`

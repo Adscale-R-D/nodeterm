@@ -301,7 +301,7 @@ export async function initServerCanvasControl(
   const integrationLedger = openIntegrationLedger(platform().userDataDir, {
     standDown: deps.ownsDurableState === false
   })
-  messaging.principalOwnsTarget = (principal, nodeId) => integrationLedger.ledger.owns(principal, nodeId)
+  messaging.principalOwnsTarget = (principal, nodeId, key) => integrationLedger.ledger.owns(principal, nodeId, key)
   const principalRegistry = new PrincipalRegistryReader(platform().userDataDir)
   const integration = createIntegrationService({
     registry: principalRegistry,

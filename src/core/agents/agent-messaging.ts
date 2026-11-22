@@ -106,6 +106,9 @@ export interface IntegrationMessage {
   body: string
   /** One id per `send`, kept across its queued flushes: its fan-out budget is its own. */
   sendId: string
+  /** The principal's key the send was made for. A node may hold several grants, so the creator
+   *  check (and the outbox) are per key: revoking one key stops its queued sends. */
+  key?: string
 }
 
 /** Everything `runDelivery` can carry: an agent's verb, the app's station notice, a board comment,
@@ -229,7 +232,7 @@ export interface AgentMessagingDeps {
    * open this node, and is it still open? Absent ⇒ a principal's send is refused
    * `unsupported-edition`. Checked on every queued flush too.
    */
-  principalOwnsTarget?(principal: string, targetNodeId: string): boolean
+  principalOwnsTarget?(principal: string, targetNodeId: string, key?: string): boolean
   customAgents(): readonly { id: string; launchCmd: string }[] | undefined
   appendBoardLog(projectId: string, entry: BoardLogEntry): Promise<boolean>
   /** Test seam: override the receipt subscription. Production uses the module bus below. */
@@ -785,7 +788,7 @@ export async function runDelivery(
   if (!notPermitted && integration) {
     // The principal's own creator proof, durable across restarts (core/integration/ledger.ts).
     if (!deps.principalOwnsTarget) notPermitted = 'unsupported-edition'
-    else if (!deps.principalOwnsTarget(integration.principal, req.targetNodeId)) notPermitted = 'caller-not-owner'
+    else if (!deps.principalOwnsTarget(integration.principal, req.targetNodeId, integration.key)) notPermitted = 'caller-not-owner'
   } else if (!notPermitted && deps.callerOwnsTarget) {
     if (board) notPermitted = 'unsupported-edition'
     else if (

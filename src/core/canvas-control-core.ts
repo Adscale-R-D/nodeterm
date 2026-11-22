@@ -200,9 +200,10 @@ function integrationGrantDocLines(): string[] {
     '  and link pull requests to your card, as on sessions it opened itself. It can never close your node',
     '  or relaunch your session. Only you can grant yourself; nothing can grant another node. The',
     '  integration must be registered for your project. Replies `granted`, `already-granted` or `moved`',
-    '  (the key was granted to another node and now points here: the latest grant wins). Refused:',
-    '  `key-owned` (the integration opened a node for that key itself), `node-held` (you already have a',
-    '  grant; revoke it first), `principal-not-registered`.',
+    '  (the key was granted to another node and now points here: the latest grant wins). Grant one key',
+    '  per item you want events for (e.g. one per pull request you open); a node may hold many. Refused:',
+    '  `key-owned` (the integration opened a node for that key itself), `node-held` (an integration',
+    '  opened THIS node), `too-many-grants`, `principal-not-registered`.',
     `- \`${revoke} --principal <name> --key <key>\` — end your own grant (only the node that holds it can).`,
     `- \`${grants}\` — list your grants (principal and key).`,
     '  Every flag takes a value.'

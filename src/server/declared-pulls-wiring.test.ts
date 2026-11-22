@@ -23,4 +23,9 @@ describe('declared pull links: the Server Edition wiring', () => {
     expect(integration).toMatch(/onPullsChanged:\s*deps\.onDeclaredPullsChanged/)
     expect(src).toMatch(/declaredPulls:\s*\(projectId\)\s*=>\s*integrationLedger\.ledger\.declaredForProject\(projectId\)/)
   })
+  it('the principal creator check passes the KEY (a node may hold several grants; revoking one key must stop its sends)', () => {
+    expect(read('canvas-control.ts')).toMatch(
+      /principalOwnsTarget = \(principal, nodeId, key\) => integrationLedger\.ledger\.owns\(principal, nodeId, key\)/
+    )
+  })
 })

@@ -62,6 +62,8 @@ export interface PersistedOutboxEntry extends IntegrationOutboxEntry {
 }
 
 const NODE_RECORDS_MAX = 4000
+/** A node may hold at most this many open grants (adopted rows). */
+export const GRANTS_PER_NODE_MAX = 50
 export const OUTBOX_PER_PRINCIPAL = 500
 export const OUTBOX_TTL_MS = 7 * 24 * 60 * 60 * 1000
 export const CLOSED_ROW_TTL_MS = 30 * 24 * 60 * 60 * 1000
@@ -160,11 +162,15 @@ export class IntegrationLedger {
   load(): void {
     const seenOpen = new Set<string>()
     const seenNode = new Set<string>()
+    const ownedNode = new Set<string>()
     const rows: IntegrationNodeRecord[] = []
     // Latest first, so a duplicate keeps the newest open row; the older one is closed.
     for (const r of [...(this.nodesFile?.load() ?? [])].reverse()) {
       const id = this.rowKey(r)
-      if (r.state === 'open' && (seenOpen.has(id) || seenNode.has(r.nodeId))) {
+      // A node holds at most one row it does not merely ADOPT (an opened node, a frame); adopted rows
+      // (grants) may share a node with each other, never with an owning row.
+      const nodeTaken = r.adopted ? ownedNode.has(r.nodeId) : seenNode.has(r.nodeId)
+      if (r.state === 'open' && (seenOpen.has(id) || nodeTaken)) {
         const closed: IntegrationNodeRecord = { ...r, state: 'closed', closedAt: r.closedAt ?? this.now() }
         withoutPulls(closed)
         rows.push(closed)
@@ -173,8 +179,17 @@ export class IntegrationLedger {
       if (r.state === 'open') {
         seenOpen.add(id)
         seenNode.add(r.nodeId)
+        if (!r.adopted) ownedNode.add(r.nodeId)
       }
       rows.push(r)
+    }
+    // An owning row read after (older than) a grant on the same node still wins: close those grants.
+    for (const r of rows) {
+      if (r.state === 'open' && r.adopted && ownedNode.has(r.nodeId)) {
+        r.state = 'closed'
+        r.closedAt = r.closedAt ?? this.now()
+        withoutPulls(r)
+      }
     }
     this.rows = rows.reverse()
     this.outbox = this.outboxFile?.load() ?? []
@@ -208,15 +223,25 @@ export class IntegrationLedger {
     )
   }
 
-  /** Which principal owns this node id (open rows only), or undefined. */
+  /** The open row that OWNS this node id — a node or frame a principal opened — or undefined. A
+   *  grant (an adopted row) never owns its node. */
   ownerOf(nodeId: string): IntegrationNodeRecord | undefined {
-    return this.rows.find((r) => r.state === 'open' && r.nodeId === nodeId)
+    return this.rows.find((r) => r.state === 'open' && r.nodeId === nodeId && !r.adopted)
   }
 
-  /** Does `principal` own the OPEN agent node `nodeId`? The creator check for its `send`. */
-  owns(principal: string, nodeId: string): boolean {
-    const r = this.ownerOf(nodeId)
-    return !!r && r.kind === 'node' && r.principal === principal
+  /**
+   * The creator check for a principal's `send`: may `principal` deliver into the agent node `nodeId`?
+   * With `key`, only that key's open row counts — a node may hold several grants, and revoking one
+   * must stop that key's queued sends even while the node still holds others.
+   */
+  owns(principal: string, nodeId: string, key?: string): boolean {
+    if (key !== undefined) {
+      const r = this.openNode(principal, key)
+      return !!r && r.nodeId === nodeId
+    }
+    return this.rows.some(
+      (r) => r.kind === 'node' && r.state === 'open' && r.principal === principal && r.nodeId === nodeId
+    )
   }
 
   rowsOf(principal: string, includeClosed: boolean): IntegrationNodeRecord[] {
@@ -244,8 +269,9 @@ export class IntegrationLedger {
     this.save()
   }
 
-  close(nodeId: string): void {
-    const r = this.ownerOf(nodeId)
+  /** Close a row: the given row, or the row that OWNS a node id (an opened node or a frame). */
+  close(target: string | IntegrationNodeRecord): void {
+    const r = typeof target === 'string' ? this.ownerOf(target) : this.rows.includes(target) && target.state === 'open' ? target : undefined
     if (!r) return
     r.state = 'closed'
     r.closedAt = this.now()
@@ -275,8 +301,9 @@ export class IntegrationLedger {
    *  - the key is open on another node, adopted → that row closes and the key MOVES here (its
    *    declared PRs move with it: a restarted lane continues the same work) → `moved`;
    *  - the key is open on a node the principal OPENED → `key-owned`, nothing changes;
-   *  - this node already holds another open row (a different key or principal, or it was opened by a
-   *    principal) → `node-held`, nothing changes: one open row per node.
+   *  - this node was OPENED by a principal → `node-held`, nothing changes (a node may hold many grants,
+   *    of any principals and keys, but not beside an owning row);
+   *  - this node already holds `GRANTS_PER_NODE_MAX` grants → `too-many-grants`.
    */
   grant(input: {
     principal: string
@@ -284,12 +311,12 @@ export class IntegrationLedger {
     nodeId: string
     projectId: string
     agentId?: IntegrationAgent
-  }): 'granted' | 'already-granted' | 'moved' | 'key-owned' | 'node-held' {
+  }): 'granted' | 'already-granted' | 'moved' | 'key-owned' | 'node-held' | 'too-many-grants' {
     const existing = this.openNode(input.principal, input.key)
     if (existing && !existing.adopted) return 'key-owned'
     if (existing && existing.nodeId === input.nodeId) return 'already-granted'
-    const held = this.ownerOf(input.nodeId)
-    if (held) return 'node-held'
+    if (this.ownerOf(input.nodeId)) return 'node-held'
+    if (this.grantsOf(input.nodeId).length >= GRANTS_PER_NODE_MAX) return 'too-many-grants'
     let carried: Pick<IntegrationNodeRecord, 'pulls' | 'pullRepository'> = {}
     if (existing) {
       if (existing.pulls?.length && existing.pullRepository) {
@@ -320,7 +347,7 @@ export class IntegrationLedger {
     const row = this.openNode(principal, key)
     if (!row || !row.adopted) return 'unknown-key'
     if (row.nodeId !== nodeId) return 'not-yours'
-    this.close(row.nodeId)
+    this.close(row)
     return 'revoked'
   }
 
@@ -330,9 +357,14 @@ export class IntegrationLedger {
   }
 
   /** The pull requests declared on an open node row, for `repository` (another repository's = none). */
-  declaredPulls(nodeId: string, repository: string): number[] {
-    const r = this.ownerOf(nodeId)
+  declaredPulls(row: IntegrationNodeRecord, repository: string): number[] {
+    const r = this.openRow(row)
     return r?.kind === 'node' && sameRepository(r.pullRepository, repository) ? [...(r.pulls ?? [])] : []
+  }
+
+  /** The row itself while it is still an open row of this ledger. */
+  private openRow(row: IntegrationNodeRecord): IntegrationNodeRecord | undefined {
+    return this.rows.includes(row) && row.state === 'open' ? row : undefined
   }
 
   /**
@@ -340,8 +372,8 @@ export class IntegrationLedger {
    * repository is dropped first. 'too-many' (nothing changed) when the union would pass
    * `INTEGRATION_PULLS_MAX`; undefined when there is no open node row.
    */
-  declarePulls(nodeId: string, repository: string, add: readonly number[]): number[] | 'too-many' | undefined {
-    const r = this.ownerOf(nodeId)
+  declarePulls(row: IntegrationNodeRecord, repository: string, add: readonly number[]): number[] | 'too-many' | undefined {
+    const r = this.openRow(row)
     if (!r || r.kind !== 'node') return undefined
     const current = sameRepository(r.pullRepository, repository) ? r.pulls ?? [] : []
     const next = [...new Set([...current, ...add])].sort((a, b) => a - b)
@@ -356,8 +388,8 @@ export class IntegrationLedger {
   }
 
   /** Removes one declared pull request (idempotent). Undefined when there is no open node row. */
-  undeclarePull(nodeId: string, repository: string, pull: number): number[] | undefined {
-    const r = this.ownerOf(nodeId)
+  undeclarePull(row: IntegrationNodeRecord, repository: string, pull: number): number[] | undefined {
+    const r = this.openRow(row)
     if (!r || r.kind !== 'node') return undefined
     const current = sameRepository(r.pullRepository, repository) ? r.pulls ?? [] : []
     if (!current.includes(pull)) return [...current]

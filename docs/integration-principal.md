@@ -319,8 +319,11 @@ Replies (JSON with `Accept: application/json`, else one line of text):
   registered elsewhere get the same refusal, `principal-not-registered`.
 - **The latest grant wins:** granting a key that another node holds moves it here (`moved`); the
   previous grant closes, and the key's declared pull requests move with it.
+- **Several keys per node:** a node may hold up to 50 grants, of any principals and keys (for example
+  one `gh:<number>` key per pull request a `/ship` lane opens). Each key is its own grant: revoking one
+  leaves the others, and the creator check for a `send` is per key.
 - **Refusals:** `key-owned` (the principal opened a node for that key itself; it cannot be granted),
-  `node-held` (this node already holds a grant, or was opened by a principal; revoke first),
+  `node-held` (a principal opened THIS node; it takes no grants), `too-many-grants` (50 already),
   `not-your-grant` / `unknown-key` (revoke).
 - **Durable:** the grant is a row in `integration-nodes.json` (`adopted: true`), so it survives a
   restart and a reboot. A node removed from the canvas closes it.
@@ -337,7 +340,9 @@ What the principal can do with an adopted row:
 | `open` (same key) | answers `existing`; no spawn, no title or column change (declared `pulls` still union) |
 
 A revoked or moved grant stops authorizing at once: a `send` queued before the revoke is refused when
-the queue flushes, because the creator check reads the ledger again.
+the queue flushes, because the creator check reads the ledger again for that send's KEY. The pair
+limit still applies per node: one message per 10 s from a principal to one node, whichever key it
+was sent for (a burst for several keys waits in the queue, or answers `rateLimited`).
 
 ## Ownership and restarts
 

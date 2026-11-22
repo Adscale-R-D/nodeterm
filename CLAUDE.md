@@ -10427,8 +10427,11 @@ Rules a refactor must not undo:
   can name another node, and no principal verb claims one. The principal's creator check
   (`ledger.owns`) then passes for `send`/`comment`/`link-pull`, but `close` ends only the grant and
   `resume` is refused (`adopted-node`): an adopted node's lifecycle stays with whoever opened it.
-  Latest grant wins (`moved`); a key the principal opened itself is `key-owned`; one open row per
-  node (`node-held`). Revocation is immediate because the queue's flush re-asks `ledger.owns`.
+  Latest grant wins (`moved`); a key the principal opened itself is `key-owned`. A node may hold
+  many grants (`GRANTS_PER_NODE_MAX`), never beside a row that OWNS it (`node-held`): `ownerOf` answers
+  only owning rows, and every per-key operation (pulls, close) takes the ROW, never a node id. The
+  creator check is per KEY (`owns(principal, node, key)`; the send carries `key`), so revoking one key
+  stops that key's queued sends while the node's other grants keep working.
 - **It can DECLARE a card's pull requests** (`open.pulls`, `link-pull`, `unlink-pull`): the board's
   third PR link source beside the worktree branch and the issue. Rules: (1) the declaration lives on
   the principal's ledger row (`pulls` + `pullRepository`), never in `project.json`, and a closed key

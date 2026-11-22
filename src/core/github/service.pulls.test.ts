@@ -5,6 +5,7 @@ import { GitHubIssueCache } from './cache'
 import { testTmpDir } from '../test-tmp'
 import { GitHubIssueService, type GitHubIssueServiceContext, type GitHubIssuesClientLike } from './service'
 import { GitHubRequestCoordinator } from './request-coordinator'
+import { DECLARED_RETRY_MS } from './pull-status-tracker'
 import type { PullOneRead, PullStatusRead } from './graphql-pulls'
 import type { GitHubIssue, IssueHeartbeatResult, NormalisedProjectKanbanGitHub } from '../../shared/github-issues'
 import type { GitHubPullChecksResult, PullStatusFacts } from '../../shared/github-pull-status'
@@ -360,6 +361,37 @@ describe('GitHubIssueService — principal-declared pull requests', () => {
     const board = await h.service.pullStatus({ projectId: 'project-1' })
     expect(board.stale).toBe(false)
     expect(board.pulls.map((p) => p.number)).toEqual([1])
+  })
+
+  it('a declared PR whose read failed is retried on a quiet repository (bounded), and then appears', async () => {
+    const h = declaredHarness([{ nodeId: 'term-1', pulls: [1045] }])
+    h.client.failSingle.add(1045)
+    await h.service.subscribe(7, { projectId: 'project-1' })
+    await vi.waitFor(() => expect(h.client.singleReads).toEqual([1045]))
+    await flush()
+    // A 304 heartbeat still reads once (the PR is not on the board), and claims the retry interval.
+    h.advance(60_000)
+    await h.poll()
+    await vi.waitFor(() => expect(h.client.statusReads).toBe(2))
+    await flush()
+    // Within the interval a quiet repository reads nothing, however long the number keeps failing.
+    h.advance(60_000)
+    await h.poll()
+    await flush()
+    expect(h.client.statusReads).toBe(2)
+    // Past it, the next read succeeds and the declared PR gets its state.
+    h.client.failSingle.clear()
+    h.advance(DECLARED_RETRY_MS)
+    await h.poll()
+    await vi.waitFor(() => expect(h.client.statusReads).toBe(3))
+    await vi.waitFor(async () =>
+      expect((await h.service.pullStatus({ projectId: 'project-1' })).pulls.find((p) => p.number === 1045))
+        .toMatchObject({ ci: 'failed' }))
+    // Resolved: no more retry reads.
+    h.advance(DECLARED_RETRY_MS)
+    await h.poll()
+    await flush()
+    expect(h.client.statusReads).toBe(3)
   })
 
   it('a declared PR the list read already covers costs no extra read', async () => {

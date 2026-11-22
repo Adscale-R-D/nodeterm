@@ -46,7 +46,9 @@ export const PULL_STATUS_QUERY = `query($owner:String!,$name:String!){
 
 /** ONE pull request, by number — for a PR a principal declared on a card that the list read's window
  *  (50 open + 30 recent) does not reach. Same fields as the list read's open node, plus `state`, so
- *  the same decoder answers. MEASURED cost: 1 point of the `graphql` budget, like the checks read. */
+ *  the same decoder answers. MEASURED 2026-11-22 against Adscale-R-D/app_ms: 1 point of the `graphql`
+ *  budget; a number with no PR answers `pullRequest: null` + `errors[{type:'NOT_FOUND', path:
+ *  ['repository','pullRequest']}]`, which `parsePullOneResponse` reads as `missing`. */
 export const PULL_ONE_QUERY = `query($owner:String!,$name:String!,$number:Int!){
   rateLimit{ cost remaining limit resetAt }
   repository(owner:$owner,name:$name){

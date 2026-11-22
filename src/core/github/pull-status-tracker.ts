@@ -62,6 +62,8 @@ type PullRepositoryState = {
   saving: Promise<void>
   /** Declared numbers GitHub answered NOT_FOUND for, and when. */
   missing: Map<number, number>
+  /** No retry read for unresolved declared PRs before this (host clock). */
+  declaredRetryAt?: number
 }
 
 type TrackerOptions = {
@@ -87,6 +89,10 @@ type TrackerOptions = {
 export const DECLARED_READS_PER_PASS = 10
 /** A number GitHub answered "no such pull request" for is not asked again for this long. */
 export const DECLARED_MISSING_TTL_MS = 60 * 60_000
+/** While a declared PR is still not on the board (its read failed, the pass was capped or throttled,
+ *  or the declaration arrived during a read already in flight), a quiet repository still reads again
+ *  — at most this often, so a number that keeps failing costs one read per interval, not per poll. */
+export const DECLARED_RETRY_MS = 5 * 60_000
 
 function errorCode(error: unknown): string | undefined {
   return error && typeof error === 'object' && typeof (error as { code?: unknown }).code === 'string'
@@ -169,7 +175,24 @@ export class GitHubPullStatusTracker {
   wantsReadAfterHeartbeat(key: string, input: { changed: boolean; foreground: boolean }): boolean {
     const state = this.states.get(key)
     return input.changed || input.foreground || !state || state.observedAt === undefined ||
-      state.stale || state.owed
+      state.stale || state.owed || this.declaredRetryDue(key, state)
+  }
+
+  /** A declared PR is neither on the board nor answered "no such PR", and the retry interval has
+   *  passed. Claims the interval when it answers true. */
+  private declaredRetryDue(key: string, state: PullRepositoryState): boolean {
+    const pinned = this.options.pinned?.(key)
+    if (!pinned?.size) return false
+    const now = this.now()
+    if (state.declaredRetryAt !== undefined && now < state.declaredRetryAt) return false
+    const onBoard = new Set(state.pulls.map((pull) => pull.number))
+    const unresolved = [...pinned].some((number) => {
+      const missingAt = state.missing.get(number)
+      return !onBoard.has(number) && (missingAt === undefined || now - missingAt >= DECLARED_MISSING_TTL_MS)
+    })
+    if (!unresolved) return false
+    state.declaredRetryAt = now + DECLARED_RETRY_MS
+    return true
   }
 
   /**

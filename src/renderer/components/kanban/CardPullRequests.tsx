@@ -103,7 +103,7 @@ export function CardPullRequests({
       )}
       {links.linked.map((pull) => (
         <div key={pull.number} className="card-pulls__row">
-          <PullRefChip status={pull} freshness={freshness} />
+          <PullRefChip status={pull} freshness={freshness} repository={pullBoard?.repository} />
           <button
             className="card-pulls__action"
             onClick={() => onChangeBoard(unlinkPull(board, session.id, pull.number))}

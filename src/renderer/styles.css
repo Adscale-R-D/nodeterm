@@ -12304,6 +12304,34 @@ button.group-node__setup:disabled {
   font-size: 10px;
   white-space: nowrap;
 }
+.pull-ref--link {
+  background: none;
+  font: inherit;
+  font-size: 10px;
+  line-height: inherit;
+  cursor: pointer;
+}
+.pull-ref--link:hover {
+  border-color: rgba(var(--tint-rgb), 0.35);
+  text-decoration: underline;
+}
+.pull-ref--link:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.pull-review__icon {
+  display: inline-block;
+  vertical-align: -1px;
+}
+.pull-review--approved { color: var(--success); }
+.pull-review--changes { color: var(--danger); }
+.pull-review--requested { color: var(--caution); }
+.pull-review--none { color: rgba(var(--tint-rgb), 0.45); }
+.pull-status__review {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
 .pull-ref--merged { color: #a371f7; }
 .pull-ref--closed { color: rgba(var(--tint-rgb), 0.45); }
 .pull-ref__ready { color: var(--success); }

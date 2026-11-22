@@ -44,6 +44,8 @@ interface SessionCardProps {
   /** Pull requests linked to this card through its worktree branch (stable array per card). */
   pulls?: GitHubPullStatus[]
   pullFreshness?: PullStatusFreshness
+  /** The pull board's `owner/name`: makes each PR chip open the PR on GitHub. */
+  pullRepository?: string
   /** The session's `#N` chip (it was started on a GitHub issue): open that issue. */
   onOpenIssue?: (ref: IssueRef) => void
   /** The stations this session opened (lib/teamProgress) — a stable array per card. */
@@ -76,7 +78,7 @@ interface SessionCardProps {
 }
 
 export const SessionCard = memo(function SessionCard({
-  session, meta, labels = [], onOpen, onDragStart, onDragEnd, onDropAt, onContext, pulls,
+  session, meta, labels = [], onOpen, onDragStart, onDragEnd, onDropAt, onContext, pulls, pullRepository,
   pullFreshness = 'fresh', onOpenIssue, team, onTravel, columnCategory, ports, onOpenPort, onRunQueued,
   statusStore, selected = false, onSelectClick
 }: SessionCardProps) {
@@ -237,7 +239,7 @@ export const SessionCard = memo(function SessionCard({
       {pulls && pulls.length > 0 && (
         <div className="pull-refs pull-refs--session">
           {pulls.slice(0, 3).map((pull) => (
-            <PullRefChip key={pull.number} status={pull} freshness={pullFreshness} />
+            <PullRefChip key={pull.number} status={pull} freshness={pullFreshness} repository={pullRepository} />
           ))}
         </div>
       )}

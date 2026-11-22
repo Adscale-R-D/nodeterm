@@ -31,6 +31,7 @@ export function GitHubIssueSummaryModal({
   pullStatus,
   closingPulls = [],
   pullFreshness = 'fresh',
+  pullRepository,
   pullObservedAt,
   startMenu,
   worktreeMenu,
@@ -55,6 +56,8 @@ export function GitHubIssueSummaryModal({
   /** Issue kind: open PRs that close this issue on merge. */
   closingPulls?: GitHubPullStatus[]
   pullFreshness?: PullStatusFreshness
+  /** The pull board's `owner/name`: makes each PR chip open the PR on GitHub. */
+  pullRepository?: string
   pullObservedAt?: number
   /** The "Start with agent ▸" rows (the canvas's own agent + account picker, pointed at this
    *  issue). Absent = no button — a pull request, or a board with no canvas behind it. */
@@ -198,7 +201,7 @@ export function GitHubIssueSummaryModal({
         )}
         {!isPull && closingPulls.length > 0 && (
           <div className="pull-refs">
-            {closingPulls.map((pull) => <PullRefChip key={pull.number} status={pull} freshness={pullFreshness} />)}
+            {closingPulls.map((pull) => <PullRefChip key={pull.number} status={pull} freshness={pullFreshness} repository={pullRepository} />)}
           </div>
         )}
         {isPull && pullOpen && (

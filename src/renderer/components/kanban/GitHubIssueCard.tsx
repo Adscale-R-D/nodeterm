@@ -16,6 +16,7 @@ export const GitHubIssueCard = memo(function GitHubIssueCard({
   status,
   pulls,
   pullFreshness = 'fresh',
+  pullRepository,
   onOpen,
   onMove,
   onDragStart,
@@ -32,6 +33,8 @@ export const GitHubIssueCard = memo(function GitHubIssueCard({
   /** Open PRs that close this issue on merge (GitHub's own link). */
   pulls?: GitHubPullStatus[]
   pullFreshness?: PullStatusFreshness
+  /** The pull board's `owner/name`: makes each PR chip open the PR on GitHub. */
+  pullRepository?: string
   onOpen: (issue: GitHubIssueCardView) => void
   onMove: (issue: GitHubIssueCardView, columnId: string | null) => void
   onDragStart: (issue: GitHubIssueCardView) => void
@@ -82,7 +85,7 @@ export const GitHubIssueCard = memo(function GitHubIssueCard({
       {pulls && pulls.length > 0 && (
         <div className="pull-refs">
           {pulls.slice(0, 3).map((pull) => (
-            <PullRefChip key={pull.number} status={pull} freshness={pullFreshness} />
+            <PullRefChip key={pull.number} status={pull} freshness={pullFreshness} repository={pullRepository} />
           ))}
         </div>
       )}

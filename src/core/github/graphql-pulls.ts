@@ -6,6 +6,9 @@
 // MEASURED 2026-09-28 against eneskirca/nodeterm (60 open PRs): the list query below costs 1 point
 // of the separate `graphql` budget (`x-ratelimit-resource: graphql`, 5000/h), the `recent` block
 // included, and returns ~18 KB. The per-PR checks query also costs 1.
+// The review fields (`reviewDecision`, `reviewRequests`, `latestOpinionatedReviews`) raised the list
+// query to 2 points — MEASURED 2026-11-22 against Adscale-R-D/app_ms (50 open PRs); the single-PR
+// read stays at 1. The list read runs only after the heartbeat reports a change, so this is cheap.
 //
 // The parser is strict in the same way the REST decoder is: anything malformed rejects the read,
 // and a field the token may not see is reported as HIDDEN — never decoded as its empty value. That
@@ -19,13 +22,16 @@ import {
   type GitHubPullCheck,
   type GitHubPullChecksResult,
   type GitHubRollupState,
-  type PullStatusFacts
+  type PullReviewState,
+  type PullStatusFacts,
+  reviewStateFrom
 } from '../../shared/github-pull-status'
 
 export const OPEN_PULLS_PER_READ = 50
 export const RECENT_PULLS_PER_READ = 30
 const MAX_CLOSING_ISSUES = 10
 const MAX_CHECKS = 100
+const MAX_OPINIONS = 10
 
 export const PULL_STATUS_QUERY = `query($owner:String!,$name:String!){
   rateLimit{ cost remaining limit resetAt }
@@ -34,6 +40,7 @@ export const PULL_STATUS_QUERY = `query($owner:String!,$name:String!){
       totalCount
       nodes{
         number headRefName headRefOid isCrossRepository isDraft mergeable mergeStateStatus
+        reviewDecision reviewRequests(first:0){ totalCount } latestOpinionatedReviews(first:${MAX_OPINIONS}){ nodes{ state } }
         closingIssuesReferences(first:${MAX_CLOSING_ISSUES}){ nodes{ number repository{ nameWithOwner } } }
         commits(last:1){ nodes{ commit{ oid statusCheckRollup{ state } } } }
       }
@@ -46,7 +53,7 @@ export const PULL_STATUS_QUERY = `query($owner:String!,$name:String!){
 
 /** ONE pull request, by number — for a PR a principal declared on a card that the list read's window
  *  (50 open + 30 recent) does not reach. Same fields as the list read's open node, plus `state`, so
- *  the same decoder answers. MEASURED 2026-11-22 against Adscale-R-D/app_ms: 1 point of the `graphql`
+ *  the same decoder answers. MEASURED 2026-11-22 against Adscale-R-D/app_ms, review fields included: 1 point of the `graphql`
  *  budget; a number with no PR answers `pullRequest: null` + `errors[{type:'NOT_FOUND', path:
  *  ['repository','pullRequest']}]`, which `parsePullOneResponse` reads as `missing`. */
 export const PULL_ONE_QUERY = `query($owner:String!,$name:String!,$number:Int!){
@@ -54,6 +61,7 @@ export const PULL_ONE_QUERY = `query($owner:String!,$name:String!,$number:Int!){
   repository(owner:$owner,name:$name){
     pullRequest(number:$number){
       number headRefName headRefOid isCrossRepository isDraft state mergeable mergeStateStatus
+      reviewDecision reviewRequests(first:0){ totalCount } latestOpinionatedReviews(first:${MAX_OPINIONS}){ nodes{ state } }
       closingIssuesReferences(first:${MAX_CLOSING_ISSUES}){ nodes{ number repository{ nameWithOwner } } }
       commits(last:1){ nodes{ commit{ oid statusCheckRollup{ state } } } }
     }
@@ -164,13 +172,32 @@ export function rateLimitFrom(body: unknown): GraphQLRateLimit | undefined {
   return { cost: rate.cost, remaining: rate.remaining, limit: rate.limit, resetAt }
 }
 
+/** The review fields of an open PR node, decoded LENIENTLY: a missing or odd value (an older
+ *  response, a field the token may not read) is no review state, never a failed read. */
+function reviewOf(node: Record<string, unknown>, hidden: boolean): { review?: PullReviewState | null } {
+  if (hidden) return { review: null }
+  const decision = node.reviewDecision
+  if (decision !== null && (typeof decision !== 'string' || !/^[A-Z_]{1,32}$/.test(decision))) return {}
+  const requested = object(node.reviewRequests)?.totalCount
+  const opinionNodes = object(node.latestOpinionatedReviews)?.nodes
+  const opinions = Array.isArray(opinionNodes)
+    ? opinionNodes.flatMap((entry) => {
+      const state = object(entry)?.state
+      return typeof state === 'string' ? [state] : []
+    })
+    : []
+  const review = reviewStateFrom(decision, nonNegative(requested) ? requested : 0, opinions)
+  return review ? { review } : {}
+}
+
 /** One open PR node of either read. ONE decoder for the list read and the single-PR read, so the two
  *  cannot decode a field differently. */
 function decodeOpenPull(
   node: Record<string, unknown> | null,
   access: { ci: boolean; merge: boolean },
   closingHidden: boolean,
-  repositoryFolded: string
+  repositoryFolded: string,
+  reviewHidden = false
 ): PullStatusFacts {
   if (!node || !positive(node.number) || !refName(node.headRefName) || !oid(node.headRefOid) ||
       typeof node.isDraft !== 'boolean' || typeof node.isCrossRepository !== 'boolean') {
@@ -220,6 +247,7 @@ function decodeOpenPull(
       return nameWithOwner.toLocaleLowerCase('en-US') === repositoryFolded ? [issue.number] : []
     })
   return {
+    ...reviewOf(node, reviewHidden),
     number: node.number,
     headRefName: node.headRefName,
     headRefOid: node.headRefOid,
@@ -264,8 +292,9 @@ export function parsePullStatusResponse(body: unknown, repository: string): Pull
   const openConnection = object(repositoryValue.open)
   if (!openConnection || !nonNegative(openConnection.totalCount)) throw new GraphQLShapeError()
   const repositoryFolded = repository.toLocaleLowerCase('en-US')
+  const reviewHidden = permission.some((error) => touches(error, ['reviewDecision', 'reviewRequests', 'latestOpinionatedReviews']))
   const open = list(openConnection, OPEN_PULLS_PER_READ).map((entry) =>
-    decodeOpenPull(object(entry), access, closingHidden, repositoryFolded))
+    decodeOpenPull(object(entry), access, closingHidden, repositoryFolded, reviewHidden))
   const recent = list(repositoryValue.recent, RECENT_PULLS_PER_READ).map((entry) => {
     const node = object(entry)
     if (!node || !positive(node.number) || !refName(node.headRefName) ||
@@ -334,7 +363,10 @@ export function parsePullOneResponse(body: unknown, repository: string, number: 
   const closingHidden = permission.some((error) => touches(error, ['closingIssuesReferences']))
   return {
     kind: 'open',
-    facts: decodeOpenPull(node, access, closingHidden, repository.toLocaleLowerCase('en-US')),
+    facts: decodeOpenPull(
+      node, access, closingHidden, repository.toLocaleLowerCase('en-US'),
+      permission.some((error) => touches(error, ['reviewDecision', 'reviewRequests', 'latestOpinionatedReviews']))
+    ),
     access,
     ...rate
   }

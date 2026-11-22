@@ -23,6 +23,31 @@ export type PullMergeState =
   | 'hooks'
   | 'undecided'
 
+/** Where the PR's review stands. `requested` = a review is asked for and nobody has approved or
+ *  blocked yet; `none` = no review and none asked for. */
+export type PullReviewState = 'approved' | 'changes' | 'requested' | 'none'
+
+/**
+ * The review state from GitHub's own answer. `reviewDecision` decides when GitHub gives one (a
+ * repository that requires reviews); without one, the latest approving / blocking reviews do. An
+ * approval with a re-review asked for stays `approved` (what merging would see). A decision value
+ * GitHub adds later claims nothing (`undefined`).
+ */
+export function reviewStateFrom(
+  decision: string | null,
+  requested: number,
+  opinions: readonly string[]
+): PullReviewState | undefined {
+  if (decision === 'CHANGES_REQUESTED') return 'changes'
+  if (decision === 'APPROVED') return 'approved'
+  if (decision !== null && decision !== 'REVIEW_REQUIRED') return undefined
+  if (decision === null) {
+    if (opinions.includes('CHANGES_REQUESTED')) return 'changes'
+    if (opinions.includes('APPROVED')) return 'approved'
+  }
+  return requested > 0 ? 'requested' : 'none'
+}
+
 /** Where the PR is in its life, as the board needs it. `merged` and `closed` are different facts:
  *  only a merge completes the work. */
 export type PullLifecycle = 'open' | 'draft' | 'merged' | 'closed'
@@ -50,6 +75,8 @@ export interface PullStatusFacts {
   rollupOid: string | null
   /** Issues in the SAME repository this PR closes on merge (GitHub's own linking). */
   closes: number[]
+  /** The review state; null when the token may not read reviews, or GitHub's answer is unknown. */
+  review?: PullReviewState | null
 }
 
 /** One PR's state on the board. `ci`/`merge` are ABSENT when unknown — the token cannot read them,
@@ -65,6 +92,8 @@ export interface GitHubPullStatus {
   headRefOid?: string
   ci?: PullCiState
   merge?: PullMergeState
+  /** Open PRs only; absent when unknown. */
+  review?: PullReviewState
   /** Open PRs only. */
   closes: number[]
   /** This machine has seen the PR open or as a draft (remembered across restarts, per repository). */
@@ -173,6 +202,7 @@ export function pullStatusFrom(
     headRefOid: facts.headRefOid,
     ...(ci !== undefined ? { ci } : {}),
     ...(merge !== undefined ? { merge } : {}),
+    ...(facts.review ? { review: facts.review } : {}),
     closes: facts.closes
   }
 }
@@ -289,4 +319,13 @@ export function statusContextState(state: string): PullCheckState {
   if (state === 'SUCCESS') return 'passed'
   if (state === 'PENDING' || state === 'EXPECTED') return 'pending'
   return 'failed'
+}
+
+/** The pull request's page on GitHub, or null for anything that is not a plain `owner/name` and a
+ *  positive number (the repository comes from the host; the check keeps a hand-edited value from
+ *  turning a chip into a link somewhere else). */
+export function pullRequestUrl(repository: string | undefined, number: number): string | null {
+  if (!repository || !/^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9._-]{1,100}$/.test(repository)) return null
+  if (!Number.isSafeInteger(number) || number < 1) return null
+  return `https://github.com/${repository}/pull/${number}`
 }

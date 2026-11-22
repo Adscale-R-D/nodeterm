@@ -998,6 +998,7 @@ export const KanbanView = memo(function KanbanView({
             onDropAt={onDropAt}
             pulls={pullsByCard.get(s.id) ?? NO_PULLS}
             pullFreshness={pullFreshness}
+            pullRepository={pullBoard?.repository}
             team={teams?.get(s.id) ?? NO_STATIONS}
             onTravel={onOpenNode}
             columnCategory={category}
@@ -1025,6 +1026,7 @@ export const KanbanView = memo(function KanbanView({
             status={github?.issueStatus[issue.number]}
             pulls={pullsByIssue.get(issue.number) ?? NO_PULLS}
             pullFreshness={pullFreshness}
+            pullRepository={pullBoard?.repository}
             onOpen={openIssueModal}
             onMove={handleMoveGitHub}
             onDragStart={handleGitHubDragStart}
@@ -1401,6 +1403,7 @@ export const KanbanView = memo(function KanbanView({
           pullStatus={modalIssue.kind === 'pull' ? pullByNumber.get(modalIssue.item.number) : undefined}
           closingPulls={modalIssue.kind === 'issue' ? pullsByIssue.get(modalIssue.item.number) : undefined}
           pullFreshness={pullFreshness}
+          pullRepository={pullBoard?.repository}
           pullObservedAt={pullBoard?.observedAt}
           startMenu={modalIssue.kind === 'issue' && issueAgentMenu
             ? () => issueAgentMenu(modalIssue.item)

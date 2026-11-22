@@ -3,6 +3,7 @@ import { GitHubIssuesClient, GitHubClientError } from './client'
 import { pullStatusFrom } from '../../shared/github-pull-status'
 import {
   GraphQLShapeError,
+  PULL_ONE_QUERY,
   PULL_STATUS_QUERY,
   parsePullChecksResponse,
   parsePullOneResponse,
@@ -264,5 +265,37 @@ describe('parsePullOneResponse (a declared PR outside the list window)', () => {
   it('refuses a node for another number or an unknown state', () => {
     expect(() => parsePullOneResponse(one({ ...node(5), state: 'OPEN' }), REPO, 6)).toThrow(GraphQLShapeError)
     expect(() => parsePullOneResponse(one({ ...node(5), state: 'WEIRD' }), REPO, 5)).toThrow(GraphQLShapeError)
+  })
+})
+
+describe('review fields in the pull reads', () => {
+  it('the list read decodes the review state; a hidden or odd field is no state, not a failed read', () => {
+    const read = parsePullStatusResponse(body([
+      node(1, { reviewDecision: 'APPROVED', reviewRequests: { totalCount: 1 }, latestOpinionatedReviews: { nodes: [{ state: 'APPROVED' }] } }),
+      node(2, { reviewDecision: 'REVIEW_REQUIRED', reviewRequests: { totalCount: 2 }, latestOpinionatedReviews: { nodes: [] } }),
+      node(3, { reviewDecision: 42 }),
+      node(4)
+    ]), REPO)
+    // A node without the fields (an older response) claims nothing either.
+    expect(read.open.map((p) => p.review)).toEqual(['approved', 'requested', undefined, undefined])
+    const hidden = parsePullStatusResponse(body([node(1, { reviewDecision: null })], {
+      errors: [{ type: 'FORBIDDEN', path: ['repository', 'open', 'nodes', 0, 'reviewDecision'] }]
+    }), REPO)
+    expect(hidden.open[0].review).toBeNull()
+  })
+
+  it('the single-PR read decodes it the same way', () => {
+    const r = parsePullOneResponse({
+      data: { repository: { pullRequest: { ...node(9, { reviewDecision: 'CHANGES_REQUESTED', reviewRequests: { totalCount: 0 }, latestOpinionatedReviews: { nodes: [{ state: 'CHANGES_REQUESTED' }] } }), state: 'OPEN' } } }
+    }, REPO, 9)
+    expect(r.kind === 'open' && r.facts.review).toBe('changes')
+  })
+
+  it('both queries ask for the review fields', () => {
+    for (const q of [PULL_STATUS_QUERY, PULL_ONE_QUERY]) {
+      expect(q).toContain('reviewDecision')
+      expect(q).toContain('reviewRequests(first:0){ totalCount }')
+      expect(q).toContain('latestOpinionatedReviews(first:10){ nodes{ state } }')
+    }
   })
 })

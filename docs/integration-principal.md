@@ -76,7 +76,7 @@ Every reply is JSON:
 
 HTTP status: 200 success; 400 malformed input; 403 `unauthorized` (one flat refusal for a wrong name
 or token); 404 `unknown-key` / `unknown-verb` / `integration-unavailable`; 409 a refused action; 500
-`prompt-not-saved`; 503 `stopping` / `not-saved` (the server is shutting down).
+`prompt-not-saved` / `comment-not-saved`; 503 `stopping` / `not-saved` (the server is shutting down).
 
 ## The verbs
 
@@ -180,6 +180,30 @@ is that consent. `ttlMs` is clamped to 1 s … 24 h (default 5 min).
 Ends the session and removes the node, and its frame when that frame is now empty and was created by
 this principal. The key is closed; a later `open` with the same key makes a new node.
 
+### `POST /integration/comment`
+
+```ts
+{ key: string, text: string /* plain markdown, ≤ 64 KiB */ }
+// result
+{ key, nodeId, commentId }
+```
+
+Appends one comment to the project's kanban board log on the card of the key's node: the same
+`kind: 'comment'` entry a person's card comment writes, with `author.name` = the principal's label
+(e.g. "Ticket sink") and `author.color` = its colour (grey when none). `commentId` is the entry's id.
+Use it for notes a person should see on the card, such as PR and ticket links.
+
+- **Display only.** The comment is never delivered into the session. A board comment reaches an
+  agent only when a person sends it from the composer; nothing that reads the log types into a pane.
+  A mention token (`@[label](node:<id>)`) in the text is flattened to plain `@label` as well.
+  Use `send` to tell the agent something.
+- Control characters (except newline and tab) and bidi overrides are removed; text over 16 KiB
+  (`BOARD_LOG_TEXT_MAX`) is cut to it with a trailing `…`.
+- Errors: 400 `bad-key` / `bad-text` (not a string, over 64 KiB, or empty once cleaned); 404
+  `unknown-key` (never opened, closed, or removed from the canvas); 409 `board-log-unavailable` (the
+  project has no local folder to keep `.nodeterm/board-log.jsonl` in); 500 `comment-not-saved` (the
+  write failed; nothing was posted).
+
 ### `POST /integration/list`
 
 ```ts
@@ -218,7 +242,8 @@ same data dir stands down, like the other orchestration facts).
 
 - No boot adoption, no automatic resume, no polling on the principal's behalf.
 - No worktrees. Create one yourself (`git worktree add`) and pass `cwd`.
-- No `--after`, `link`, kanban `assign`, or agents beyond claude/codex/gemini.
+- No `--after`, `link`, kanban `assign`, or agents beyond claude/codex/gemini. `comment` writes a
+  note on the card; it does not move it.
 - No station-failure notices to the principal; read `list` (`lastTurnError`, `needsYou`,
   `session: 'absent'`).
 - The tmux creation stamp has one-second resolution. A session killed and recreated under the same
@@ -238,6 +263,6 @@ same data dir stands down, like the other orchestration facts).
 | `src/core/agents/pane-ownership.ts` | `recordReprovedOwner` (the one attach that may record) |
 | `src/core/pty-manager.ts` | `sessionCreatedAt` (exact target) |
 | `src/server/headless-node-factory.ts` | `principalOpen` / `principalResume` / `principalClose` |
-| `src/server/integration-service.ts` | authentication, validation, the five verbs |
+| `src/server/integration-service.ts` | authentication, validation, the six verbs |
 | `src/server/integration-cli.ts` | `main.cjs integration …` |
 | `src/renderer/components/IntegrationChip.tsx` | the principal-name chip (full "via … · key" in its tooltip) |

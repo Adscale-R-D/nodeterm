@@ -298,7 +298,9 @@ export async function initServerCanvasControl(
     lastTurnErrored: (nodeId) => factory.lastTurnErroredFor(nodeId),
     paneOwnerProject,
     transcriptPresence: (sessionId) => transcriptPresence(sessionId),
-    savePrompt: (name, base64) => saveUpload(platform().userDataDir, name, base64)
+    savePrompt: (name, base64) => saveUpload(platform().userDataDir, name, base64),
+    boardLogReachable: (projectId) => deps.workspaceStore.boardLogRootForProject(projectId) !== undefined,
+    appendBoardLog: (projectId, entry) => deps.boardLog.append(projectId, entry)
   })
 
   const stationNotices = new StationNoticeMonitor({

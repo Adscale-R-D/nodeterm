@@ -10377,7 +10377,7 @@ A registered local program (an issue-tracker poller) opens agent sessions on a *
 canvas, sends them updates and closes them, keyed by its own opaque key, and keeps them across a
 server restart and a VM reboot. Full contract, wire shapes and setup: **`docs/integration-principal.md`**.
 Rules a refactor must not undo:
-- **Its own route and caller kind.** `/integration/<verb>` (open, resume, send, close, list) on the
+- **Its own route and caller kind.** `/integration/<verb>` (open, resume, send, close, list, comment) on the
   hook server, behind the browser guard and the app bearer, then the principal's own identity
   (`X-Nodeterm-Integration` + `-Token`). It never passes `identityGate`, the latch,
   `requiresVerified` or the request-id ledger, and no `/control/` verb learns about principals. Only
@@ -10405,6 +10405,11 @@ Rules a refactor must not undo:
   pull-based outbox via `onQueuedResult`.
 - **One launch-line builder** (`agentLaunchLine` / `agentResumeLine` in the factory) for `open-agent`
   and a principal's open/resume: a mode gate or override cannot apply to one and not the other.
+- **Its `comment` is display only.** It appends one `kind: 'comment'` board-log entry on the key's
+  card, authored as the principal's label, through the shared `boardLog.append`. It never delivers:
+  no path from a log entry to a pane exists (the board-comment rule), and a mention token in its text
+  is flattened to plain `@label` anyway. No local board log (a cwd-less or SSH project) is 409
+  `board-log-unavailable`, never a silent `false`.
 
 ## Hosted team relay (Server Edition as a relay host)
 

@@ -18,7 +18,7 @@ export const INTEGRATION_NAME_HEADER = 'x-nodeterm-integration'
 export const INTEGRATION_TOKEN_HEADER = 'x-nodeterm-integration-token'
 
 /** The five verbs. Anything else is a 404-shaped refusal. */
-export const INTEGRATION_VERBS = ['open', 'resume', 'send', 'close', 'list'] as const
+export const INTEGRATION_VERBS = ['open', 'resume', 'send', 'close', 'list', 'comment'] as const
 export type IntegrationVerb = (typeof INTEGRATION_VERBS)[number]
 
 export function isIntegrationVerb(v: string): v is IntegrationVerb {
@@ -173,6 +173,23 @@ export interface IntegrationSendResult {
   retryAfterMs?: number
   /** `notPermitted` only. */
   reason?: string
+}
+
+/** Longest `comment` text accepted on the wire. Longer is refused (`bad-text`); text over
+ *  `BOARD_LOG_TEXT_MAX` (16 KiB) but under this is clamped to it with a trailing '…'. */
+export const INTEGRATION_COMMENT_TEXT_MAX = 64 * 1024
+
+export interface IntegrationCommentRequest {
+  key: string
+  /** Plain markdown. Control characters (except newline and tab) are removed. */
+  text: string
+}
+
+export interface IntegrationCommentResult {
+  key: string
+  nodeId: string
+  /** The board-log entry id of the new comment. */
+  commentId: string
 }
 
 export interface IntegrationCloseRequest {

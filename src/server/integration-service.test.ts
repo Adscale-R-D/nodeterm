@@ -6,7 +6,9 @@ import { resetAgentMessageTraceForTests } from '../core/agents/agent-message-tra
 import { MANAGED_SCRIPT_REVISION } from '../core/agents/hooks/managed-script'
 import type { AgentMessagingDeps } from '../core/agents/agent-messaging'
 import type { PrincipalEntry } from '../core/integration/registry'
-import { INTEGRATION_MESSAGE_VERB } from '../shared/integration-principal'
+import { INTEGRATION_COMMENT_TEXT_MAX, INTEGRATION_MESSAGE_VERB } from '../shared/integration-principal'
+import { BOARD_LOG_TEXT_MAX, type BoardLogEntry } from '../shared/types'
+import { mentionToken, parseMentions } from '../shared/board-comment'
 import type { PrincipalOpenSpec, PrincipalResumeInput } from './headless-node-factory'
 import { createIntegrationService, type IntegrationServiceDeps } from './integration-service'
 
@@ -21,10 +23,13 @@ interface World {
   prompts: Array<{ name: string; text: string }>
   sent: string[]
   state: string
+  boardLog: Array<{ projectId: string; entry: BoardLogEntry }>
+  noBoardLog: Set<string>
+  boardLogFails: boolean
 }
 
 function setup(over: Partial<IntegrationServiceDeps> = {}) {
-  const w: World = { canvas: new Map([['p1', []], ['p2', []]]), opens: [], resumes: [], closes: [], prompts: [], sent: [], state: 'done' }
+  const w: World = { canvas: new Map([['p1', []], ['p2', []]]), opens: [], resumes: [], closes: [], prompts: [], sent: [], state: 'done', boardLog: [], noBoardLog: new Set(), boardLogFails: false }
   let seq = 0
   const ledger = new IntegrationLedger(undefined, undefined, () => 5000)
   const messaging: AgentMessagingDeps = {
@@ -93,6 +98,12 @@ function setup(over: Partial<IntegrationServiceDeps> = {}) {
       return `/data/launch-prompts/x/${name}`
     },
     isDirectory: async (p) => p === '/work/repo',
+    boardLogReachable: (projectId) => !w.noBoardLog.has(projectId),
+    appendBoardLog: async (projectId, entry) => {
+      if (w.boardLogFails) return false
+      w.boardLog.push({ projectId, entry })
+      return true
+    },
     now: () => 5000,
     ...over
   })
@@ -261,5 +272,90 @@ describe('integration service — resume / send / close / list', () => {
     expect(rows[0]).toMatchObject({ key: 'A', state: 'open', session: 'live', attached: true, paneProven: true, agentState: 'blocked', needsYou: true })
     expect(rows[1]).toMatchObject({ key: 'B', state: 'open', nodeMissing: true })
     expect(rows[1]).not.toHaveProperty('session')
+  })
+})
+
+describe('integration service — comment', () => {
+  it('appends one comment on the key\'s card, authored as the principal, and answers its id', async () => {
+    const { call, w } = setup()
+    await call('open', { key: 'APP-1', agent: 'claude' })
+    const r = await call('comment', { key: 'APP-1', text: 'PR: [#42](https://example.test/pr/42)\n\nticket ok' })
+    expect(r.status).toBe(200)
+    const result = (r.body as { ok: true; result: { key: string; nodeId: string; commentId: string } }).result
+    expect(result).toMatchObject({ key: 'APP-1', nodeId: 'term-1' })
+    expect(result.commentId).toMatch(/^[0-9a-f-]{36}$/)
+    expect(w.boardLog).toEqual([
+      {
+        projectId: 'p1',
+        entry: {
+          id: result.commentId,
+          ts: 5000,
+          author: { name: 'Sink', color: '#888888' },
+          nodeId: 'term-1',
+          kind: 'comment',
+          text: 'PR: [#42](https://example.test/pr/42)\n\nticket ok'
+        }
+      }
+    ])
+  })
+
+  it('uses the principal colour when it has one', async () => {
+    const { call, w } = setup({
+      registry: { authenticate: (name, token) => (name === 'sink' && token === TOKEN ? { ...SINK, color: '#0a84ff' } : undefined) }
+    })
+    await call('open', { key: 'APP-1', agent: 'claude' })
+    await call('comment', { key: 'APP-1', text: 'hi' })
+    expect(w.boardLog[0].entry.author).toEqual({ name: 'Sink', color: '#0a84ff' })
+  })
+
+  it('never reaches the session: a mention of its own node is flattened and nothing is typed', async () => {
+    const { call, w } = setup()
+    await call('open', { key: 'APP-1', agent: 'claude' })
+    const r = await call('comment', { key: 'APP-1', text: `${mentionToken('term-1', 'APP-1 · Claude Code')} please look` })
+    expect(r.status).toBe(200)
+    expect(w.boardLog[0].entry.text).toBe('@APP-1 · Claude Code please look')
+    // A nested token: flattening the inner one must not leave a valid outer one behind.
+    await call('comment', { key: 'APP-1', text: '@[@[x](node:a)](node:term-1)' })
+    expect(w.boardLog[1].entry.text).toBe('@@x')
+    expect(parseMentions(w.boardLog[1].entry.text!)).toEqual([])
+    expect(w.sent).toEqual([])
+  })
+
+  it('strips controls and bidi overrides, keeps newlines and tabs, and clamps to the board-log cap', async () => {
+    const { call, w } = setup()
+    await call('open', { key: 'APP-1', agent: 'claude' })
+    await call('comment', { key: 'APP-1', text: 'a\x1b[31mb\r\n\tc\u202Ed' })
+    expect(w.boardLog[0].entry.text).toBe('a[31mb\n\tcd')
+    await call('comment', { key: 'APP-1', text: 'x'.repeat(BOARD_LOG_TEXT_MAX + 10) })
+    expect(w.boardLog[1].entry.text).toBe('x'.repeat(BOARD_LOG_TEXT_MAX) + '…')
+  })
+
+  it('refuses bad input, an unknown or closed key, a project with no board log, and a failed write', async () => {
+    const { call, w } = setup()
+    await call('open', { key: 'APP-1', agent: 'claude' })
+    expect((await call('comment', { key: 'APP-1', text: '  \x07 ' })).body).toMatchObject({ ok: false, error: 'bad-text' })
+    expect((await call('comment', { key: 'APP-1', text: 5 })).body).toMatchObject({ ok: false, error: 'bad-text' })
+    expect((await call('comment', { key: 'APP-1', text: 'x'.repeat(INTEGRATION_COMMENT_TEXT_MAX + 1) })).status).toBe(400)
+    expect((await call('comment', { text: 'hi' })).body).toMatchObject({ ok: false, error: 'bad-key' })
+    expect(await call('comment', { key: 'NOPE-1', text: 'hi' })).toMatchObject({ status: 404, body: { error: 'unknown-key' } })
+
+    w.noBoardLog.add('p1')
+    expect(await call('comment', { key: 'APP-1', text: 'hi' })).toMatchObject({ status: 409, body: { error: 'board-log-unavailable' } })
+    w.noBoardLog.clear()
+    w.boardLogFails = true
+    expect(await call('comment', { key: 'APP-1', text: 'hi' })).toMatchObject({ status: 500, body: { error: 'comment-not-saved' } })
+    w.boardLogFails = false
+
+    await call('close', { key: 'APP-1' })
+    expect(await call('comment', { key: 'APP-1', text: 'hi' })).toMatchObject({ status: 404, body: { error: 'unknown-key' } })
+    expect(w.boardLog).toEqual([])
+  })
+
+  it('a node a person removed is an unknown key (and its row closes)', async () => {
+    const { call, w, ledger } = setup()
+    await call('open', { key: 'APP-1', agent: 'claude' })
+    w.canvas.set('p1', [])
+    expect(await call('comment', { key: 'APP-1', text: 'hi' })).toMatchObject({ status: 404, body: { error: 'unknown-key' } })
+    expect(ledger.openNode('sink', 'APP-1')).toBeUndefined()
   })
 })

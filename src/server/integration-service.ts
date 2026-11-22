@@ -11,15 +11,18 @@ import { isAbsolute } from 'node:path'
 
 import {
   INTEGRATION_AGENTS,
+  INTEGRATION_COMMENT_TEXT_MAX,
   INTEGRATION_MESSAGE_VERB,
   INTEGRATION_PROMPT_MAX,
   INTEGRATION_SEND_TEXT_MAX,
   INTEGRATION_SEND_TTL_MAX_MS,
+  INTEGRATION_VERBS,
   isIntegrationVerb,
   isSafeFrameLabel,
   isSafePrincipalKey,
   type IntegrationAgent,
   type IntegrationCloseResult,
+  type IntegrationCommentResult,
   type IntegrationListResult,
   type IntegrationListRow,
   type IntegrationOpenResult,
@@ -27,9 +30,11 @@ import {
   type IntegrationResumeResult,
   type IntegrationSendResult
 } from '../shared/integration-principal'
-import { AGENT_CONFIG, type BuiltinAgentId } from '../shared/agents/config'
+import { AGENT_CONFIG, FALLBACK_AGENT_COLOR, type BuiltinAgentId } from '../shared/agents/config'
 import { LAUNCH_PROMPT_FILE_PREFIX } from '../shared/launch-prompt'
 import { sanitizeChatText } from '../shared/mobile-chat'
+import { commentSegments } from '../shared/board-comment'
+import { BOARD_LOG_TEXT_MAX, type BoardLogEntry } from '../shared/types'
 import { deliverIntegrationMessage, type AgentMessagingDeps } from '../core/agents/agent-messaging'
 import type { AgentMessageOutcome } from '../core/agents/agent-message-decide'
 import type { QueuedDeliveryRequest } from '../core/agents/delivery-queue'
@@ -53,6 +58,11 @@ export interface IntegrationServiceDeps {
   /** Write a launch prompt file; the path, or null. Production: core `saveUpload`. */
   savePrompt(name: string, base64: string): Promise<string | null>
   isDirectory?(path: string): Promise<boolean>
+  /** Does this project have a board log this server can write (a local folder)? Production:
+   *  `workspaceStore.boardLogRootForProject(id) !== undefined`. */
+  boardLogReachable(projectId: string): boolean
+  /** Append one entry to a project's board log (the shared `boardLog.append`); false on failure. */
+  appendBoardLog(projectId: string, entry: BoardLogEntry): Promise<boolean>
   now?(): number
 }
 
@@ -71,6 +81,8 @@ export interface IntegrationHttpReply {
 const MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9._:/@[\]-]{0,127}$/
 const TITLE_BAD = /[\p{Cc}\p{Cf}]/u
 const SEND_TTL_MIN_MS = 1000
+/** ALM, LRM/RLM, embeddings/overrides and isolates (the set `shared/presence.ts` strips from names). */
+const BIDI_CONTROLS = /[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g
 
 function fail(status: number, error: string, message: string, extra: { retryAfterMs?: number } = {}): IntegrationHttpReply {
   return { status, body: { ok: false, error, message, ...extra } }
@@ -316,6 +328,49 @@ export function createIntegrationService(deps: IntegrationServiceDeps): {
     })
   }
 
+  /**
+   * `comment`: one display-only note on the card of the key's node, authored as the principal. It is
+   * the same `kind: 'comment'` entry a person's card comment writes, but it is never delivered into
+   * the session: only the board composer's own send starts a delivery (see shared/board-comment.ts),
+   * and a mention token in the text is flattened to plain `@label` text so the note cannot even look
+   * like one.
+   */
+  async function comment(p: PrincipalEntry, b: Record<string, unknown>): Promise<IntegrationHttpReply> {
+    if (!isSafePrincipalKey(b.key)) return fail(400, 'bad-key', 'key: required')
+    if (typeof b.text !== 'string' || b.text.length > INTEGRATION_COMMENT_TEXT_MAX)
+      return fail(400, 'bad-text', `text: a non-empty string of at most ${INTEGRATION_COMMENT_TEXT_MAX} characters`)
+    // Controls (except \n / \t) and bidi overrides go: a note must render as it reads.
+    // Flatten to a fixpoint: flattening an inner token can complete an outer one
+    // (`@[@[x](node:a)](node:b)` → `@[@x](node:b)`). Each pass shortens the text, so this ends.
+    let flat = sanitizeChatText(b.text).replace(BIDI_CONTROLS, '')
+    for (;;) {
+      const next = commentSegments(flat)
+        .map((seg) => (seg.kind === 'text' ? seg.text : `@${seg.label.trim() || seg.nodeId}`))
+        .join('')
+      if (next === flat) break
+      flat = next
+    }
+    if (!flat.trim()) return fail(400, 'bad-text', 'text: must contain something besides whitespace and control characters')
+    const text = flat.length > BOARD_LOG_TEXT_MAX ? flat.slice(0, BOARD_LOG_TEXT_MAX) + '…' : flat
+    const row = liveRow(p.name, b.key)
+    if (!row) return unknownKey(b.key)
+    if (!deps.boardLogReachable(row.projectId))
+      return fail(409, 'board-log-unavailable', `project ${row.projectId} has no board log this server can write (no local folder)`)
+    const commentId = randomUUID()
+    const entry: BoardLogEntry = {
+      id: commentId,
+      ts: now(),
+      author: { name: p.label || p.name, color: p.color ?? FALLBACK_AGENT_COLOR },
+      nodeId: row.nodeId,
+      kind: 'comment',
+      text
+    }
+    const saved = await deps.appendBoardLog(row.projectId, entry).catch(() => false)
+    if (!saved) return fail(500, 'comment-not-saved', 'the board log could not be written; nothing was posted')
+    const result: IntegrationCommentResult = { key: row.key, nodeId: row.nodeId, commentId }
+    return ok(result)
+  }
+
   async function list(p: PrincipalEntry, b: Record<string, unknown>): Promise<IntegrationHttpReply> {
     if (b.key !== undefined && !isSafePrincipalKey(b.key)) return fail(400, 'bad-key', 'key: a key, or omit it')
     if (b.includeClosed !== undefined && typeof b.includeClosed !== 'boolean') return fail(400, 'bad-include-closed', 'includeClosed: true or false')
@@ -363,7 +418,7 @@ export function createIntegrationService(deps: IntegrationServiceDeps): {
       const principal = deps.registry.authenticate(req.name, req.token)
       // One flat refusal: no hint whether the name exists or the token was wrong.
       if (!principal) return fail(403, 'unauthorized', 'integration refused')
-      if (!isIntegrationVerb(req.verb)) return fail(404, 'unknown-verb', 'verbs: open, resume, send, close, list')
+      if (!isIntegrationVerb(req.verb)) return fail(404, 'unknown-verb', `verbs: ${INTEGRATION_VERBS.join(', ')}`)
       const body = parseBody(req.body)
       if (!body) return fail(400, 'bad-body', 'the body must be a JSON object')
       switch (req.verb) {
@@ -377,6 +432,8 @@ export function createIntegrationService(deps: IntegrationServiceDeps): {
           return close(principal, body)
         case 'list':
           return list(principal, body)
+        case 'comment':
+          return comment(principal, body)
       }
     },
     onQueuedResult(req, outcome) {

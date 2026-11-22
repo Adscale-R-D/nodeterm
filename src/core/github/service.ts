@@ -25,7 +25,7 @@ import {
 } from './cache'
 import { classifyGitHubFailure } from './failure'
 import type { GitHubRequestCoordinator } from './request-coordinator'
-import type { PullStatusRead } from './graphql-pulls'
+import type { PullOneRead, PullStatusRead } from './graphql-pulls'
 import { GitHubPullStatusTracker } from './pull-status-tracker'
 import type { GitHubPullBoard, GitHubPullChecksResult, PullLifecycle } from '../../shared/github-pull-status'
 
@@ -77,7 +77,19 @@ export interface GitHubIssuesClientLike {
    *  then shows none, which is the honest answer. */
   pullRequestStatuses?(repository: string): Promise<PullStatusRead>
   pullRequestChecks?(repository: string, pullNumber: number): Promise<GitHubPullChecksResult>
+  /** One PR by number, for a declared PR outside the list read's window. Optional like the list read. */
+  pullRequestStatus?(repository: string, pullNumber: number): Promise<PullOneRead>
 }
+
+/** PR links an integration principal DECLARED on a project's cards (Server Edition: the durable
+ *  integration ledger, docs/integration-principal.md). `repository` is the board's repository when the
+ *  links were declared: a number means nothing in another repository, so links from a board that has
+ *  since been re-pointed are not shown. */
+export type DeclaredPullsProvider = (projectId: string) => ReadonlyArray<{
+  nodeId: string
+  pulls: readonly number[]
+  repository: string
+}>
 
 export interface GitHubIssueProjectContext {
   localApprovalId: string
@@ -248,6 +260,8 @@ export class GitHubIssueService {
   private readonly checkReads = new Map<string, { at: number; result: Promise<GitHubPullChecksResult> }>()
   private readonly checkStarts = new Map<string, number[]>()
   private operationSequence = 0
+  /** Late-bound: the GitHub service is registered before the integration ledger exists. */
+  private declaredPullsProvider: DeclaredPullsProvider | undefined
   private readonly now: () => number
   private readonly schedule: NonNullable<ServiceOptions['setInterval']>
   private readonly unschedule: NonNullable<ServiceOptions['clearInterval']>
@@ -276,8 +290,95 @@ export class GitHubIssueService {
             : item.pull.draft ? 'draft' : 'open')
         }
         return lifecycles
-      }
+      },
+      pinned: (key) => this.pinnedForKey(key)
     })
+  }
+
+  /** Wire the declared-links source (Server Edition: the integration ledger). */
+  setDeclaredPulls(provider: DeclaredPullsProvider | undefined): void {
+    this.declaredPullsProvider = provider
+  }
+
+  /** The declared links of one project that belong to `repository`, by card. */
+  private declaredFor(projectId: string, repository: string): Array<{ nodeId: string; pulls: number[] }> {
+    const folded = repository.toLocaleLowerCase('en-US')
+    let rows: ReturnType<DeclaredPullsProvider>
+    try {
+      rows = this.declaredPullsProvider?.(projectId) ?? []
+    } catch {
+      return []
+    }
+    return rows
+      .filter((row) => row.repository.toLocaleLowerCase('en-US') === folded && row.pulls.length > 0)
+      .map((row) => ({ nodeId: row.nodeId, pulls: [...row.pulls] }))
+  }
+
+  /** Every declared number of every project bound to this repository key. */
+  private pinnedForKey(key: string): ReadonlySet<number> {
+    const pinned = new Set<number>()
+    if (!this.declaredPullsProvider) return pinned
+    const repository = key.slice(key.indexOf('\0') + 1)
+    for (const [projectId, projectKey] of this.projectKeys) {
+      if (projectKey !== key) continue
+      for (const row of this.declaredFor(projectId, repository)) for (const pull of row.pulls) pinned.add(pull)
+    }
+    return pinned
+  }
+
+  /** The tracker's board for a repository key, plus this project's declared links. */
+  private boardFor(key: string, projectId: string, repository: string): GitHubPullBoard {
+    const board = this.pulls.board(key)
+    const declared = this.declaredFor(projectId, repository)
+    return declared.length ? { ...board, declared } : board
+  }
+
+  /**
+   * A principal changed a project's declared links: its open boards re-read at once, and the next
+   * list read covers the new numbers. When the project has a subscribed board, a background read is
+   * started now (on the background budget) so a newly declared old PR gets its state without waiting
+   * for the next poll. Never throws.
+   */
+  declaredPullsChanged(projectId: string): void {
+    this.notifyProject(projectId)
+    const key = this.projectKeys.get(projectId)
+    if (!key || key.startsWith('unbound:')) return
+    this.pulls.markOwed(key)
+    void (async () => {
+      const captured = await this.options.contextForProject(projectId)
+      if (repositoryKey(captured) !== key || !captured.client.pullRequestStatuses) return
+      await this.pulls.read(key, captured.userId, 'heartbeat', () => this.readPullBoard(captured, key))
+    })().catch(() => undefined)
+  }
+
+  /**
+   * The list read, plus a single-PR read for each declared PR its window misses (see
+   * `GitHubPullStatusTracker.declaredToRead`). A failed single read never fails the list read: that PR
+   * keeps what the board already had, and a rate limit stops the rest of the pass.
+   */
+  private async readPullBoard(captured: GitHubIssueServiceContext, key: string): Promise<PullStatusRead> {
+    const listed = await this.readWithEpoch(captured, () => captured.client.pullRequestStatuses!(captured.repository))
+    const readOne = captured.client.pullRequestStatus?.bind(captured.client)
+    if (!readOne) return listed
+    const wanted = await this.pulls.declaredToRead(key, listed)
+    if (!wanted.length) return listed
+    const open = [...listed.open]
+    const recent = [...listed.recent]
+    for (const number of wanted) {
+      if (this.options.coordinator.throttle(captured.userId, this.now(), 'graphql')) break
+      let one: PullOneRead
+      try {
+        one = await this.readWithEpoch(captured, () => readOne(captured.repository, number))
+      } catch (error) {
+        if ((error as { code?: unknown } | null)?.code === 'rate-limited') break
+        continue
+      }
+      if (one.kind === 'missing') this.pulls.noteMissing(key, number)
+      else if (one.kind === 'finished') recent.push(one.pull)
+      // A read that may see LESS than the list read did would decode a hidden rollup as "no checks".
+      else if ((one.access.ci || !listed.access.ci) && (one.access.merge || !listed.access.merge)) open.push(one.facts)
+    }
+    return { ...listed, open, recent }
   }
 
   async subscribe(uiId: number, request: { projectId: string }): Promise<GitHubIssuePage> {
@@ -737,7 +838,7 @@ export class GitHubIssueService {
   async pullStatus(request: { projectId: string }): Promise<GitHubPullBoard> {
     const context = await this.cacheContext(request.projectId)
     const { key } = await this.cachedState(context)
-    return this.pulls.board(key)
+    return this.boardFor(key, request.projectId, context.repository)
   }
 
   /**
@@ -764,7 +865,7 @@ export class GitHubIssueService {
       incomplete: state.incomplete,
       pullsTruncated: !!state.snapshot?.pullsTruncated,
       ...(state.snapshot ? { lastSuccessfulRefreshAt: state.snapshot.lastSuccessfulRefreshAt } : {}),
-      pullBoard: this.pulls.board(key),
+      pullBoard: this.boardFor(key, projectId, context.repository),
       ...(throttle ? { throttle } : {})
     }
   }
@@ -784,8 +885,7 @@ export class GitHubIssueService {
       return false
     }
     if (repositoryKey(captured) !== key || !captured.client.pullRequestStatuses) return false
-    await this.pulls.read(key, captured.userId, 'chase', () =>
-      this.readWithEpoch(captured, () => captured.client.pullRequestStatuses!(captured.repository)))
+    await this.pulls.read(key, captured.userId, 'chase', () => this.readPullBoard(captured, key))
     return true
   }
 
@@ -883,7 +983,7 @@ export class GitHubIssueService {
     if (!captured.client.pullRequestStatuses) return
     if (!this.pulls.wantsReadAfterHeartbeat(key, { changed, foreground })) return
     void this.pulls.read(key, captured.userId, foreground ? 'foreground' : 'heartbeat', () =>
-      this.readWithEpoch(captured, () => captured.client.pullRequestStatuses!(captured.repository)))
+      this.readPullBoard(captured, key))
       .catch(() => undefined)
   }
 

@@ -102,7 +102,9 @@ export function rememberPulls(
   previous: RememberedPull[],
   listed: GitHubPullStatus[],
   harvest: ReadonlyMap<number, PullLifecycle>,
-  now: number
+  now: number,
+  /** PRs a principal declared on a card: kept inside the bound right after the unfinished ones. */
+  pinned: ReadonlySet<number> = new Set()
 ): RememberedPull[] {
   const byNumber = new Map(previous.map((pull) => [pull.number, pull]))
   const next = new Map<number, RememberedPull>()
@@ -136,6 +138,7 @@ export function rememberPulls(
   // newest. An evicted merged PR only loses its place on a board long after it mattered.
   return [...next.values()]
     .sort((a, b) => Number(UNFINISHED.has(b.lifecycle)) - Number(UNFINISHED.has(a.lifecycle)) ||
+      Number(pinned.has(b.number)) - Number(pinned.has(a.number)) ||
       b.number - a.number)
     .slice(0, PULL_MEMORY_MAX)
 }
@@ -146,11 +149,15 @@ export function rememberPulls(
 export function rememberedForBoard(
   memory: RememberedPull[],
   listed: ReadonlySet<number>,
-  now: number
+  now: number,
+  /** PRs a principal DECLARED on a card stay on the board whatever their age: the declaration is the
+   *  statement that this card is about them, and a merge first seen already-merged (an old PR, such as
+   *  one declared after it merged) has no `mergedSeenAt` and would otherwise vanish from its chip. */
+  pinned: ReadonlySet<number> = new Set()
 ): GitHubPullStatus[] {
   return memory
     .filter((pull) => !listed.has(pull.number))
-    .filter((pull) => pull.lifecycle !== 'merged' ||
+    .filter((pull) => pull.lifecycle !== 'merged' || pinned.has(pull.number) ||
       (pull.mergedSeenAt !== undefined && now - pull.mergedSeenAt < REMEMBERED_MERGE_VISIBLE_MS))
     .map((pull): GitHubPullStatus => ({
       number: pull.number,

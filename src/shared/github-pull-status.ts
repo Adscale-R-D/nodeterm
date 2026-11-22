@@ -94,6 +94,10 @@ export interface GitHubPullBoard {
   undecided: boolean
   /** More open PRs exist than one read covers; the oldest-updated ones carry no status. */
   truncated: boolean
+  /** PRs an integration principal DECLARED on this project's cards (Server Edition, from the durable
+   *  integration ledger), by card. A third link source beside the branch and the issue; the board's
+   *  unlink tombstones still win. Absent = none. */
+  declared?: Array<{ nodeId: string; pulls: number[] }>
 }
 
 export const EMPTY_PULL_BOARD: GitHubPullBoard = {

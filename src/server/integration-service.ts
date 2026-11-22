@@ -18,14 +18,18 @@ import {
   INTEGRATION_SEND_TTL_MAX_MS,
   INTEGRATION_VERBS,
   isIntegrationVerb,
+  isDeclarablePull,
   isSafeFrameLabel,
   isSafePrincipalKey,
+  parseDeclaredPulls,
+  INTEGRATION_PULLS_MAX,
   type IntegrationAgent,
   type IntegrationCloseResult,
   type IntegrationCommentResult,
   type IntegrationListResult,
   type IntegrationListRow,
   type IntegrationOpenResult,
+  type IntegrationPullResult,
   type IntegrationReply,
   type IntegrationResumeResult,
   type IntegrationSendResult
@@ -63,6 +67,11 @@ export interface IntegrationServiceDeps {
   boardLogReachable(projectId: string): boolean
   /** Append one entry to a project's board log (the shared `boardLog.append`); false on failure. */
   appendBoardLog(projectId: string, entry: BoardLogEntry): Promise<boolean>
+  /** The GitHub repository (`owner/name`) this project's board syncs with, or null. Declared pull
+   *  numbers are recorded against it. Production: the GitHub host controller (no credential). */
+  boardRepository(projectId: string): Promise<string | null>
+  /** A key's declared pull requests changed: the project's open boards re-read. */
+  onPullsChanged?(projectId: string): void
   now?(): number
 }
 
@@ -145,6 +154,32 @@ export function createIntegrationService(deps: IntegrationServiceDeps): {
     }
   }
 
+  const repositoryOf = (projectId: string): Promise<string | null> =>
+    deps.boardRepository(projectId).then((r) => (typeof r === 'string' && r ? r : null), () => null)
+
+  const noRepository = (projectId: string): IntegrationHttpReply =>
+    fail(409, 'no-repository', `project ${projectId}'s board has no GitHub repository to link pull requests in`)
+
+  const tooManyPulls = (): IntegrationHttpReply =>
+    fail(409, 'too-many-pulls', `a key declares at most ${INTEGRATION_PULLS_MAX} pull requests`)
+
+  /** Unions `pulls` into the key's declared set for `open`. Ignored (never refused) without a
+   *  repository. */
+  const declareOnOpen = async (
+    nodeId: string,
+    projectId: string,
+    pulls: number[]
+  ): Promise<{ pulls: number[]; pullsIgnored?: 'no-repository' } | 'too-many'> => {
+    const repository = await repositoryOf(projectId)
+    if (!repository) return { pulls: [], pullsIgnored: 'no-repository' }
+    const before = deps.ledger.declaredPulls(nodeId, repository)
+    const next = deps.ledger.declarePulls(nodeId, repository, pulls)
+    if (next === 'too-many') return 'too-many'
+    const after = next ?? []
+    if (after.join(',') !== before.join(',')) deps.onPullsChanged?.(projectId)
+    return { pulls: after }
+  }
+
   const unknownKey = (key: string): IntegrationHttpReply =>
     fail(404, 'unknown-key', `no open node for key ${key} (never opened, closed, or removed from the canvas)`)
 
@@ -169,11 +204,21 @@ export function createIntegrationService(deps: IntegrationServiceDeps): {
       return fail(400, 'bad-title', 'title: one printable line of at most 120 characters')
     if (b.column !== undefined && (typeof b.column !== 'string' || !b.column.trim() || b.column.length > 48 || TITLE_BAD.test(b.column)))
       return fail(400, 'bad-column', 'column: one printable line of at most 48 characters')
+    const pulls = b.pulls === undefined ? undefined : parseDeclaredPulls(b.pulls)
+    if (pulls === null) return fail(400, 'bad-pull', `pulls: at most ${INTEGRATION_PULLS_MAX} pull request numbers (positive integers)`)
 
     return withKeyLock(`${p.name}|${key}`, async () => {
       const existing = liveRow(p.name, key)
       if (existing) {
-        const result: IntegrationOpenResult = { key, nodeId: existing.nodeId, projectId: existing.projectId, status: 'existing' }
+        const declared = pulls ? await declareOnOpen(existing.nodeId, existing.projectId, pulls) : undefined
+        if (declared === 'too-many') return tooManyPulls()
+        const result: IntegrationOpenResult = {
+          key,
+          nodeId: existing.nodeId,
+          projectId: existing.projectId,
+          status: 'existing',
+          ...(declared ?? {})
+        }
         return ok(result)
       }
       let promptFile: string | undefined
@@ -229,6 +274,8 @@ export function createIntegrationService(deps: IntegrationServiceDeps): {
       )
       if (!opened.ok) return fail(opened.error === 'not-saved' || opened.error === 'stopping' ? 503 : 409, opened.error, opened.message)
       if (opened.sessionCreated !== undefined) deps.ledger.update(opened.nodeId, { sessionCreated: opened.sessionCreated })
+      // A fresh key: at most INTEGRATION_PULLS_MAX by validation, so it cannot overflow.
+      const declared = pulls ? await declareOnOpen(opened.nodeId, projectId, pulls) : undefined
       const result: IntegrationOpenResult = {
         key,
         nodeId: opened.nodeId,
@@ -237,7 +284,8 @@ export function createIntegrationService(deps: IntegrationServiceDeps): {
         session: opened.session,
         ...(opened.reason ? { reason: opened.reason } : {}),
         ...(opened.frameId ? { frameId: opened.frameId } : {}),
-        ...(opened.column !== undefined ? { column: opened.column } : {})
+        ...(opened.column !== undefined ? { column: opened.column } : {}),
+        ...(declared && declared !== 'too-many' ? declared : {})
       }
       return ok(result)
     })
@@ -371,6 +419,34 @@ export function createIntegrationService(deps: IntegrationServiceDeps): {
     return ok(result)
   }
 
+  /**
+   * `link-pull` / `unlink-pull`: add or remove one DECLARED pull request on the key's card. Both are
+   * idempotent and answer the key's whole declared set. The links live in this server's durable
+   * integration ledger (never in project.json) and reach the board through the pull status the host
+   * already serves; a person's unlink on the card still wins.
+   */
+  async function changePull(p: PrincipalEntry, b: Record<string, unknown>, add: boolean): Promise<IntegrationHttpReply> {
+    if (!isSafePrincipalKey(b.key)) return fail(400, 'bad-key', 'key: required')
+    if (!isDeclarablePull(b.pull)) return fail(400, 'bad-pull', 'pull: a pull request number (a positive integer)')
+    const key = b.key
+    const pull = b.pull
+    return withKeyLock(`${p.name}|${key}`, async () => {
+      const row = liveRow(p.name, key)
+      if (!row) return unknownKey(key)
+      const repository = await repositoryOf(row.projectId)
+      if (!repository) return noRepository(row.projectId)
+      const before = deps.ledger.declaredPulls(row.nodeId, repository)
+      const next = add
+        ? deps.ledger.declarePulls(row.nodeId, repository, [pull])
+        : deps.ledger.undeclarePull(row.nodeId, repository, pull)
+      if (next === 'too-many') return tooManyPulls()
+      if (next === undefined) return unknownKey(key)
+      if (next.join(',') !== before.join(',')) deps.onPullsChanged?.(row.projectId)
+      const result: IntegrationPullResult = { key, nodeId: row.nodeId, pulls: next }
+      return ok(result)
+    })
+  }
+
   async function list(p: PrincipalEntry, b: Record<string, unknown>): Promise<IntegrationHttpReply> {
     if (b.key !== undefined && !isSafePrincipalKey(b.key)) return fail(400, 'bad-key', 'key: a key, or omit it')
     if (b.includeClosed !== undefined && typeof b.includeClosed !== 'boolean') return fail(400, 'bad-include-closed', 'includeClosed: true or false')
@@ -403,6 +479,7 @@ export function createIntegrationService(deps: IntegrationServiceDeps): {
           base.needsYou = m?.state === 'waiting' || m?.state === 'blocked'
           if (deps.lastTurnErrored) base.lastTurnError = deps.lastTurnErrored(r.nodeId)
         }
+        base.pulls = [...(r.pulls ?? [])]
       }
       rows.push(base)
     }
@@ -434,6 +511,10 @@ export function createIntegrationService(deps: IntegrationServiceDeps): {
           return list(principal, body)
         case 'comment':
           return comment(principal, body)
+        case 'link-pull':
+          return changePull(principal, body, true)
+        case 'unlink-pull':
+          return changePull(principal, body, false)
       }
     },
     onQueuedResult(req, outcome) {

@@ -78,6 +78,10 @@ export interface ServerCanvasControlDeps {
   /** The GitHub service's cache reads behind `issues` / `prs` (core/github/control-read.ts).
    *  Absent = those verbs answer that the GitHub lane is unavailable here. */
   githubRead?: Pick<GitHubReadDeps, 'snapshot' | 'dispatch'>
+  /** An integration principal changed a project's DECLARED pull requests (the GitHub service's
+   *  `declaredPullsChanged`: the boards re-read, a single-PR read is started). Absent = boards see
+   *  the change on their next poll. */
+  onDeclaredPullsChanged?: (projectId: string) => void
   /**
    * Does this process own the hook endpoint (`hookServer.startForApp()` returned no warning)? The
    * durable orchestration facts (queue, station reports, hand-over holds) belong to the owning
@@ -98,6 +102,9 @@ export interface ServerCanvasControl {
   stationHandovers: StationHandoverTracker
   /** The `/integration/<verb>` handler (docs/integration-principal.md). */
   integration(req: IntegrationRequest): Promise<IntegrationHttpReply>
+  /** The pull requests principals declared on a project's cards (the GitHub service's
+   *  `setDeclaredPulls` source). Read from the durable integration ledger. */
+  declaredPulls(projectId: string): Array<{ nodeId: string; pulls: number[]; repository: string }>
   stop(): void
 }
 
@@ -304,7 +311,10 @@ export async function initServerCanvasControl(
     transcriptPresence: (sessionId) => transcriptPresence(sessionId),
     savePrompt: (name, base64) => saveUpload(platform().userDataDir, name, base64),
     boardLogReachable: (projectId) => deps.workspaceStore.boardLogRootForProject(projectId) !== undefined,
-    appendBoardLog: (projectId, entry) => deps.boardLog.append(projectId, entry)
+    appendBoardLog: (projectId, entry) => deps.boardLog.append(projectId, entry),
+    // The repository the board syncs with — the same answer `open-agent --issue #N` resolves against.
+    boardRepository: (projectId) => deps.issueRepository?.(projectId) ?? Promise.resolve(null),
+    ...(deps.onDeclaredPullsChanged ? { onPullsChanged: deps.onDeclaredPullsChanged } : {})
   })
 
   const stationNotices = new StationNoticeMonitor({
@@ -426,6 +436,7 @@ export async function initServerCanvasControl(
     stationOutcomes,
     stationHandovers,
     integration: (req) => integration.handle(req),
+    declaredPulls: (projectId) => integrationLedger.ledger.declaredForProject(projectId),
     stop: () => {
       factory.stop()
       queue.resetForTests()

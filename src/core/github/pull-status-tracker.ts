@@ -60,6 +60,8 @@ type PullRepositoryState = {
   memoryLoad?: Promise<PullMemory>
   /** Saves run one after another, so the file always ends at the latest memory. */
   saving: Promise<void>
+  /** Declared numbers GitHub answered NOT_FOUND for, and when. */
+  missing: Map<number, number>
 }
 
 type TrackerOptions = {
@@ -75,7 +77,16 @@ type TrackerOptions = {
   /** Every PR's lifecycle from the REST issues harvest, for remembered PRs the GraphQL read no
    *  longer lists. */
   harvest?: (key: string) => ReadonlyMap<number, PullLifecycle>
+  /** PR numbers integration principals DECLARED on cards of projects bound to this repository key.
+   *  They are kept on the board (and in the memory bound) whatever their age, and the ones the list
+   *  read's window misses are read one by one (`declaredToRead`). */
+  pinned?: (key: string) => ReadonlySet<number>
 }
+
+/** At most this many single-PR reads ride one list read; the rest wait for the next one. */
+export const DECLARED_READS_PER_PASS = 10
+/** A number GitHub answered "no such pull request" for is not asked again for this long. */
+export const DECLARED_MISSING_TTL_MS = 60 * 60_000
 
 function errorCode(error: unknown): string | undefined {
   return error && typeof error === 'object' && typeof (error as { code?: unknown }).code === 'string'
@@ -115,6 +126,43 @@ export class GitHubPullStatusTracker {
       undecided: !!state.chase && state.chase.attempts < PULL_CHASE_MAX,
       truncated: state.truncated
     }
+  }
+
+  /**
+   * The declared PRs a list read (`listed`, just returned) did not reach and that still need a
+   * single-PR read: neither listed, nor remembered as finished (a finished PR's state is final and the
+   * memory already holds it), nor recently answered "no such PR". Capped at `DECLARED_READS_PER_PASS`,
+   * lowest numbers last (old PRs change least).
+   */
+  async declaredToRead(key: string, listed: PullStatusRead): Promise<number[]> {
+    const pinned = this.options.pinned?.(key)
+    if (!pinned?.size) return []
+    const state = this.stateFor(key)
+    const memory = await this.memoryFor(key, state)
+    const now = this.now()
+    const seen = new Set([...listed.open.map((pull) => pull.number), ...listed.recent.map((pull) => pull.number)])
+    const finished = new Set((state.memory ?? memory).pulls
+      .filter((pull) => pull.lifecycle === 'merged' || pull.lifecycle === 'closed')
+      .map((pull) => pull.number))
+    for (const [number, at] of state.missing) {
+      if (now - at >= DECLARED_MISSING_TTL_MS) state.missing.delete(number)
+    }
+    return [...pinned]
+      .filter((number) => !seen.has(number) && !finished.has(number) && !state.missing.has(number))
+      .sort((a, b) => b - a)
+      .slice(0, DECLARED_READS_PER_PASS)
+  }
+
+  /** GitHub answered "no such pull request" for a declared number. */
+  noteMissing(key: string, number: number): void {
+    const state = this.stateFor(key)
+    if (state.missing.size > 1_000) state.missing.clear()
+    state.missing.set(number, this.now())
+  }
+
+  /** The next opportunity reads even if nothing changed on GitHub (a declaration just arrived). */
+  markOwed(key: string): void {
+    this.stateFor(key).owed = true
   }
 
   /** Should the heartbeat that just ran be followed by a pull status read? */
@@ -295,7 +343,8 @@ export class GitHubPullStatusTracker {
         closes: []
       }))
     const listed = [...open, ...finished]
-    const remembered = rememberPulls(memory.pulls, listed, this.options.harvest?.(key) ?? new Map(), now)
+    const pinned = this.options.pinned?.(key) ?? new Set<number>()
+    const remembered = rememberPulls(memory.pulls, listed, this.options.harvest?.(key) ?? new Map(), now, pinned)
     if (JSON.stringify(remembered) !== JSON.stringify(memory.pulls)) {
       state.memory = { ...(state.memory ?? memory), pulls: remembered }
       this.persist(key, state)
@@ -303,7 +352,7 @@ export class GitHubPullStatusTracker {
     const rememberedByNumber = new Map(remembered.map((pull) => [pull.number, pull]))
     const pulls = [
       ...listed.map((pull) => withObservations(pull, rememberedByNumber.get(pull.number))),
-      ...rememberedForBoard(remembered, new Set(listed.map((pull) => pull.number)), now)
+      ...rememberedForBoard(remembered, new Set(listed.map((pull) => pull.number)), now, pinned)
     ]
     const nextNumbers = new Set(pulls.map((pull) => pull.number))
     const changed = [
@@ -361,7 +410,7 @@ export class GitHubPullStatusTracker {
     if (!state) {
       state = {
         pulls: [], stale: false, access: { ci: true, merge: true }, truncated: false,
-        chase: null, owed: false, generation: 0, saving: Promise.resolve()
+        chase: null, owed: false, generation: 0, saving: Promise.resolve(), missing: new Map()
       }
       this.states.set(key, state)
     }

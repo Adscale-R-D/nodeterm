@@ -16,6 +16,9 @@
 //    GitHub's own "Closes #N" is meaningful wherever the PR comes from, unlike a branch name. The
 //    host remembers what a PR closed while it was open, so the link survives the merge. The same
 //    tombstones apply.
+//  - DECLARED: an integration principal said "this card is about PR #N" (Server Edition, the durable
+//    integration ledger; it reaches the board as `GitHubPullBoard.declared`). Explicit, so a fork's PR
+//    counts. The same tombstones apply: a user's unlink hides it, the declaration stays on the host.
 import type { ProjectKanban } from './types'
 import type { IssueRef } from './github-issue-ref'
 import type { GitHubPullBoard, GitHubPullStatus } from './github-pull-status'
@@ -45,19 +48,31 @@ function sameRepositoryIssue(issueRef: IssueRef | undefined, repository: string 
     : null
 }
 
+/** The PR numbers a principal declared on this card (`GitHubPullBoard.declared`). */
+export function declaredPullsFor(cardId: string, pullBoard: GitHubPullBoard | undefined): Set<number> {
+  const out = new Set<number>()
+  for (const entry of pullBoard?.declared ?? []) {
+    if (entry.nodeId === cardId) for (const pull of entry.pulls) out.add(pull)
+  }
+  return out
+}
+
 export function pullsForCard(
   card: { id: string; worktreeBranch?: string; issueRef?: IssueRef },
   pullBoard: GitHubPullBoard | undefined,
   board: ProjectKanban | undefined
 ): CardPullLinks {
-  const issue = sameRepositoryIssue(card.issueRef, pullBoard?.repository)
-  if ((!card.worktreeBranch && issue === null) || !pullBoard) return NONE
+  if (!pullBoard) return NONE
+  const issue = sameRepositoryIssue(card.issueRef, pullBoard.repository)
+  const declared = declaredPullsFor(card.id, pullBoard)
+  if (!card.worktreeBranch && issue === null && declared.size === 0) return NONE
   const tombstones = new Set(readPullLinks(board)
     .unlinked.filter((entry) => entry.nodeId === card.id).map((entry) => entry.pull))
   const matches = pullBoard.pulls
     .filter((pull) =>
       (!!card.worktreeBranch && !pull.crossRepository && pull.headRefName === card.worktreeBranch) ||
-      (issue !== null && pull.closes.includes(issue)))
+      (issue !== null && pull.closes.includes(issue)) ||
+      declared.has(pull.number))
     .sort(byRelevance)
   if (!matches.length) return NONE
   return {

@@ -90,15 +90,18 @@ or token); 404 `unknown-key` / `unknown-verb` / `integration-unavailable`; 409 a
   cwd?: string,       // absolute existing directory; default: the project's folder
   prompt?: string,    // ≤ 256 KiB; written to a file the launch reads, so newlines survive
   model?: string, group?: string /* frame title, ≤ 48 chars */, title?: string /* ≤ 120 */,
-  column?: string /* an existing kanban column's title, ≤ 48 chars */ }
+  column?: string /* an existing kanban column's title, ≤ 48 chars */,
+  pulls?: number[] /* PR numbers in the board's GitHub repository, ≤ 20 (see "Declared pull requests") */ }
 // result
 { key, nodeId, projectId, status: 'created' | 'existing',
   session?: 'started' | 'failed', reason?: string, frameId?: string,
-  column?: string /* the column id, or 'missing'; only when `column` was asked and the node created */ }
+  column?: string /* the column id, or 'missing'; only when `column` was asked and the node created */,
+  pulls?: number[] /* only when `pulls` was sent: the key's declared set after this call */,
+  pullsIgnored?: 'no-repository' /* `pulls` not recorded: the board has no GitHub repository */ }
 ```
 
 An upsert by key: if the principal already has an open node for the key, it answers `existing` and
-changes nothing — it does not look at the session, so call `resume` when the daemon (re)starts. A key whose node a person removed opens a new node. `group` creates a frame with
+changes nothing but the declared `pulls` — it does not look at the session, so call `resume` when the daemon (re)starts. A key whose node a person removed opens a new node. `group` creates a frame with
 that title on first use and puts later nodes into the same frame. The default title is
 `<key> · <agent label>`. The node is written and the ledger row recorded **before** anything is
 spawned.
@@ -109,6 +112,12 @@ column: when no column has that title the node opens normally, its card stays in
 result says `column: 'missing'`. Create the columns by hand; a person-made column is never removed
 automatically, so it stays even when its last card closes. An `existing` upsert does not move the
 card and returns no `column`.
+
+`pulls` is recorded for the key, also on an `existing` upsert, where it is UNIONED into the set
+already declared (the only thing an `existing` upsert changes). A malformed list is 400 `bad-pull`
+before anything opens; a union past 20 is 409 `too-many-pulls`. On a project whose board has no
+GitHub repository `pulls` is ignored, never refused: the node opens and the result says
+`pullsIgnored: 'no-repository'`.
 
 `session: 'failed'` keeps the launch on the node for its Run now, with `reason`
 (`no-shell`, `line-too-long`, `spawn-failed`, …).
@@ -205,6 +214,52 @@ Use it for notes a person should see on the card, such as PR and ticket links.
   project has no local folder to keep `.nodeterm/board-log.jsonl` in); 500 `comment-not-saved` (the
   write failed; nothing was posted).
 
+### `POST /integration/link-pull` and `POST /integration/unlink-pull`
+
+```ts
+{ key: string, pull: number /* a PR number in the board's GitHub repository */ }
+// result
+{ key, nodeId, pulls: number[] /* the key's declared set after the call, ascending */ }
+```
+
+Add or remove one declared pull request on the key's card. Both are idempotent: linking a PR already
+declared, or unlinking one that is not, answers the current set and changes nothing.
+
+- Errors: 400 `bad-key` / `bad-pull` (not a positive integer ≤ 2³¹−1); 404 `unknown-key`; 409
+  `no-repository` (the project's board has no GitHub repository); 409 `too-many-pulls` (a key
+  declares at most 20).
+
+### Declared pull requests
+
+A card's pull requests come from three sources, and the card shows their union:
+
+1. **Branch**: the card sits in a worktree group and a PR's head branch is that group's branch.
+2. **Issue**: the session was started on a GitHub issue that the PR closes.
+3. **Declared**: a principal said so (`open.pulls`, `link-pull`). A fork's PR counts too.
+
+Declared links render exactly like the other two: the `PR #N` chip on the kanban card and a row in
+the card modal's "Pull requests" section, with the same CI and merge state.
+
+- **The ledger is the authority.** The set lives on the key's row in `integration-nodes.json`, next to
+  the key → node mapping, so it survives a server restart and a reboot. It is never written to or read
+  from `project.json`.
+- **Closing the key drops its links.** A reopened key starts empty; declare again.
+- **A person's unlink wins.** Unlinking the PR in the card modal writes the board's tombstone; the
+  card stops showing it while the declaration stays in the ledger. "Link again" in the modal brings it
+  back. `unlink-pull` removes the declaration itself.
+- **One repository.** The numbers are recorded against the board's repository at declare time. If
+  the board is later pointed at another repository, the old set is not shown, and the next
+  `link-pull` starts a new set. `list` still shows the stored numbers.
+- **Old PRs get their state.** The board's status read covers the 50 most recently updated open PRs
+  and the 30 most recently finished ones. A declared PR outside that window is read on its own, one PR
+  per request, in the same pass (at most 10 per pass, on the same `graphql` budget, which a background
+  read leaves a floor of). A finished PR is read once; a number that is not a PR is not asked again
+  for an hour. The first read after `link-pull` starts at once when a board for the project is open;
+  otherwise the PR is read when one opens.
+- **Auto-move on merge** treats declared links like the others. It is off unless this machine turned
+  it on, and a card moves only for a merge this machine observed after it saw the PR open on that
+  card: a PR declared after it merged never moves the card.
+
 ### `POST /integration/list`
 
 ```ts
@@ -218,7 +273,8 @@ Use it for notes a person should see on the card, such as PR and ticket links.
     paneProven?: boolean,                     // send can reach it
     agentState?: string,                      // working | waiting | blocked | done | unknown
     needsYou?: boolean,                       // a dialog waits on a person
-    lastTurnError?: boolean }>,
+    lastTurnError?: boolean,
+    pulls?: number[] }>,                      // open rows: the declared pull requests
   outbox: Array<{ sendId, key, nodeId, outcome: string, at: number }> }
 ```
 
@@ -244,7 +300,8 @@ same data dir stands down, like the other orchestration facts).
 - No boot adoption, no automatic resume, no polling on the principal's behalf.
 - No worktrees. Create one yourself (`git worktree add`) and pass `cwd`.
 - No `--after`, `link`, kanban `assign`, or agents beyond claude/codex/gemini. `comment` writes a
-  note on the card; it does not move it.
+  note on the card; it does not move it. A declared PR link shows on the kanban card only, not on the
+  canvas node's header.
 - No station-failure notices to the principal; read `list` (`lastTurnError`, `needsYou`,
   `session: 'absent'`).
 - The tmux creation stamp has one-second resolution. A session killed and recreated under the same
@@ -264,6 +321,8 @@ same data dir stands down, like the other orchestration facts).
 | `src/core/agents/pane-ownership.ts` | `recordReprovedOwner` (the one attach that may record) |
 | `src/core/pty-manager.ts` | `sessionCreatedAt` (exact target) |
 | `src/server/headless-node-factory.ts` | `principalOpen` / `principalResume` / `principalClose` |
-| `src/server/integration-service.ts` | authentication, validation, the six verbs |
+| `src/server/integration-service.ts` | authentication, validation, the eight verbs |
+| `src/core/github/service.ts` | `setDeclaredPulls`, `declaredPullsChanged`, `readPullBoard` (single-PR reads) |
+| `src/shared/pull-card-links.ts` | `pullsForCard`: branch ∪ issue ∪ declared, tombstones win |
 | `src/server/integration-cli.ts` | `main.cjs integration …` |
 | `src/renderer/components/IntegrationChip.tsx` | the principal-name chip (full "via … · key" in its tooltip) |

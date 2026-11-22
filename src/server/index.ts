@@ -842,12 +842,16 @@ export async function startServer(
           snapshot: (projectId) => github.service.controlSnapshot(projectId),
           dispatch: (projectId) => boardDispatchReports.forProject(projectId)
         },
+        // Principal-declared PR links (docs/integration-principal.md): a change re-reads the boards.
+        onDeclaredPullsChanged: (projectId) => github.service.declaredPullsChanged(projectId),
         // The durable orchestration facts follow hook-endpoint ownership, like the request ledger.
         ownsDurableState: hookStartupWarning === null
       })
       hookServer.setControlHandler(canvasControl.handler)
       // Integration principals ride the canvas-control runtime: no runtime, no route (404).
       hookServer.setIntegrationHandler(canvasControl.integration)
+      // The board's third PR link source: what principals declared, from the durable ledger.
+      github.service.setDeclaredPulls(canvasControl.declaredPulls)
     } catch (error) {
       console.warn(
         '[nodeterm-server] Server Edition canvas control failed to initialize; keeping it disabled',

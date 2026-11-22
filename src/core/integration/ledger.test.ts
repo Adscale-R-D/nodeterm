@@ -60,6 +60,48 @@ describe('IntegrationLedger', () => {
     b.dispose()
   })
 
+  it('declared pull requests survive a reload of the ledger file; closing the key drops them', () => {
+    const dir = testTmpDir('nt-int-ledger-')
+    const a = openIntegrationLedger(dir)
+    a.ledger.add(row())
+    expect(a.ledger.declarePulls('term-a', 'Adscale-R-D/app_ms', [12, 3, 12])).toEqual([3, 12])
+    a.dispose()
+    const b = openIntegrationLedger(dir)
+    expect(b.ledger.declaredForProject('project-1')).toEqual([{ nodeId: 'term-a', pulls: [3, 12], repository: 'Adscale-R-D/app_ms' }])
+    expect(b.ledger.declaredPulls('term-a', 'adscale-r-d/APP_MS')).toEqual([3, 12])
+    b.ledger.close('term-a')
+    expect(b.ledger.declaredForProject('project-1')).toEqual([])
+    expect(b.ledger.rowsOf('sink', true)[0]).not.toHaveProperty('pulls')
+    b.dispose()
+  })
+
+  it('declared pulls: idempotent, capped at 20, and a re-pointed repository starts the set over', () => {
+    const l = new IntegrationLedger()
+    l.add(row())
+    expect(l.declarePulls('term-a', 'o/r', [1])).toEqual([1])
+    expect(l.declarePulls('term-a', 'o/r', [1])).toEqual([1])
+    expect(l.declarePulls('term-a', 'o/r', Array.from({ length: 20 }, (_, i) => i + 2))).toBe('too-many')
+    expect(l.declaredPulls('term-a', 'o/r')).toEqual([1])
+    expect(l.undeclarePull('term-a', 'o/r', 1)).toEqual([])
+    expect(l.undeclarePull('term-a', 'o/r', 1)).toEqual([])
+    l.declarePulls('term-a', 'o/r', [5])
+    expect(l.declaredPulls('term-a', 'other/repo')).toEqual([])
+    expect(l.declarePulls('term-a', 'other/repo', [9])).toEqual([9])
+    expect(l.declaredForProject('project-1')).toEqual([{ nodeId: 'term-a', pulls: [9], repository: 'other/repo' }])
+    expect(l.declarePulls('term-missing', 'o/r', [1])).toBeUndefined()
+  })
+
+  it('a hostile pulls field on disk is dropped, never repaired, and the row is kept', () => {
+    for (const pulls of [[0], [1.5], 'x', Array.from({ length: 21 }, (_, i) => i + 1), [2 ** 31]]) {
+      const r = sanitizeNodeRecord({ ...row(), pulls, pullRepository: 'o/r' })
+      expect(r).not.toBeNull()
+      expect(r).not.toHaveProperty('pulls')
+    }
+    expect(sanitizeNodeRecord({ ...row(), pulls: [2], pullRepository: '../../x' })).not.toHaveProperty('pulls')
+    expect(sanitizeNodeRecord({ ...row({ state: 'closed' }), pulls: [2], pullRepository: 'o/r' })).not.toHaveProperty('pulls')
+    expect(sanitizeNodeRecord({ ...row(), pulls: [2], pullRepository: 'o/r' })).toMatchObject({ pulls: [2], pullRepository: 'o/r' })
+  })
+
   it('a stood-down instance (not the endpoint owner) neither loads nor writes', () => {
     const dir = testTmpDir('nt-int-ledger-')
     const a = openIntegrationLedger(dir)

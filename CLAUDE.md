@@ -10382,7 +10382,8 @@ A registered local program (an issue-tracker poller) opens agent sessions on a *
 canvas, sends them updates and closes them, keyed by its own opaque key, and keeps them across a
 server restart and a VM reboot. Full contract, wire shapes and setup: **`docs/integration-principal.md`**.
 Rules a refactor must not undo:
-- **Its own route and caller kind.** `/integration/<verb>` (open, resume, send, close, list, comment) on the
+- **Its own route and caller kind.** `/integration/<verb>` (open, resume, send, close, list, comment,
+  link-pull, unlink-pull) on the
   hook server, behind the browser guard and the app bearer, then the principal's own identity
   (`X-Nodeterm-Integration` + `-Token`). It never passes `identityGate`, the latch,
   `requiresVerified` or the request-id ledger, and no `/control/` verb learns about principals. Only
@@ -10415,6 +10416,23 @@ Rules a refactor must not undo:
   no path from a log entry to a pane exists (the board-comment rule), and a mention token in its text
   is flattened to plain `@label` anyway. No local board log (a cwd-less or SSH project) is 409
   `board-log-unavailable`, never a silent `false`.
+- **It can DECLARE a card's pull requests** (`open.pulls`, `link-pull`, `unlink-pull`): the board's
+  third PR link source beside the worktree branch and the issue. Rules: (1) the declaration lives on
+  the principal's ledger row (`pulls` + `pullRepository`), never in `project.json`, and a closed key
+  drops it; (2) it reaches the board as `GitHubPullBoard.declared`, filled by the GitHub service from
+  a LATE-BOUND provider (`setDeclaredPulls`; the service registers before canvas control opens the
+  ledger), so `pullsForCard` — the card, the modal, auto-move and the `prs` verb — reads it with no
+  new argument; a user's unlink tombstone still wins; (3) links recorded for another repository than
+  the board's current one are not shown (a number means nothing there); (4) a declared PR the list
+  read's window (50 open + 30 recent) misses is read ONE BY ONE inside the same pass
+  (`readPullBoard`: `PULL_ONE_QUERY`, at most `DECLARED_READS_PER_PASS`, a finished PR never re-read,
+  GitHub's NOT_FOUND cached for an hour, a failed single read never fails the list read), and the
+  results ride `PullStatusRead.open`/`recent` so the memory, the wait notes and the chase see them
+  like any listed PR; (5) declared numbers are PINNED: `rememberedForBoard` keeps a declared merge
+  that has no `mergedSeenAt` (an old PR declared after it merged) and `rememberPulls` keeps them
+  inside its bound — without the pin such a chip vanishes on the next pass; (6) auto-move gets no new
+  rule: a wait note is taken only for a PR the host holds open, so a PR declared after its merge never
+  moves a card. Every hop is optional, so `server/declared-pulls-wiring.test.ts` pins the wiring.
 
 ## Hosted team relay (Server Edition as a relay host)
 

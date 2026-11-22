@@ -12,7 +12,7 @@ import { useProjects } from '../../state/projects'
 import { useOwningProjectId } from '../../session/owning-project'
 import { useGitHubIssues } from '../../state/githubIssues'
 import { useSettings } from '../../state/settings'
-import { pullsForCard } from '../../lib/pullLinks'
+import { declaredPullsFor, pullsForCard } from '../../lib/pullLinks'
 import { PullRefChip } from './PullStatusBadges'
 import type { KanbanSession } from './KanbanView'
 
@@ -23,9 +23,11 @@ export const PULL_LINK_SSH_REASON =
 
 /**
  * The card modal's "Pull requests" section: the PRs whose head is this card's worktree branch, and
- * the PRs that close the issue the session was started on, each removable (the removal is a
+ * the PRs that close the issue the session was started on, and the PRs an integration principal
+ * declared on the card, each removable (the removal is a
  * git-shared tombstone, so the auto-link does not come back), plus this card's auto-move opt-out.
- * Renders nothing for a board without GitHub, or a card with neither a worktree group nor an issue.
+ * Renders nothing for a board without GitHub, or a card with no worktree group, no issue and no
+ * declared PR.
  */
 export function CardPullRequests({
   session,
@@ -50,15 +52,17 @@ export function CardPullRequests({
     return entry ? board.columns.find((column) => column.id === entry.columnId) : undefined
   }, [autoMoveRaw, projectId, board.columns])
   if (!board.github) return null
-  // On SSH only the branch half is unavailable: an issue-bound session still links through its issue.
-  if (ssh && !session.issueRef) {
+  const declared = declaredPullsFor(session.id, pullBoard)
+  // On SSH only the branch half is unavailable: an issue-bound session still links through its
+  // issue, and a principal's declared links need no worktree at all.
+  if (ssh && !session.issueRef && declared.size === 0) {
     return (
       <section className="card-pulls" aria-label="Pull requests">
         <p className="card-pulls__note">{PULL_LINK_SSH_REASON}</p>
       </section>
     )
   }
-  if (!session.worktreeBranch && !session.issueRef) return null
+  if (!session.worktreeBranch && !session.issueRef && declared.size === 0) return null
   const links = pullsForCard(session, pullBoard, board)
   const freshness = pullBoard ? pullStatusFreshness(pullBoard, Date.now()) : 'fresh'
   const optedOut = readPullLinks(board).noAutoMove.includes(session.id)
@@ -77,11 +81,18 @@ export function CardPullRequests({
             closes #{session.issueRef.number}
           </span>
         )}
+        {declared.size > 0 && (
+          <span className="card-pulls__branch" title="Pull requests the integration that opened this session declared on its card">
+            declared {[...declared].sort((a, b) => a - b).map((n) => `#${n}`).join(', ')}
+          </span>
+        )}
       </div>
       {links.linked.length === 0 && links.unlinked.length === 0 && (
         <p className="card-pulls__note">
           {!pullBoard
             ? 'Pull request status is not available.'
+            : declared.size > 0
+              ? 'The declared pull request has not been read yet.'
             : session.worktreeBranch
               ? 'No pull request from this branch yet.'
               : 'No open pull request closes this issue yet.'}

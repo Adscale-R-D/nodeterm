@@ -44,6 +44,20 @@ export const PULL_STATUS_QUERY = `query($owner:String!,$name:String!){
   }
 }`
 
+/** ONE pull request, by number — for a PR a principal declared on a card that the list read's window
+ *  (50 open + 30 recent) does not reach. Same fields as the list read's open node, plus `state`, so
+ *  the same decoder answers. MEASURED cost: 1 point of the `graphql` budget, like the checks read. */
+export const PULL_ONE_QUERY = `query($owner:String!,$name:String!,$number:Int!){
+  rateLimit{ cost remaining limit resetAt }
+  repository(owner:$owner,name:$name){
+    pullRequest(number:$number){
+      number headRefName headRefOid isCrossRepository isDraft state mergeable mergeStateStatus
+      closingIssuesReferences(first:${MAX_CLOSING_ISSUES}){ nodes{ number repository{ nameWithOwner } } }
+      commits(last:1){ nodes{ commit{ oid statusCheckRollup{ state } } } }
+    }
+  }
+}`
+
 export const PULL_CHECKS_QUERY = `query($owner:String!,$name:String!,$number:Int!){
   rateLimit{ cost remaining limit resetAt }
   repository(owner:$owner,name:$name){
@@ -148,6 +162,75 @@ export function rateLimitFrom(body: unknown): GraphQLRateLimit | undefined {
   return { cost: rate.cost, remaining: rate.remaining, limit: rate.limit, resetAt }
 }
 
+/** One open PR node of either read. ONE decoder for the list read and the single-PR read, so the two
+ *  cannot decode a field differently. */
+function decodeOpenPull(
+  node: Record<string, unknown> | null,
+  access: { ci: boolean; merge: boolean },
+  closingHidden: boolean,
+  repositoryFolded: string
+): PullStatusFacts {
+  if (!node || !positive(node.number) || !refName(node.headRefName) || !oid(node.headRefOid) ||
+      typeof node.isDraft !== 'boolean' || typeof node.isCrossRepository !== 'boolean') {
+    throw new GraphQLShapeError()
+  }
+  let mergeable: GitHubMergeable | null = null
+  let mergeStateStatus: string | null = null
+  if (access.merge) {
+    // Enum values are decoded LENIENTLY: GitHub adds values (it added `duplicate` to state_reason),
+    // and a value this build does not know must claim nothing — not fail every read of the repo.
+    // A value that is not even an enum-shaped string is still a malformed answer.
+    if (typeof node.mergeable !== 'string' || !/^[A-Z_]{1,32}$/.test(node.mergeable) ||
+        typeof node.mergeStateStatus !== 'string' || !/^[A-Z_]{1,32}$/.test(node.mergeStateStatus)) {
+      throw new GraphQLShapeError()
+    }
+    mergeable = node.mergeable === 'MERGEABLE' || node.mergeable === 'CONFLICTING' ||
+      node.mergeable === 'UNKNOWN' ? node.mergeable : null
+    mergeStateStatus = node.mergeStateStatus
+  }
+  let rollup: GitHubRollupState | 'UNRECOGNIZED' | null = null
+  let rollupOid: string | null = null
+  if (access.ci) {
+    const commits = list(node.commits, 1)
+    const commit = object(object(commits[0])?.commit)
+    if (commits.length && !commit) throw new GraphQLShapeError()
+    if (commit) {
+      if (!oid(commit.oid)) throw new GraphQLShapeError()
+      rollupOid = commit.oid
+      if (commit.statusCheckRollup !== null) {
+        const state = object(commit.statusCheckRollup)?.state
+        if (typeof state !== 'string' || !/^[A-Z_]{1,32}$/.test(state)) throw new GraphQLShapeError()
+        rollup = state === 'SUCCESS' || state === 'FAILURE' || state === 'ERROR' || state === 'PENDING' ||
+          state === 'EXPECTED' ? state : 'UNRECOGNIZED'
+      }
+    }
+  }
+  const closes = node.closingIssuesReferences === null
+    ? []
+    : list(node.closingIssuesReferences, MAX_CLOSING_ISSUES).flatMap((reference) => {
+      if (reference === null && closingHidden) return []
+      const issue = object(reference)
+      const nameWithOwner = object(issue?.repository)?.nameWithOwner
+      if (!issue || !positive(issue.number) || typeof nameWithOwner !== 'string') {
+        throw new GraphQLShapeError()
+      }
+      // GitHub also links issues in OTHER repositories. The board has cards only for this one.
+      return nameWithOwner.toLocaleLowerCase('en-US') === repositoryFolded ? [issue.number] : []
+    })
+  return {
+    number: node.number,
+    headRefName: node.headRefName,
+    headRefOid: node.headRefOid,
+    crossRepository: node.isCrossRepository,
+    isDraft: node.isDraft,
+    mergeable,
+    mergeStateStatus,
+    rollup,
+    rollupOid,
+    closes: [...new Set(closes)]
+  }
+}
+
 /**
  * Decodes the list read. Throws `GraphQLShapeError` for a malformed body, and for errors it cannot
  * classify as a permission answer — those are a failed read (the caller keeps its last snapshot),
@@ -179,68 +262,8 @@ export function parsePullStatusResponse(body: unknown, repository: string): Pull
   const openConnection = object(repositoryValue.open)
   if (!openConnection || !nonNegative(openConnection.totalCount)) throw new GraphQLShapeError()
   const repositoryFolded = repository.toLocaleLowerCase('en-US')
-  const open = list(openConnection, OPEN_PULLS_PER_READ).map((entry): PullStatusFacts => {
-    const node = object(entry)
-    if (!node || !positive(node.number) || !refName(node.headRefName) || !oid(node.headRefOid) ||
-        typeof node.isDraft !== 'boolean' || typeof node.isCrossRepository !== 'boolean') {
-      throw new GraphQLShapeError()
-    }
-    let mergeable: GitHubMergeable | null = null
-    let mergeStateStatus: string | null = null
-    if (access.merge) {
-      // Enum values are decoded LENIENTLY: GitHub adds values (it added `duplicate` to state_reason),
-      // and a value this build does not know must claim nothing — not fail every read of the repo.
-      // A value that is not even an enum-shaped string is still a malformed answer.
-      if (typeof node.mergeable !== 'string' || !/^[A-Z_]{1,32}$/.test(node.mergeable) ||
-          typeof node.mergeStateStatus !== 'string' || !/^[A-Z_]{1,32}$/.test(node.mergeStateStatus)) {
-        throw new GraphQLShapeError()
-      }
-      mergeable = node.mergeable === 'MERGEABLE' || node.mergeable === 'CONFLICTING' ||
-        node.mergeable === 'UNKNOWN' ? node.mergeable : null
-      mergeStateStatus = node.mergeStateStatus
-    }
-    let rollup: GitHubRollupState | 'UNRECOGNIZED' | null = null
-    let rollupOid: string | null = null
-    if (access.ci) {
-      const commits = list(node.commits, 1)
-      const commit = object(object(commits[0])?.commit)
-      if (commits.length && !commit) throw new GraphQLShapeError()
-      if (commit) {
-        if (!oid(commit.oid)) throw new GraphQLShapeError()
-        rollupOid = commit.oid
-        if (commit.statusCheckRollup !== null) {
-          const state = object(commit.statusCheckRollup)?.state
-          if (typeof state !== 'string' || !/^[A-Z_]{1,32}$/.test(state)) throw new GraphQLShapeError()
-          rollup = state === 'SUCCESS' || state === 'FAILURE' || state === 'ERROR' || state === 'PENDING' ||
-            state === 'EXPECTED' ? state : 'UNRECOGNIZED'
-        }
-      }
-    }
-    const closes = node.closingIssuesReferences === null
-      ? []
-      : list(node.closingIssuesReferences, MAX_CLOSING_ISSUES).flatMap((reference) => {
-        if (reference === null && closingHidden) return []
-        const issue = object(reference)
-        const nameWithOwner = object(issue?.repository)?.nameWithOwner
-        if (!issue || !positive(issue.number) || typeof nameWithOwner !== 'string') {
-          throw new GraphQLShapeError()
-        }
-        // GitHub also links issues in OTHER repositories. The board has cards only for this one.
-        return nameWithOwner.toLocaleLowerCase('en-US') === repositoryFolded ? [issue.number] : []
-      })
-    return {
-      number: node.number,
-      headRefName: node.headRefName,
-      headRefOid: node.headRefOid,
-      crossRepository: node.isCrossRepository,
-      isDraft: node.isDraft,
-      mergeable,
-      mergeStateStatus,
-      rollup,
-      rollupOid,
-      closes: [...new Set(closes)]
-    }
-  })
+  const open = list(openConnection, OPEN_PULLS_PER_READ).map((entry) =>
+    decodeOpenPull(object(entry), access, closingHidden, repositoryFolded))
   const recent = list(repositoryValue.recent, RECENT_PULLS_PER_READ).map((entry) => {
     const node = object(entry)
     if (!node || !positive(node.number) || !refName(node.headRefName) ||
@@ -259,6 +282,59 @@ export function parsePullStatusResponse(body: unknown, repository: string): Pull
     access,
     truncated: openConnection.totalCount > open.length,
     ...(rateLimit ? { rateLimit } : {})
+  }
+}
+
+/** What one single-PR read established. `missing` = GitHub answered that no pull request has that
+ *  number (an issue number, a deleted PR, a typo) — an answer, cached by the caller, never a failure. */
+export type PullOneRead =
+  | { kind: 'open'; facts: PullStatusFacts; access: { ci: boolean; merge: boolean }; rateLimit?: GraphQLRateLimit }
+  | { kind: 'finished'; pull: PullStatusRead['recent'][number]; rateLimit?: GraphQLRateLimit }
+  | { kind: 'missing'; rateLimit?: GraphQLRateLimit }
+
+/** Decodes the single-PR read. Throws `GraphQLShapeError` for a malformed body or an error it cannot
+ *  classify (a failed read: the caller keeps what it had). */
+export function parsePullOneResponse(body: unknown, repository: string, number: number): PullOneRead {
+  const errors = graphQLErrors(body)
+  const rateLimit = rateLimitFrom(body)
+  const repositoryValue = object(object(object(body)?.data)?.repository)
+  const permission = errors.filter((error) => error.type && PERMISSION_TYPES.has(error.type))
+  const notFound = errors.filter((error) => error.type === 'NOT_FOUND')
+  if (errors.length > permission.length + notFound.length) throw new GraphQLShapeError()
+  const rate = rateLimit ? { rateLimit } : {}
+  if (!repositoryValue) throw new GraphQLShapeError()
+  if (repositoryValue.pullRequest === null || repositoryValue.pullRequest === undefined) {
+    // Only GitHub's own NOT_FOUND for the pull request makes a missing node an answer.
+    if (notFound.some((error) => touches(error, ['pullRequest']))) return { kind: 'missing', ...rate }
+    throw new GraphQLShapeError()
+  }
+  if (notFound.length) throw new GraphQLShapeError()
+  const node = object(repositoryValue.pullRequest)
+  if (!node || node.number !== number) throw new GraphQLShapeError()
+  if (node.state === 'MERGED' || node.state === 'CLOSED') {
+    if (!refName(node.headRefName) || typeof node.isCrossRepository !== 'boolean') throw new GraphQLShapeError()
+    return {
+      kind: 'finished',
+      pull: {
+        number,
+        headRefName: node.headRefName,
+        crossRepository: node.isCrossRepository,
+        lifecycle: node.state === 'MERGED' ? 'merged' : 'closed'
+      },
+      ...rate
+    }
+  }
+  if (node.state !== 'OPEN') throw new GraphQLShapeError()
+  const access = {
+    ci: !permission.some((error) => !error.path || touches(error, ['commits', 'statusCheckRollup'])),
+    merge: !permission.some((error) => !error.path || touches(error, ['mergeable', 'mergeStateStatus']))
+  }
+  const closingHidden = permission.some((error) => touches(error, ['closingIssuesReferences']))
+  return {
+    kind: 'open',
+    facts: decodeOpenPull(node, access, closingHidden, repository.toLocaleLowerCase('en-US')),
+    access,
+    ...rate
   }
 }
 

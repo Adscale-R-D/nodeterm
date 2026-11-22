@@ -2,6 +2,7 @@
 // requests to session cards by the SAME rule the board draws. Re-exported so renderer call sites are
 // unchanged.
 export {
+  declaredPullsFor,
   pullsForCard,
   pullsClosingIssue,
   pullStatusByNumber,

@@ -17,8 +17,17 @@ export const INTEGRATION_ROUTE_PREFIX = '/integration/'
 export const INTEGRATION_NAME_HEADER = 'x-nodeterm-integration'
 export const INTEGRATION_TOKEN_HEADER = 'x-nodeterm-integration-token'
 
-/** The five verbs. Anything else is a 404-shaped refusal. */
-export const INTEGRATION_VERBS = ['open', 'resume', 'send', 'close', 'list', 'comment'] as const
+/** The verbs. Anything else is a 404-shaped refusal. */
+export const INTEGRATION_VERBS = [
+  'open',
+  'resume',
+  'send',
+  'close',
+  'list',
+  'comment',
+  'link-pull',
+  'unlink-pull'
+] as const
 export type IntegrationVerb = (typeof INTEGRATION_VERBS)[number]
 
 export function isIntegrationVerb(v: string): v is IntegrationVerb {
@@ -43,6 +52,21 @@ export const INTEGRATION_SEND_TTL_MAX_MS = 24 * 60 * 60 * 1000
 export const INTEGRATION_SEND_TEXT_MAX = 32 * 1024
 /** A launch prompt larger than this is refused (it is spilled to a file, read at launch). */
 export const INTEGRATION_PROMPT_MAX = 256 * 1024
+
+/** At most this many pull requests may be DECLARED on one key's card (`open.pulls`, `link-pull`). */
+export const INTEGRATION_PULLS_MAX = 20
+
+/** A pull request number: a positive integer GitHub's GraphQL `Int` can carry. */
+export function isDeclarablePull(v: unknown): v is number {
+  return typeof v === 'number' && Number.isSafeInteger(v) && v > 0 && v <= 2_147_483_647
+}
+
+/** `open.pulls`: a list of at most `INTEGRATION_PULLS_MAX` PR numbers, deduplicated and sorted, or
+ *  null when anything in it is not one. */
+export function parseDeclaredPulls(v: unknown): number[] | null {
+  if (!Array.isArray(v) || v.length > INTEGRATION_PULLS_MAX || !v.every(isDeclarablePull)) return null
+  return [...new Set(v)].sort((a, b) => a - b)
+}
 
 /** A principal name: a path segment (token file) and part of a flow key. */
 const NAME_RE = /^[a-z0-9][a-z0-9-]{0,31}$/
@@ -109,13 +133,17 @@ export interface IntegrationOpenRequest {
   /** File the session's kanban card at the TOP of the existing column with this title
    *  (case-insensitive, ≤ 48 chars). Never creates a column. Ignored by an `existing` upsert. */
   column?: string
+  /** Pull requests (numbers in the board's GitHub repository) this card is about. Recorded for the
+   *  key; an `existing` upsert UNIONS them into what is already declared. Ignored (not refused) on a
+   *  project whose board has no GitHub repository. ≤ `INTEGRATION_PULLS_MAX`. */
+  pulls?: number[]
 }
 
 export interface IntegrationOpenResult {
   key: string
   nodeId: string
   projectId: string
-  /** `existing` = the ledger already had an open node for this key; nothing changed. */
+  /** `existing` = the ledger already had an open node for this key; only `pulls` (unioned) changed. */
   status: 'created' | 'existing'
   /** `created` only: whether the agent launch was delivered. */
   session?: 'started' | 'failed'
@@ -124,6 +152,23 @@ export interface IntegrationOpenResult {
   /** Only when `column` was asked for and the node was created: the column id it was filed in, or
    *  'missing' (no column has that title; the card is in Ungrouped). */
   column?: string
+  /** Only when the request carried `pulls`: the key's declared set after this call. */
+  pulls?: number[]
+  /** `pulls` were not recorded because the project's board has no GitHub repository. */
+  pullsIgnored?: 'no-repository'
+}
+
+/** `link-pull` / `unlink-pull`. */
+export interface IntegrationPullRequest {
+  key: string
+  pull: number
+}
+
+export interface IntegrationPullResult {
+  key: string
+  nodeId: string
+  /** The key's declared set after the call, ascending. */
+  pulls: number[]
 }
 
 export interface IntegrationKeyRequest {
@@ -234,6 +279,8 @@ export interface IntegrationListRow {
   needsYou?: boolean
   /** The last turn ended on an API/model error. */
   lastTurnError?: boolean
+  /** Open rows: the pull requests declared on the card (`open.pulls`, `link-pull`), ascending. */
+  pulls?: number[]
 }
 
 /** How a queued `send` ended. Pull-based: returned by `list`. */

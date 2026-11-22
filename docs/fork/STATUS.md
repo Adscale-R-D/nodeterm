@@ -214,6 +214,13 @@ durable twin in `<dataDir>/orchestration-state/`:
   cases in `headless-node-factory.test.ts`, and a real-tmux same-second recreate case in
   `pty-exact-target.realtmux.test.ts`.
 
+**Principal-declared PR links (2026-11-22, Server Edition).** An integration principal can say which
+pull requests a card is about (`open.pulls`, `link-pull`, `unlink-pull`; docs/integration-principal.md),
+for sessions neither the branch nor the issue rule links (a PR review on a detached worktree, a Jira
+ticket). Stored on the durable ledger row, shown through the existing `PullRefChip` and card-modal
+section, and a declared PR outside the GraphQL read window is read on its own (one PR per request).
+Part of the integration-principal fork work, not a separate patch row.
+
 Plus one UI keep: **the frame context menu's "close group and its nodes"** (`closeGroupWithChildren`
 + `groupSubtreeIds`). Upstream deleted the frame's `×` rather than implementing it, so this is the
 only way to tear a `spawn-team`/`verify` panel down from the UI in one action.

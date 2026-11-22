@@ -26,10 +26,12 @@ interface World {
   boardLog: Array<{ projectId: string; entry: BoardLogEntry }>
   noBoardLog: Set<string>
   boardLogFails: boolean
+  repositories: Map<string, string>
+  pullsChanged: string[]
 }
 
 function setup(over: Partial<IntegrationServiceDeps> = {}) {
-  const w: World = { canvas: new Map([['p1', []], ['p2', []]]), opens: [], resumes: [], closes: [], prompts: [], sent: [], state: 'done', boardLog: [], noBoardLog: new Set(), boardLogFails: false }
+  const w: World = { canvas: new Map([['p1', []], ['p2', []]]), opens: [], resumes: [], closes: [], prompts: [], sent: [], state: 'done', boardLog: [], noBoardLog: new Set(), boardLogFails: false, repositories: new Map([['p1', 'Adscale-R-D/app_ms']]), pullsChanged: [] }
   let seq = 0
   const ledger = new IntegrationLedger(undefined, undefined, () => 5000)
   const messaging: AgentMessagingDeps = {
@@ -53,6 +55,8 @@ function setup(over: Partial<IntegrationServiceDeps> = {}) {
     }
   }
   const service = createIntegrationService({
+    boardRepository: async (projectId) => w.repositories.get(projectId) ?? null,
+    onPullsChanged: (projectId) => w.pullsChanged.push(projectId),
     registry: { authenticate: (name, token) => (name === 'sink' && token === TOKEN ? SINK : undefined) },
     ledger,
     messaging,
@@ -357,5 +361,97 @@ describe('integration service — comment', () => {
     w.canvas.set('p1', [])
     expect(await call('comment', { key: 'APP-1', text: 'hi' })).toMatchObject({ status: 404, body: { error: 'unknown-key' } })
     expect(ledger.openNode('sink', 'APP-1')).toBeUndefined()
+  })
+})
+
+describe('integration service — declared pull requests', () => {
+  const result = (r: { body: unknown }) => (r.body as { result: Record<string, unknown> }).result
+
+  it('open records pulls (sorted, deduplicated) and answers the declared set', async () => {
+    const { call, ledger, w } = setup()
+    const r = await call('open', { key: 'PR-12', agent: 'claude', pulls: [12, 3, 12] })
+    expect(result(r)).toMatchObject({ status: 'created', pulls: [3, 12] })
+    expect(ledger.declaredForProject('p1')).toEqual([{ nodeId: 'term-1', pulls: [3, 12], repository: 'Adscale-R-D/app_ms' }])
+    expect(w.pullsChanged).toEqual(['p1'])
+  })
+
+  it('an existing upsert UNIONS pulls into the declared set and opens nothing', async () => {
+    const { call, w } = setup()
+    await call('open', { key: 'PR-12', agent: 'claude', pulls: [12] })
+    const r = await call('open', { key: 'PR-12', agent: 'claude', pulls: [40, 12] })
+    expect(r.body).toEqual({ ok: true, result: { key: 'PR-12', nodeId: 'term-1', projectId: 'p1', status: 'existing', pulls: [12, 40] } })
+    expect(w.opens).toHaveLength(1)
+    // An existing open without pulls changes nothing and reports none.
+    expect(result(await call('open', { key: 'PR-12', agent: 'claude' }))).not.toHaveProperty('pulls')
+  })
+
+  it('open ignores pulls on a project with no repository (never refuses there)', async () => {
+    const { call, ledger, w } = setup()
+    const r = await call('open', { key: 'T-1', agent: 'claude', project: 'p2', pulls: [5] })
+    expect(result(r)).toMatchObject({ status: 'created', pulls: [], pullsIgnored: 'no-repository' })
+    expect(ledger.declaredForProject('p2')).toEqual([])
+    expect(w.pullsChanged).toEqual([])
+  })
+
+  it('open refuses a malformed pulls list before opening anything', async () => {
+    const { call, w } = setup()
+    for (const pulls of [5, [0], [-1], [1.5], ['7'], [2 ** 31], Array.from({ length: 21 }, (_, i) => i + 1)]) {
+      expect((await call('open', { key: 'X', agent: 'claude', pulls })).body).toMatchObject({ ok: false, error: 'bad-pull' })
+    }
+    // Even on a project without a repository: malformed input is still 400.
+    expect((await call('open', { key: 'X', agent: 'claude', project: 'p2', pulls: [0] })).status).toBe(400)
+    expect(w.opens).toEqual([])
+  })
+
+  it('link-pull / unlink-pull: shapes and idempotency', async () => {
+    const { call, w } = setup()
+    await call('open', { key: 'PR-12', agent: 'claude' })
+    expect(await call('link-pull', { key: 'PR-12', pull: 12 })).toEqual({ status: 200, body: { ok: true, result: { key: 'PR-12', nodeId: 'term-1', pulls: [12] } } })
+    expect(result(await call('link-pull', { key: 'PR-12', pull: 12 }))).toEqual({ key: 'PR-12', nodeId: 'term-1', pulls: [12] })
+    expect(result(await call('link-pull', { key: 'PR-12', pull: 7 }))).toEqual({ key: 'PR-12', nodeId: 'term-1', pulls: [7, 12] })
+    expect(result(await call('unlink-pull', { key: 'PR-12', pull: 12 }))).toEqual({ key: 'PR-12', nodeId: 'term-1', pulls: [7] })
+    expect(result(await call('unlink-pull', { key: 'PR-12', pull: 12 }))).toEqual({ key: 'PR-12', nodeId: 'term-1', pulls: [7] })
+    // A change re-reads the boards; a no-op does not.
+    expect(w.pullsChanged).toEqual(['p1', 'p1', 'p1'])
+  })
+
+  it('link-pull / unlink-pull errors: bad-key, bad-pull, unknown-key, no-repository, too-many-pulls', async () => {
+    const { call } = setup()
+    await call('open', { key: 'A', agent: 'claude' })
+    await call('open', { key: 'B', agent: 'claude', project: 'p2' })
+    for (const verb of ['link-pull', 'unlink-pull']) {
+      expect(await call(verb, { pull: 1 })).toMatchObject({ status: 400, body: { error: 'bad-key' } })
+      for (const pull of [undefined, 0, -3, 1.5, '4', 2 ** 31]) {
+        expect(await call(verb, { key: 'A', pull })).toMatchObject({ status: 400, body: { error: 'bad-pull' } })
+      }
+      expect(await call(verb, { key: 'NOPE', pull: 1 })).toMatchObject({ status: 404, body: { error: 'unknown-key' } })
+      expect(await call(verb, { key: 'B', pull: 1 })).toMatchObject({ status: 409, body: { error: 'no-repository' } })
+    }
+    for (let n = 1; n <= 20; n++) await call('link-pull', { key: 'A', pull: n })
+    expect(await call('link-pull', { key: 'A', pull: 21 })).toMatchObject({ status: 409, body: { error: 'too-many-pulls' } })
+    expect(await call('open', { key: 'A', agent: 'claude', pulls: [99] })).toMatchObject({ status: 409, body: { error: 'too-many-pulls' } })
+    expect(result(await call('link-pull', { key: 'A', pull: 20 })).pulls).toHaveLength(20)
+  })
+
+  it('list returns pulls on open rows; close drops the links and a reopened key starts empty', async () => {
+    const { call, ledger } = setup()
+    await call('open', { key: 'PR-12', agent: 'claude', pulls: [12] })
+    const listed = result(await call('list', {})) as { rows: Array<Record<string, unknown>> }
+    expect(listed.rows[0]).toMatchObject({ key: 'PR-12', state: 'open', pulls: [12] })
+    await call('close', { key: 'PR-12' })
+    expect(ledger.declaredForProject('p1')).toEqual([])
+    const closed = result(await call('list', { includeClosed: true })) as { rows: Array<Record<string, unknown>> }
+    expect(closed.rows[0]).toMatchObject({ state: 'closed' })
+    expect(closed.rows[0]).not.toHaveProperty('pulls')
+    await call('open', { key: 'PR-12', agent: 'claude' })
+    expect(result(await call('list', {})).rows).toEqual([expect.objectContaining({ key: 'PR-12', pulls: [] })])
+  })
+
+  it('a node a person removed drops its declared links with its row', async () => {
+    const { call, ledger, w } = setup()
+    await call('open', { key: 'PR-12', agent: 'claude', pulls: [12] })
+    w.canvas.set('p1', [])
+    expect(await call('link-pull', { key: 'PR-12', pull: 13 })).toMatchObject({ status: 404 })
+    expect(ledger.declaredForProject('p1')).toEqual([])
   })
 })

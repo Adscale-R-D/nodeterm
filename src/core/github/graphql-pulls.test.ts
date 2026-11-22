@@ -5,6 +5,7 @@ import {
   GraphQLShapeError,
   PULL_STATUS_QUERY,
   parsePullChecksResponse,
+  parsePullOneResponse,
   parsePullStatusResponse
 } from './graphql-pulls'
 
@@ -230,5 +231,38 @@ describe('GitHubIssuesClient GraphQL', () => {
   it('reports a malformed GraphQL body as malformed', async () => {
     const client = new GitHubIssuesClient({ token: 'secret', fetch: async () => json({ data: { repository: null } }) })
     await expect(client.pullRequestStatuses(REPO)).rejects.toMatchObject({ code: 'malformed-response' })
+  })
+})
+
+describe('parsePullOneResponse (a declared PR outside the list window)', () => {
+  const one = (pullRequest: unknown, errors?: unknown[]) => ({
+    data: { rateLimit: { cost: 1, remaining: 4000, limit: 5000, resetAt: '2026-11-22T10:00:00Z' }, repository: { pullRequest } },
+    ...(errors ? { errors } : {})
+  })
+
+  it('an open PR decodes with the list read\'s own decoder', () => {
+    const r = parsePullOneResponse(one({ ...node(1045, { mergeStateStatus: 'BLOCKED' }), state: 'OPEN' }), REPO, 1045)
+    expect(r).toMatchObject({ kind: 'open', access: { ci: true, merge: true } })
+    if (r.kind !== 'open') throw new Error('kind')
+    expect(pullStatusFrom(r.facts, r.access)).toMatchObject({ number: 1045, lifecycle: 'open', ci: 'passed', merge: 'blocked' })
+  })
+
+  it('a merged or closed PR is finished', () => {
+    expect(parsePullOneResponse(one({ number: 900, headRefName: 'x', isCrossRepository: true, state: 'MERGED' }), REPO, 900))
+      .toMatchObject({ kind: 'finished', pull: { number: 900, lifecycle: 'merged', crossRepository: true } })
+    expect(parsePullOneResponse(one({ number: 901, headRefName: 'x', isCrossRepository: false, state: 'CLOSED' }), REPO, 901))
+      .toMatchObject({ kind: 'finished', pull: { lifecycle: 'closed' } })
+  })
+
+  it('GitHub\'s NOT_FOUND for the pull request is an answer (missing); a null without it is a failed read', () => {
+    expect(parsePullOneResponse(one(null, [{ type: 'NOT_FOUND', path: ['repository', 'pullRequest'] }]), REPO, 77))
+      .toMatchObject({ kind: 'missing' })
+    expect(() => parsePullOneResponse(one(null), REPO, 77)).toThrow(GraphQLShapeError)
+    expect(() => parsePullOneResponse(one(null, [{ type: 'SOMETHING' }]), REPO, 77)).toThrow(GraphQLShapeError)
+  })
+
+  it('refuses a node for another number or an unknown state', () => {
+    expect(() => parsePullOneResponse(one({ ...node(5), state: 'OPEN' }), REPO, 6)).toThrow(GraphQLShapeError)
+    expect(() => parsePullOneResponse(one({ ...node(5), state: 'WEIRD' }), REPO, 5)).toThrow(GraphQLShapeError)
   })
 })

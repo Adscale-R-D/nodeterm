@@ -16,11 +16,14 @@ import type { GitHubPullChecksResult } from '../../shared/github-pull-status'
 import {
   GraphQLShapeError,
   PULL_CHECKS_QUERY,
+  PULL_ONE_QUERY,
   PULL_STATUS_QUERY,
   graphQLErrors,
   parsePullChecksResponse,
+  parsePullOneResponse,
   parsePullStatusResponse,
   rateLimitFrom,
+  type PullOneRead,
   type PullStatusRead
 } from './graphql-pulls'
 
@@ -453,6 +456,19 @@ export class GitHubIssuesClient {
     const body = await this.graphql(PULL_STATUS_QUERY, { owner, name })
     try {
       return parsePullStatusResponse(body, repository)
+    } catch (error) {
+      if (error instanceof GraphQLShapeError) throw new GitHubClientError('malformed-response')
+      throw error
+    }
+  }
+
+  /** One pull request's state by number — for a declared PR outside the list read's window. */
+  async pullRequestStatus(repository: string, pullNumber: number): Promise<PullOneRead> {
+    const [owner, name] = safeRepository(repository).split('/')
+    if (!positiveInteger(pullNumber, 2_147_483_647)) throw new GitHubClientError('invalid-request')
+    const body = await this.graphql(PULL_ONE_QUERY, { owner, name, number: pullNumber })
+    try {
+      return parsePullOneResponse(body, repository, pullNumber)
     } catch (error) {
       if (error instanceof GraphQLShapeError) throw new GitHubClientError('malformed-response')
       throw error

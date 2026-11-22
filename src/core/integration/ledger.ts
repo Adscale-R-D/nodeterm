@@ -20,6 +20,8 @@ import {
   isSafeFrameLabel,
   isSafePrincipalKey,
   isSafePrincipalName,
+  parseDeclaredPulls,
+  INTEGRATION_PULLS_MAX,
   type IntegrationAgent,
   type IntegrationOutboxEntry
 } from '../../shared/integration-principal'
@@ -43,6 +45,12 @@ export interface IntegrationNodeRecord {
   sessionCreated?: number
   state: 'open' | 'closed'
   closedAt?: number
+  /** node only, open rows only: pull requests the principal DECLARED on the card (`open.pulls`,
+   *  `link-pull`), ascending. A closed row carries none: closing the key drops its links. */
+  pulls?: number[]
+  /** The board's GitHub repository when `pulls` were declared. A number means nothing in another
+   *  repository, so a re-pointed board starts the set over. */
+  pullRepository?: string
 }
 
 export interface PersistedOutboxEntry extends IntegrationOutboxEntry {
@@ -54,6 +62,17 @@ export const OUTBOX_PER_PRINCIPAL = 500
 export const OUTBOX_TTL_MS = 7 * 24 * 60 * 60 * 1000
 export const CLOSED_ROW_TTL_MS = 30 * 24 * 60 * 60 * 1000
 const SESSION_ID_RE = /^[A-Za-z0-9-]{8,128}$/
+const REPOSITORY_RE = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9._-]{1,100}$/
+
+function sameRepository(a: string | undefined, b: string): boolean {
+  return !!a && a.toLocaleLowerCase('en-US') === b.toLocaleLowerCase('en-US')
+}
+
+/** A closed row keeps no declared links. */
+function withoutPulls(r: IntegrationNodeRecord): void {
+  delete r.pulls
+  delete r.pullRepository
+}
 
 export function sanitizeNodeRecord(raw: unknown): IntegrationNodeRecord | null {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
@@ -79,6 +98,13 @@ export function sanitizeNodeRecord(raw: unknown): IntegrationNodeRecord | null {
     out.agentId = r.agentId as IntegrationAgent
     if (typeof r.agentSessionId === 'string' && SESSION_ID_RE.test(r.agentSessionId)) out.agentSessionId = r.agentSessionId
     if (isFiniteNumber(r.sessionCreated)) out.sessionCreated = r.sessionCreated
+    if (r.state === 'open' && typeof r.pullRepository === 'string' && REPOSITORY_RE.test(r.pullRepository)) {
+      const pulls = parseDeclaredPulls(r.pulls)
+      if (pulls?.length) {
+        out.pulls = pulls
+        out.pullRepository = r.pullRepository
+      }
+    }
   }
   if (isFiniteNumber(r.closedAt)) out.closedAt = r.closedAt
   return out
@@ -132,7 +158,9 @@ export class IntegrationLedger {
     for (const r of [...(this.nodesFile?.load() ?? [])].reverse()) {
       const id = this.rowKey(r)
       if (r.state === 'open' && (seenOpen.has(id) || seenNode.has(r.nodeId))) {
-        rows.push({ ...r, state: 'closed', closedAt: r.closedAt ?? this.now() })
+        const closed: IntegrationNodeRecord = { ...r, state: 'closed', closedAt: r.closedAt ?? this.now() }
+        withoutPulls(closed)
+        rows.push(closed)
         continue
       }
       if (r.state === 'open') {
@@ -214,6 +242,7 @@ export class IntegrationLedger {
     if (!r) return
     r.state = 'closed'
     r.closedAt = this.now()
+    withoutPulls(r)
     this.save()
   }
 
@@ -224,11 +253,58 @@ export class IntegrationLedger {
       if (r.state === 'open' && !isLive(r)) {
         r.state = 'closed'
         r.closedAt = this.now()
+        withoutPulls(r)
         gone.push(r.nodeId)
       }
     }
     if (gone.length) this.save()
     return gone
+  }
+
+  /** The pull requests declared on an open node row, for `repository` (another repository's = none). */
+  declaredPulls(nodeId: string, repository: string): number[] {
+    const r = this.ownerOf(nodeId)
+    return r?.kind === 'node' && sameRepository(r.pullRepository, repository) ? [...(r.pulls ?? [])] : []
+  }
+
+  /**
+   * Adds declared pull requests to an open node row (idempotent). A set recorded for ANOTHER
+   * repository is dropped first. 'too-many' (nothing changed) when the union would pass
+   * `INTEGRATION_PULLS_MAX`; undefined when there is no open node row.
+   */
+  declarePulls(nodeId: string, repository: string, add: readonly number[]): number[] | 'too-many' | undefined {
+    const r = this.ownerOf(nodeId)
+    if (!r || r.kind !== 'node') return undefined
+    const current = sameRepository(r.pullRepository, repository) ? r.pulls ?? [] : []
+    const next = [...new Set([...current, ...add])].sort((a, b) => a - b)
+    if (next.length > INTEGRATION_PULLS_MAX) return 'too-many'
+    if (next.length === current.length && r.pullRepository === repository) return next
+    if (next.length) {
+      r.pulls = next
+      r.pullRepository = repository
+    } else withoutPulls(r)
+    this.save()
+    return next
+  }
+
+  /** Removes one declared pull request (idempotent). Undefined when there is no open node row. */
+  undeclarePull(nodeId: string, repository: string, pull: number): number[] | undefined {
+    const r = this.ownerOf(nodeId)
+    if (!r || r.kind !== 'node') return undefined
+    const current = sameRepository(r.pullRepository, repository) ? r.pulls ?? [] : []
+    if (!current.includes(pull)) return [...current]
+    const next = current.filter((n) => n !== pull)
+    if (next.length) r.pulls = next
+    else withoutPulls(r)
+    this.save()
+    return next
+  }
+
+  /** Every open node row of `projectId` that declares pull requests (the board's third link source). */
+  declaredForProject(projectId: string): Array<{ nodeId: string; pulls: number[]; repository: string }> {
+    return this.rows
+      .filter((r) => r.kind === 'node' && r.state === 'open' && r.projectId === projectId && r.pulls?.length && r.pullRepository)
+      .map((r) => ({ nodeId: r.nodeId, pulls: [...r.pulls!], repository: r.pullRepository! }))
   }
 
   recordOutcome(entry: PersistedOutboxEntry): void {

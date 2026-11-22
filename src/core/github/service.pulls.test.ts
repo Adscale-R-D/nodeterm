@@ -5,7 +5,7 @@ import { GitHubIssueCache } from './cache'
 import { testTmpDir } from '../test-tmp'
 import { GitHubIssueService, type GitHubIssueServiceContext, type GitHubIssuesClientLike } from './service'
 import { GitHubRequestCoordinator } from './request-coordinator'
-import type { PullStatusRead } from './graphql-pulls'
+import type { PullOneRead, PullStatusRead } from './graphql-pulls'
 import type { GitHubIssue, IssueHeartbeatResult, NormalisedProjectKanbanGitHub } from '../../shared/github-issues'
 import type { GitHubPullChecksResult, PullStatusFacts } from '../../shared/github-pull-status'
 
@@ -289,5 +289,131 @@ describe('GitHubIssueService.controlSnapshot — the read behind the `issues` / 
     expect(snapshot.pullBoard.pulls[0]).toMatchObject({ number: 1, ci: 'passed' })
     await flush()
     expect([h.client.heartbeats, h.client.statusReads, h.client.checkReads, h.contexts()]).toEqual(before)
+  })
+})
+
+describe('GitHubIssueService — principal-declared pull requests', () => {
+  /** A client that also answers single-PR reads: #1045 is open far outside the list window, #900
+   *  merged long ago, #77 is an issue number. */
+  class DeclaredClient extends PullClient {
+    singleReads: number[] = []
+    failSingle = new Set<number>()
+    single: Record<number, PullOneRead> = {
+      1045: { kind: 'open', facts: facts(1045, { rollup: 'FAILURE', mergeStateStatus: 'BLOCKED' }), access: { ci: true, merge: true } },
+      900: { kind: 'finished', pull: { number: 900, headRefName: 'feat/900', crossRepository: false, lifecycle: 'merged' } },
+      77: { kind: 'missing' }
+    }
+    async pullRequestStatus(_repository: string, number: number): Promise<PullOneRead> {
+      this.singleReads.push(number)
+      if (this.failSingle.has(number)) throw Object.assign(new Error('request-failed'), { code: 'request-failed', status: 502 })
+      return this.single[number] ?? { kind: 'missing' }
+    }
+  }
+
+  function declaredHarness(declared: Array<{ nodeId: string; pulls: number[]; repository?: string }>) {
+    const client = new DeclaredClient()
+    const h = harness(client)
+    h.service.setDeclaredPulls((projectId) => projectId === 'project-1'
+      ? declared.map((d) => ({ repository: 'o/r', ...d }))
+      : [])
+    return { ...h, client, declared }
+  }
+
+  it('a declared PR outside the read window gets its own state, and the board carries the declaration', async () => {
+    const h = declaredHarness([{ nodeId: 'term-1', pulls: [1045, 900, 77] }])
+    await h.service.subscribe(7, { projectId: 'project-1' })
+    await vi.waitFor(() => expect(h.client.singleReads.sort()).toEqual([1045, 77, 900]))
+    await flush()
+    const board = await h.service.pullStatus({ projectId: 'project-1' })
+    expect(board.declared).toEqual([{ nodeId: 'term-1', pulls: [1045, 900, 77] }])
+    expect(board.pulls.find((p) => p.number === 1045)).toMatchObject({ lifecycle: 'open', ci: 'failed', merge: 'blocked' })
+    // Merged before this machine ever saw it open: no mergedSeenAt, kept on the board because declared.
+    expect(board.pulls.find((p) => p.number === 900)).toMatchObject({ lifecycle: 'merged' })
+    expect(board.pulls.find((p) => p.number === 900)?.mergedSeenAt).toBeUndefined()
+    expect(board.pulls.some((p) => p.number === 77)).toBe(false)
+    expect(board.stale).toBe(false)
+  })
+
+  it('the next list read re-reads only the open one: a finished PR and a missing number are cached', async () => {
+    const h = declaredHarness([{ nodeId: 'term-1', pulls: [1045, 900, 77] }])
+    await h.service.subscribe(7, { projectId: 'project-1' })
+    await vi.waitFor(() => expect(h.client.singleReads).toHaveLength(3))
+    await flush()
+    h.client.singleReads = []
+    h.client.changed = true
+    h.advance(60_000)
+    await h.poll()
+    await vi.waitFor(() => expect(h.client.statusReads).toBe(2))
+    await flush()
+    expect(h.client.singleReads).toEqual([1045])
+    // Not read again, and still on the board: a declared merge stays visible without a mergedSeenAt.
+    expect((await h.service.pullStatus({ projectId: 'project-1' })).pulls.find((p) => p.number === 900))
+      .toMatchObject({ lifecycle: 'merged' })
+  })
+
+  it('a failed single read never fails the list read', async () => {
+    const h = declaredHarness([{ nodeId: 'term-1', pulls: [1045] }])
+    h.client.failSingle.add(1045)
+    await h.service.subscribe(7, { projectId: 'project-1' })
+    await vi.waitFor(() => expect(h.client.singleReads).toEqual([1045]))
+    await flush()
+    const board = await h.service.pullStatus({ projectId: 'project-1' })
+    expect(board.stale).toBe(false)
+    expect(board.pulls.map((p) => p.number)).toEqual([1])
+  })
+
+  it('a declared PR the list read already covers costs no extra read', async () => {
+    const h = declaredHarness([{ nodeId: 'term-1', pulls: [1] }])
+    await h.service.subscribe(7, { projectId: 'project-1' })
+    await vi.waitFor(() => expect(h.client.statusReads).toBe(1))
+    await flush()
+    expect(h.client.singleReads).toEqual([])
+  })
+
+  it('links declared for another repository are not shown', async () => {
+    const h = declaredHarness([{ nodeId: 'term-1', pulls: [1], repository: 'someone/else' }])
+    await h.service.subscribe(7, { projectId: 'project-1' })
+    await flush()
+    expect((await h.service.pullStatus({ projectId: 'project-1' })).declared).toBeUndefined()
+  })
+
+  it('a change re-reads at once: the board is notified and the new number is read without waiting for a poll', async () => {
+    const notified: number[] = []
+    const h = declaredHarness([])
+    ;(h.service as unknown as { options: { onDelta: unknown } }).options.onDelta = (uiId: number) => notified.push(uiId)
+    await h.service.subscribe(7, { projectId: 'project-1' })
+    await vi.waitFor(() => expect(h.client.statusReads).toBe(1))
+    await flush()
+    notified.length = 0
+    h.declared.push({ nodeId: 'term-1', pulls: [1045] })
+    h.service.declaredPullsChanged('project-1')
+    expect(notified).toContain(7)
+    await vi.waitFor(() => expect(h.client.singleReads).toEqual([1045]))
+    await vi.waitFor(async () =>
+      expect((await h.service.pullStatus({ projectId: 'project-1' })).pulls.some((p) => p.number === 1045)).toBe(true))
+  })
+
+  it('auto-move: a PR declared while open can be noted and claimed; one declared after its merge cannot', async () => {
+    const h = declaredHarness([{ nodeId: 'term-1', pulls: [1045] }])
+    await h.service.subscribe(7, { projectId: 'project-1' })
+    await vi.waitFor(() => expect(h.client.singleReads).toEqual([1045]))
+    await flush()
+    // Open when declared: the armed board notes the wait, then the merge is observed.
+    expect(await h.service.notePullWaits({ projectId: 'project-1', cardId: 'term-1', pulls: [1045] })).toBe(1)
+    h.client.single[1045] = { kind: 'finished', pull: { number: 1045, headRefName: 'feat/1045', crossRepository: false, lifecycle: 'merged' } }
+    h.client.changed = true
+    h.advance(60_000)
+    await h.poll()
+    await vi.waitFor(async () =>
+      expect((await h.service.pullStatus({ projectId: 'project-1' })).pulls.find((p) => p.number === 1045)?.mergedSeenAt).toBeDefined())
+    expect(await h.service.claimPullAutoMove({ projectId: 'project-1', cardId: 'term-1', pulls: [1045] })).toBe(true)
+
+    // #900 was merged before it was declared: no wait note can be taken, so no claim.
+    h.declared.push({ nodeId: 'term-2', pulls: [900] })
+    h.service.declaredPullsChanged('project-1')
+    await vi.waitFor(async () =>
+      expect((await h.service.pullStatus({ projectId: 'project-1' })).pulls.some((p) => p.number === 900)).toBe(true))
+    expect(await h.service.notePullWaits({ projectId: 'project-1', cardId: 'term-2', pulls: [900] })).toBe(0)
+    expect(await h.service.claimPullAutoMove({ projectId: 'project-1', cardId: 'term-2', pulls: [900] })).toBe(false)
   })
 })

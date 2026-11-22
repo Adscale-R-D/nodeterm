@@ -8905,7 +8905,12 @@ the Settings section and ShortcutsPanel start disagreeing about what a chord mea
   Completed / Not planned (Completed preselected — GitHub's default), a reopen sends `reopened`.
   It rides ONLY with a state change (the "send `state` only when it changes" rule stands), the
   client refuses a reason of the wrong kind, and a close GitHub recorded with a different reason is
-  not reported as confirmed. **(5) Writes need an approval that covers the column mapping.** The
+  not reported as confirmed. **Default column labels fit GitHub's 50-character limit** (`defaultColumnLabel`,
+  `@shared/github-issues`, cut and made unique): an uncut label for a long column title made the
+  mapping invalid, the host then refused APPROVAL too (`invalid-configuration`), and the settings UI
+  reported it as "settings have not finished saving" forever. The UI now runs the host's own label
+  rules (`columnLabelProblem`, shared) and names the bad column, with Approve hidden until it is
+  fixed. **(5) Writes need an approval that covers the column mapping.** The
   mapping (which label a column applies, which column closes) is in the git-shared project.json,
   so a pulled commit could re-aim writes under an approval given for something else. An approval
   records `githubMappingDigest(repository, completionColumnId, columnMappings)` — column ORDER and

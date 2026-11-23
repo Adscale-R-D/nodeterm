@@ -221,6 +221,12 @@ ticket). Stored on the durable ledger row, shown through the existing `PullRefCh
 section, and a declared PR outside the GraphQL read window is read on its own (one PR per request).
 Part of the integration-principal fork work, not a separate patch row.
 
+**Principal-declared Jira tickets (2026-11-23, Server Edition).** The same shape for Jira
+(`open.jira`, `link-jira`, `unlink-jira`): the principal pushes each ticket's status and summary
+(nodeterm holds no Jira credential), stored on the ledger row, sent to the browser on a host-only
+`integration-jira:*` channel, drawn as key + status-dot chips on the card and in the card modal. Also
+part of the integration-principal fork work.
+
 Plus one UI keep: **the frame context menu's "close group and its nodes"** (`closeGroupWithChildren`
 + `groupSubtreeIds`). Upstream deleted the frame's `×` rather than implementing it, so this is the
 only way to tear a `spawn-team`/`verify` panel down from the UI in one action.

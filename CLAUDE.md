@@ -10460,13 +10460,14 @@ Rules a refactor must not undo:
 - **It can DECLARE a card's Jira tickets** (`open.jira`, `link-jira`, `unlink-jira`,
   `src/shared/integration-jira.ts`). nodeterm holds no Jira credential and reads nothing from Jira:
   the principal pushes each ticket's status, status group and summary, and pushes again on a change
-  (the chip's tooltip says when it was received). Rules: (1) stored on the ledger row (`jira`),
+  (the chip's tooltip says when it last CHANGED — an identical re-send is a no-op). Rules: (1) stored on the ledger row (`jira`),
   never in `project.json`; a closed key drops it, a moved grant carries it, emptying the PR set does
   not touch it (`withoutPulls` vs `withoutLinks`); (2) the link is BUILT by `jiraTicketUrl` from a
   validated https origin and a strict key, on the host and again in the renderer — never a URL the
   caller sent; status and summary are one cleaned line; (3) it reaches the browser on its own
   host-only channel `integration-jira:list` / `:changed` (the ledger's `setOnChange`, broadcast only
   when the list changed), registered by BOTH shells (the desktop answers `[]`), relay tabs inert;
+  `jiraLinks()` merges a node's keys into ONE entry per (project, node), deduped by ticket key;
   (4) `JiraTicketChips` reads it by node id (the project picks among duplicates) on the session card
   (both boards) and the card modal. `server/integration-jira-wiring.test.ts` pins each hop.
 

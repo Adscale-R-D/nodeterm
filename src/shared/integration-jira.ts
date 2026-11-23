@@ -30,8 +30,8 @@ export interface JiraTicketLink {
   status?: string
   category?: JiraCategory
   summary?: string
-  /** When this server last received the ticket (ms epoch). The status is pushed, not read, so it is
-   *  only as fresh as the principal's last push. */
+  /** When this server last saw the ticket's record CHANGE (ms epoch). An identical re-send changes
+   *  nothing, so this is "status last changed", not "last confirmed". */
   at: number
 }
 
@@ -140,18 +140,21 @@ export function sanitizeJiraTicketLink(raw: unknown): JiraTicketLink | null {
   return { ...t, at }
 }
 
-/** A stored set: bad entries dropped, duplicates collapsed (the last wins), capped. */
-export function sanitizeJiraTicketLinks(raw: unknown): JiraTicketLink[] {
+/** A stored set: bad entries dropped, duplicates collapsed (the last wins), capped at `max`. */
+export function sanitizeJiraTicketLinks(raw: unknown, max = INTEGRATION_JIRA_MAX): JiraTicketLink[] {
   if (!Array.isArray(raw)) return []
   const byKey = new Map<string, JiraTicketLink>()
-  for (const r of raw.slice(0, INTEGRATION_JIRA_MAX * 2)) {
+  for (const r of raw.slice(0, max * 2)) {
     const t = sanitizeJiraTicketLink(r)
     if (!t) continue
     byKey.delete(t.key)
     byKey.set(t.key, t)
   }
-  return [...byKey.values()].slice(-INTEGRATION_JIRA_MAX)
+  return [...byKey.values()].slice(-max)
 }
+
+/** A card's merged list (a node may hold several keys) is capped higher than one key's set. */
+export const JIRA_CARD_TICKETS_MAX = INTEGRATION_JIRA_MAX * 4
 
 const PROJECT_ID_RE = /^[\w.:-]{1,128}$/
 const NODE_ID_RE = /^[A-Za-z0-9_.:-]{1,128}$/
@@ -167,7 +170,7 @@ export function sanitizeJiraCardLinks(raw: unknown): JiraCardLinks[] {
     if (typeof e.projectId !== 'string' || !PROJECT_ID_RE.test(e.projectId)) continue
     if (typeof e.nodeId !== 'string' || !NODE_ID_RE.test(e.nodeId)) continue
     if (typeof e.principal !== 'string' || !PRINCIPAL_RE.test(e.principal)) continue
-    const tickets = sanitizeJiraTicketLinks(e.tickets)
+    const tickets = sanitizeJiraTicketLinks(e.tickets, JIRA_CARD_TICKETS_MAX)
     if (tickets.length) out.push({ projectId: e.projectId, nodeId: e.nodeId, principal: e.principal, tickets })
   }
   return out

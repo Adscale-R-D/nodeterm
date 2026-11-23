@@ -218,3 +218,27 @@ describe('IntegrationLedger — declared Jira tickets', () => {
     expect(sanitizeNodeRecord({ ...row(), jira: 'A3-1' })).not.toHaveProperty('jira')
   })
 })
+
+describe('IntegrationLedger — a node with several keys', () => {
+  const SITE = 'https://ad-scale.atlassian.net'
+  it('merges every key of a node into one card entry, a shared ticket once (newest record)', () => {
+    let clock = 1
+    const l = new IntegrationLedger(undefined, undefined, () => clock)
+    l.grant({ principal: 'sink', key: 'PR-1', nodeId: 'term-a', projectId: 'project-1' })
+    l.grant({ principal: 'sink', key: 'PR-2', nodeId: 'term-a', projectId: 'project-1' })
+    l.declareJira(l.openNode('sink', 'PR-1')!, [{ key: 'A3-1', site: SITE, status: 'Open' }], 10)
+    l.declareJira(l.openNode('sink', 'PR-2')!, [{ key: 'A3-2', site: SITE }, { key: 'A3-1', site: SITE, status: 'Done' }], 20)
+    clock = 2
+    expect(l.jiraLinks()).toEqual([
+      {
+        projectId: 'project-1',
+        nodeId: 'term-a',
+        principal: 'sink',
+        tickets: [
+          { key: 'A3-1', site: SITE, status: 'Done', at: 20 },
+          { key: 'A3-2', site: SITE, at: 20 }
+        ]
+      }
+    ])
+  })
+})

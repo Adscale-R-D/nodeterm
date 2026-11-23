@@ -1,7 +1,7 @@
 // The Jira tickets an integration principal declared on a card (src/shared/integration-jira.ts):
 // `A3-6926` with a status dot, the status and summary in the tooltip, and a click that opens the
-// ticket in Jira. nodeterm never reads Jira — the status is what the principal last pushed, so the
-// tooltip says when that was. Mounted on the session card (both boards) and in the card modal.
+// ticket in Jira. nodeterm never reads Jira — the status is what the principal last pushed, and the
+// tooltip says when it last changed. Mounted on the session card (both boards) and in the card modal.
 import { jiraTicketUrl, type JiraCategory, type JiraTicketLink } from '@shared/integration-jira'
 import { useIntegrationJira, jiraLinksFor } from '../../state/integrationJira'
 
@@ -11,9 +11,9 @@ const CATEGORY_WORD: Record<JiraCategory, string> = {
   done: 'Done'
 }
 
-function received(at: number): string {
+function changedAt(at: number): string {
   const d = new Date(at)
-  return Number.isNaN(d.getTime()) ? '' : `Status as of ${d.toLocaleString()}`
+  return Number.isNaN(d.getTime()) ? '' : `Status last changed ${d.toLocaleString()}`
 }
 
 export function JiraTicketChip({ ticket, principal }: { ticket: JiraTicketLink; principal?: string }): React.JSX.Element {
@@ -23,7 +23,7 @@ export function JiraTicketChip({ ticket, principal }: { ticket: JiraTicketLink; 
   const title = [
     [ticket.key, status].filter(Boolean).join(' · '),
     ticket.summary,
-    [received(ticket.at), principal ? `from ${principal}` : ''].filter(Boolean).join(', '),
+    [changedAt(ticket.at), principal ? `from ${principal}` : ''].filter(Boolean).join(', '),
     url ? 'Open in Jira' : undefined
   ]
     .filter(Boolean)

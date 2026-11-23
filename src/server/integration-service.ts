@@ -232,6 +232,8 @@ export function createIntegrationService(deps: IntegrationServiceDeps): {
     return withKeyLock(`${p.name}|${key}`, async () => {
       const existing = liveRow(p.name, key)
       if (existing) {
+        // Refuse an overflowing ticket set before the pulls are written: a 409 changes nothing.
+        if (jira && deps.ledger.jiraWouldOverflow(existing, jira)) return tooManyJira()
         const declared = pulls ? await declareOnOpen(existing, existing.projectId, pulls) : undefined
         if (declared === 'too-many') return tooManyPulls()
         const tickets = jira ? deps.ledger.declareJira(existing, jira, now()) : undefined

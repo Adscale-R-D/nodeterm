@@ -634,3 +634,14 @@ describe('integration service — declared Jira tickets', () => {
     expect(ledger.jiraLinks()).toEqual([])
   })
 })
+
+describe('integration service — open with an overflowing jira set', () => {
+  it('refuses before the pulls are written, so a 409 changes nothing', async () => {
+    const SITE = 'https://ad-scale.atlassian.net'
+    const { call, ledger } = setup()
+    await call('open', { key: 'K-1', agent: 'claude', jira: Array.from({ length: 20 }, (_, i) => ({ key: `A3-${i + 1}`, site: SITE })) })
+    const r = await call('open', { key: 'K-1', agent: 'claude', pulls: [7], jira: [{ key: 'A3-99', site: SITE }] })
+    expect(r.body).toMatchObject({ ok: false, error: 'too-many-jira' })
+    expect(ledger.declaredForProject('p1')).toEqual([])
+  })
+})

@@ -290,10 +290,11 @@ type JiraTicket = {
   category?: 'todo' | 'in-progress' | 'done',   // Jira's status category (new / indeterminate / done)
   summary?: string   // the ticket's title; one line, ≤ 120
 }
-type JiraTicketLink = JiraTicket & { at: number /* when this server last received it, ms epoch */ }
+type JiraTicketLink = JiraTicket & { at: number /* when this ticket's record last CHANGED here, ms epoch */ }
 ```
 
-`link-jira` adds a ticket or replaces a known one's status, group and summary. Call it again whenever
+`link-jira` adds a ticket or replaces a known one's WHOLE record: a field left out is cleared (send
+the status again with every update). Call it again whenever
 the principal sees the ticket change: nodeterm never reads Jira. Both verbs are idempotent.
 
 - Errors: 400 `bad-key` / `bad-jira`; 404 `unknown-key`; 409 `too-many-jira` (a key declares at most
@@ -303,13 +304,14 @@ the principal sees the ticket change: nodeterm never reads Jira. Both verbs are 
 
 A card shows the Jira tickets its key declared as chips beside its PR chips: the ticket key with a
 status dot (grey = to do, blue = in progress, green = done, outlined = no group sent). The tooltip
-has the status, the summary, when the status was received and which principal sent it; a click opens
+has the status, the summary, when the status last changed and which principal sent it; a click opens
 `<site>/browse/<key>`. The card shows three and counts the rest; the card modal lists all of them
 under "Jira".
 
 - **nodeterm holds no Jira credential and never asks Jira anything.** The status is what the
-  principal last pushed. It goes stale if the principal stops pushing, which is why the tooltip says
-  when it was received.
+  principal last pushed. An identical re-send changes nothing, so the tooltip's time is when the
+  status last CHANGED, not when the principal last confirmed it; a principal that stopped pushing
+  looks the same as a ticket nobody touched.
 - **The link is built, never taken.** The principal sends an https origin and a ticket key; nodeterm
   builds `<origin>/browse/<KEY>` and checks it again in the browser before opening it. Status and
   summary are cleaned to one line (no control, bidi or zero-width characters). An unknown `category`
@@ -317,6 +319,8 @@ under "Jira".
 - **The ledger is the authority**, as for declared PRs: the tickets live on the key's row in
   `integration-nodes.json`, never in `project.json`. Closing the key drops them; a moved grant carries
   them.
+- **One chip set per card.** A node holding several keys (grants) shows the tickets of all of them,
+  a ticket declared on two keys once (its most recently changed record).
 - **Any board.** No GitHub connection is needed. The tickets reach the browser on their own host-only
   channel (`integration-jira:list` / `:changed`), pushed on every change and read again when the page
   comes back into view.

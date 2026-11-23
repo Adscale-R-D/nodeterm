@@ -63,6 +63,7 @@ import { BoardLogPanel } from './BoardLogPanel'
 import type { MentionCandidate } from '../../lib/boardMentions'
 import { CardMetaBar } from './CardMetaBar'
 import { CardPullRequests } from './CardPullRequests'
+import { JiraTicketChips } from './JiraTicketChips'
 import { ModalTerminal } from './ModalTerminal'
 import { BrowserSurface } from '../../nodes/BrowserSurface'
 import { BrowserDrivingIndicator } from '../../nodes/BrowserDrivingChip'
@@ -757,6 +758,7 @@ export function CardModal({ session, projectId, projectName, projectColor, colum
         )}
         <CardMetaBar nodeId={session.id} board={board} onChange={onChangeBoard} />
         <CardPullRequests session={session} board={board} onChangeBoard={onChangeBoard} />
+        <JiraTicketChips nodeId={session.id} projectId={projectId} max={20} className="pull-refs" heading="Jira" />
         <div className="kanban-modal__body">
           {/* Body is a flex row: the card's own pane (2/3) + the board-log panel (1/3, all kinds). */}
           <div className="kanban-modal__main">

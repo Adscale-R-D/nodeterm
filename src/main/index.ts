@@ -1,4 +1,5 @@
 import { registerUpdatePrepIpc } from './update-prep'
+import { registerIntegrationJiraIpc } from '../core/integration/jira-links-ipc'
 import { INTEGRATION_GRANT_VERBS } from '../shared/integration-principal'
 import { installOpenLinks } from './open-link-wiring'
 import { nodetermUrlFromArgv } from '../shared/open-link'
@@ -2363,6 +2364,8 @@ app.whenReady().then(async () => {
     }
   )
   registerStationOutcomeIpc(corePlatform, () => stationOutcomes)
+  // No integration principals on the desktop: the boards' Jira read answers an empty list.
+  registerIntegrationJiraIpc(corePlatform, () => null)
   // A `send` / `reply` hands a station new work — decided by when the message REACHES its pane (a
   // queued one marks the station "work pending" until it lands), never by when the control answer
   // comes back. The messaging service reports those moments; the store applies the rule.

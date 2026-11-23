@@ -113,6 +113,8 @@ export const HOST_ONLY_CHANNELS: ReadonlySet<string> = new Set([
   // Unscoped: every project's station outcomes and their notes. A relay guest bound to one project
   // must not read another's, and a relay tab's launch loop is refused anyway (its stub is inert).
   IPC.stationOutcomeList,
+  // Unscoped too: every project's declared Jira tickets (keys, statuses, summaries).
+  IPC.integrationJiraList,
   // Same class: which of the host's stations (any project) have work handed to them.
   IPC.stationHandoverList,
   // "Open recent": the host's conversation history — titles are prompts the host's user typed, in

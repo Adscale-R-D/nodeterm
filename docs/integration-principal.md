@@ -91,13 +91,15 @@ or token); 404 `unknown-key` / `unknown-verb` / `integration-unavailable`; 409 a
   prompt?: string,    // ≤ 256 KiB; written to a file the launch reads, so newlines survive
   model?: string, group?: string /* frame title, ≤ 48 chars */, title?: string /* ≤ 120 */,
   column?: string /* an existing kanban column's title, ≤ 48 chars */,
-  pulls?: number[] /* PR numbers in the board's GitHub repository, ≤ 20 (see "Declared pull requests") */ }
+  pulls?: number[] /* PR numbers in the board's GitHub repository, ≤ 20 (see "Declared pull requests") */,
+  jira?: JiraTicket[] /* ≤ 20 (see "Declared Jira tickets") */ }
 // result
 { key, nodeId, projectId, status: 'created' | 'existing',
   session?: 'started' | 'failed', reason?: string, frameId?: string,
   column?: string /* the column id, or 'missing'; only when `column` was asked and the node created */,
   pulls?: number[] /* only when `pulls` was sent: the key's declared set after this call */,
-  pullsIgnored?: 'no-repository' /* `pulls` not recorded: the project has no GitHub repository */ }
+  pullsIgnored?: 'no-repository' /* `pulls` not recorded: the project has no GitHub repository */,
+  jira?: JiraTicketLink[] /* only when `jira` was sent: the key's declared tickets after this call */ }
 ```
 
 An upsert by key: if the principal already has an open node for the key, it answers `existing` and
@@ -118,6 +120,10 @@ already declared (the only thing an `existing` upsert changes). A malformed list
 before anything opens; a union past 20 is 409 `too-many-pulls`. On a project with no GitHub
 repository (no board repository and no GitHub git remote) `pulls` is ignored, never refused: the node
 opens and the result says `pullsIgnored: 'no-repository'`.
+
+`jira` is upserted by ticket key, also on an `existing` upsert (a known ticket's status, group and
+summary are replaced). A malformed list is 400 `bad-jira` before anything opens; a set past 20 is 409
+`too-many-jira`. It needs no GitHub repository.
 
 `session: 'failed'` keeps the launch on the node for its Run now, with `reason`
 (`no-shell`, `line-too-long`, `spawn-failed`, …).
@@ -267,6 +273,54 @@ the card modal's "Pull requests" section, with the same CI and merge state.
   it on, and a card moves only for a merge this machine observed after it saw the PR open on that
   card: a PR declared after it merged never moves the card.
 
+### `POST /integration/link-jira` and `POST /integration/unlink-jira`
+
+```ts
+// link-jira
+{ key: string, ticket: JiraTicket }
+// unlink-jira
+{ key: string, ticket: string /* the ticket key, e.g. "A3-6926" */ }
+// result (both)
+{ key, nodeId, jira: JiraTicketLink[] /* the key's declared tickets after the call */ }
+
+type JiraTicket = {
+  key: string,       // "A3-6926": trimmed and upper-cased, then 2-10 letters/digits/_, a dash, a number
+  site: string,      // the Jira site's https origin, e.g. "https://ad-scale.atlassian.net" (no path)
+  status?: string,   // Jira's status name, as the principal read it; one line, ≤ 40
+  category?: 'todo' | 'in-progress' | 'done',   // Jira's status category (new / indeterminate / done)
+  summary?: string   // the ticket's title; one line, ≤ 120
+}
+type JiraTicketLink = JiraTicket & { at: number /* when this server last received it, ms epoch */ }
+```
+
+`link-jira` adds a ticket or replaces a known one's status, group and summary. Call it again whenever
+the principal sees the ticket change: nodeterm never reads Jira. Both verbs are idempotent.
+
+- Errors: 400 `bad-key` / `bad-jira`; 404 `unknown-key`; 409 `too-many-jira` (a key declares at most
+  20 tickets).
+
+### Declared Jira tickets
+
+A card shows the Jira tickets its key declared as chips beside its PR chips: the ticket key with a
+status dot (grey = to do, blue = in progress, green = done, outlined = no group sent). The tooltip
+has the status, the summary, when the status was received and which principal sent it; a click opens
+`<site>/browse/<key>`. The card shows three and counts the rest; the card modal lists all of them
+under "Jira".
+
+- **nodeterm holds no Jira credential and never asks Jira anything.** The status is what the
+  principal last pushed. It goes stale if the principal stops pushing, which is why the tooltip says
+  when it was received.
+- **The link is built, never taken.** The principal sends an https origin and a ticket key; nodeterm
+  builds `<origin>/browse/<KEY>` and checks it again in the browser before opening it. Status and
+  summary are cleaned to one line (no control, bidi or zero-width characters). An unknown `category`
+  is refused.
+- **The ledger is the authority**, as for declared PRs: the tickets live on the key's row in
+  `integration-nodes.json`, never in `project.json`. Closing the key drops them; a moved grant carries
+  them.
+- **Any board.** No GitHub connection is needed. The tickets reach the browser on their own host-only
+  channel (`integration-jira:list` / `:changed`), pushed on every change and read again when the page
+  comes back into view.
+
 ### `POST /integration/list`
 
 ```ts
@@ -281,7 +335,8 @@ the card modal's "Pull requests" section, with the same CI and merge state.
     agentState?: string,                      // working | waiting | blocked | done | unknown
     needsYou?: boolean,                       // a dialog waits on a person
     lastTurnError?: boolean,
-    pulls?: number[] }>,                      // open rows: the declared pull requests
+    pulls?: number[],                         // open rows: the declared pull requests
+    jira?: JiraTicketLink[] }>,               // open rows: the declared Jira tickets
   outbox: Array<{ sendId, key, nodeId, outcome: string, at: number }> }
 ```
 
@@ -382,7 +437,10 @@ same data dir stands down, like the other orchestration facts).
 | `src/core/agents/pane-ownership.ts` | `recordReprovedOwner` (the one attach that may record) |
 | `src/core/pty-manager.ts` | `sessionCreatedAt` (exact target) |
 | `src/server/headless-node-factory.ts` | `principalOpen` / `principalResume` / `principalClose` |
-| `src/server/integration-service.ts` | authentication, validation, the eight verbs |
+| `src/server/integration-service.ts` | authentication, validation, the ten verbs |
+| `src/shared/integration-jira.ts` | declared Jira tickets: validation, the link builder |
+| `src/core/integration/jira-links-ipc.ts` | the boards' `integration-jira:list` read (both shells) |
+| `src/renderer/components/kanban/JiraTicketChips.tsx` | the Jira chips (card and card modal) |
 | `src/core/github/service.ts` | `setDeclaredPulls`, `declaredPullsChanged`, `readPullBoard` (single-PR reads) |
 | `src/shared/pull-card-links.ts` | `pullsForCard`: branch ∪ issue ∪ declared, tombstones win |
 | `src/server/integration-cli.ts` | `main.cjs integration …` |

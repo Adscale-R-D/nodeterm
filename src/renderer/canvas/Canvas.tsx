@@ -711,6 +711,7 @@ import {
 } from '@shared/station-outcome'
 import { useStationOutcomes } from '../state/stationOutcomes'
 import { installStationOutcomeWiring } from '../lib/stationOutcomeWiring'
+import { installIntegrationJiraWiring } from '../lib/integrationJiraWiring'
 import { useStationHandovers } from '../state/stationHandovers'
 import { installStationHandoverWiring } from '../lib/stationHandoverWiring'
 import { lookupPullRequests, pullBoardFor, useGitHubIssues } from '../state/githubIssues'
@@ -11980,6 +11981,7 @@ export function Canvas() {
   useEffect(() => installStationNoticeWiring(window.nodeTerminal), [])
   // Station task outcomes (`report-outcome`): core's store mirrored for the `--after-success` gate.
   useEffect(() => installStationOutcomeWiring(window.nodeTerminal), [])
+  useEffect(() => installIntegrationJiraWiring(window.nodeTerminal), [])
   useEffect(() => installStationHandoverWiring(window.nodeTerminal), [])
   // Board dispatch's in-memory queue, reported to core for the `issues` control verb (display only).
   useEffect(() => installBoardDispatchReportWiring(window.nodeTerminal), [])

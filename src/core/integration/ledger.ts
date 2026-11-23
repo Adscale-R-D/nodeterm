@@ -25,6 +25,14 @@ import {
   type IntegrationAgent,
   type IntegrationOutboxEntry
 } from '../../shared/integration-principal'
+import {
+  INTEGRATION_JIRA_MAX,
+  sameJiraTicket,
+  sanitizeJiraTicketLinks,
+  type JiraCardLinks,
+  type JiraTicketInput,
+  type JiraTicketLink
+} from '../../shared/integration-jira'
 
 export interface IntegrationNodeRecord {
   principal: string
@@ -55,6 +63,9 @@ export interface IntegrationNodeRecord {
   /** The board's GitHub repository when `pulls` were declared. A number means nothing in another
    *  repository, so a re-pointed board starts the set over. */
   pullRepository?: string
+  /** node only, open rows only: Jira tickets the principal DECLARED on the card (`open.jira`,
+   *  `link-jira`), with the status and summary it pushed, in declaration order. */
+  jira?: JiraTicketLink[]
 }
 
 export interface PersistedOutboxEntry extends IntegrationOutboxEntry {
@@ -74,10 +85,17 @@ function sameRepository(a: string | undefined, b: string): boolean {
   return !!a && a.toLocaleLowerCase('en-US') === b.toLocaleLowerCase('en-US')
 }
 
-/** A closed row keeps no declared links. */
+/** An emptied pull request set: the Jira tickets stay. */
 function withoutPulls(r: IntegrationNodeRecord): void {
   delete r.pulls
   delete r.pullRepository
+}
+
+/** A closed row keeps no declared links (pull requests or Jira tickets). */
+function withoutLinks(r: IntegrationNodeRecord): void {
+  delete r.pulls
+  delete r.pullRepository
+  delete r.jira
 }
 
 export function sanitizeNodeRecord(raw: unknown): IntegrationNodeRecord | null {
@@ -113,6 +131,10 @@ export function sanitizeNodeRecord(raw: unknown): IntegrationNodeRecord | null {
         out.pulls = pulls
         out.pullRepository = r.pullRepository
       }
+    }
+    if (r.state === 'open') {
+      const jira = sanitizeJiraTicketLinks(r.jira)
+      if (jira.length) out.jira = jira
     }
   }
   if (isFiniteNumber(r.closedAt)) out.closedAt = r.closedAt
@@ -152,6 +174,7 @@ export const INTEGRATION_OUTBOX_FACT: DurableFactSpec<PersistedOutboxEntry> = {
 export class IntegrationLedger {
   private rows: IntegrationNodeRecord[] = []
   private outbox: PersistedOutboxEntry[] = []
+  private onNodesChanged?: () => void
 
   constructor(
     private readonly nodesFile?: Pick<DurableFactFile<IntegrationNodeRecord>, 'load' | 'save'>,
@@ -172,7 +195,7 @@ export class IntegrationLedger {
       const nodeTaken = r.adopted ? ownedNode.has(r.nodeId) : seenNode.has(r.nodeId)
       if (r.state === 'open' && (seenOpen.has(id) || nodeTaken)) {
         const closed: IntegrationNodeRecord = { ...r, state: 'closed', closedAt: r.closedAt ?? this.now() }
-        withoutPulls(closed)
+        withoutLinks(closed)
         rows.push(closed)
         continue
       }
@@ -188,7 +211,7 @@ export class IntegrationLedger {
       if (r.state === 'open' && r.adopted && ownedNode.has(r.nodeId)) {
         r.state = 'closed'
         r.closedAt = r.closedAt ?? this.now()
-        withoutPulls(r)
+        withoutLinks(r)
       }
     }
     this.rows = rows.reverse()
@@ -209,6 +232,16 @@ export class IntegrationLedger {
   private save(): void {
     this.prune()
     this.nodesFile?.save(this.rows)
+    try {
+      this.onNodesChanged?.()
+    } catch {
+      // A listener's failure must not fail the write that already happened.
+    }
+  }
+
+  /** Called after every change to the node rows (open, close, grant, declarations). */
+  setOnChange(fn: (() => void) | undefined): void {
+    this.onNodesChanged = fn
   }
 
   /** The open node row for a key. */
@@ -275,7 +308,7 @@ export class IntegrationLedger {
     if (!r) return
     r.state = 'closed'
     r.closedAt = this.now()
-    withoutPulls(r)
+    withoutLinks(r)
     this.save()
   }
 
@@ -286,7 +319,7 @@ export class IntegrationLedger {
       if (r.state === 'open' && !isLive(r)) {
         r.state = 'closed'
         r.closedAt = this.now()
-        withoutPulls(r)
+        withoutLinks(r)
         gone.push(r.nodeId)
       }
     }
@@ -317,14 +350,15 @@ export class IntegrationLedger {
     if (existing && existing.nodeId === input.nodeId) return 'already-granted'
     if (this.ownerOf(input.nodeId)) return 'node-held'
     if (this.grantsOf(input.nodeId).length >= GRANTS_PER_NODE_MAX) return 'too-many-grants'
-    let carried: Pick<IntegrationNodeRecord, 'pulls' | 'pullRepository'> = {}
+    let carried: Pick<IntegrationNodeRecord, 'pulls' | 'pullRepository' | 'jira'> = {}
     if (existing) {
       if (existing.pulls?.length && existing.pullRepository) {
         carried = { pulls: [...existing.pulls], pullRepository: existing.pullRepository }
       }
+      if (existing.jira?.length) carried.jira = existing.jira.map((t) => ({ ...t }))
       existing.state = 'closed'
       existing.closedAt = this.now()
-      withoutPulls(existing)
+      withoutLinks(existing)
     }
     this.rows.push({
       principal: input.principal,
@@ -405,6 +439,66 @@ export class IntegrationLedger {
     return this.rows
       .filter((r) => r.kind === 'node' && r.state === 'open' && r.projectId === projectId && r.pulls?.length && r.pullRepository)
       .map((r) => ({ nodeId: r.nodeId, pulls: [...r.pulls!], repository: r.pullRepository! }))
+  }
+
+  /** The Jira tickets declared on an open node row. */
+  declaredJira(row: IntegrationNodeRecord): JiraTicketLink[] {
+    const r = this.openRow(row)
+    return r?.kind === 'node' ? (r.jira ?? []).map((t) => ({ ...t })) : []
+  }
+
+  /**
+   * Upserts Jira tickets on an open node row, by ticket key: a known ticket's status, group and
+   * summary are replaced in place, a new one is appended. `changed` is false when every ticket said
+   * the same as before (nothing is written then). 'too-many' (nothing changed) when the set would
+   * pass `INTEGRATION_JIRA_MAX`; undefined when there is no open node row.
+   */
+  declareJira(
+    row: IntegrationNodeRecord,
+    tickets: readonly JiraTicketInput[],
+    at: number
+  ): { jira: JiraTicketLink[]; changed: boolean } | 'too-many' | undefined {
+    const r = this.openRow(row)
+    if (!r || r.kind !== 'node') return undefined
+    const next = (r.jira ?? []).map((t) => ({ ...t }))
+    let changed = false
+    for (const t of tickets) {
+      const i = next.findIndex((x) => x.key === t.key)
+      if (i >= 0) {
+        if (!sameJiraTicket(next[i], t)) {
+          next[i] = { ...t, at }
+          changed = true
+        }
+      } else {
+        next.push({ ...t, at })
+        changed = true
+      }
+    }
+    if (next.length > INTEGRATION_JIRA_MAX) return 'too-many'
+    if (!changed) return { jira: next, changed }
+    r.jira = next
+    this.save()
+    return { jira: next.map((t) => ({ ...t })), changed }
+  }
+
+  /** Removes one declared Jira ticket (idempotent). Undefined when there is no open node row. */
+  undeclareJira(row: IntegrationNodeRecord, key: string): { jira: JiraTicketLink[]; changed: boolean } | undefined {
+    const r = this.openRow(row)
+    if (!r || r.kind !== 'node') return undefined
+    const current = r.jira ?? []
+    const next = current.filter((t) => t.key !== key)
+    if (next.length === current.length) return { jira: next.map((t) => ({ ...t })), changed: false }
+    if (next.length) r.jira = next
+    else delete r.jira
+    this.save()
+    return { jira: next.map((t) => ({ ...t })), changed: true }
+  }
+
+  /** Every open node row that declares Jira tickets, for the boards (all projects). */
+  jiraLinks(): JiraCardLinks[] {
+    return this.rows
+      .filter((r) => r.kind === 'node' && r.state === 'open' && r.jira?.length)
+      .map((r) => ({ projectId: r.projectId, nodeId: r.nodeId, principal: r.principal, tickets: r.jira!.map((t) => ({ ...t })) }))
   }
 
   recordOutcome(entry: PersistedOutboxEntry): void {

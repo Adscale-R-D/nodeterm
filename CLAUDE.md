@@ -10457,6 +10457,18 @@ Rules a refactor must not undo:
   principal for the project is that consent, and it never reaches the repository's issues or PR list.
   The renderer asks through `useDeclaredPullBoard` (30 s poll while visible) into
   `githubIssues.declaredBoards`; auto-move stays off there.
+- **It can DECLARE a card's Jira tickets** (`open.jira`, `link-jira`, `unlink-jira`,
+  `src/shared/integration-jira.ts`). nodeterm holds no Jira credential and reads nothing from Jira:
+  the principal pushes each ticket's status, status group and summary, and pushes again on a change
+  (the chip's tooltip says when it was received). Rules: (1) stored on the ledger row (`jira`),
+  never in `project.json`; a closed key drops it, a moved grant carries it, emptying the PR set does
+  not touch it (`withoutPulls` vs `withoutLinks`); (2) the link is BUILT by `jiraTicketUrl` from a
+  validated https origin and a strict key, on the host and again in the renderer — never a URL the
+  caller sent; status and summary are one cleaned line; (3) it reaches the browser on its own
+  host-only channel `integration-jira:list` / `:changed` (the ledger's `setOnChange`, broadcast only
+  when the list changed), registered by BOTH shells (the desktop answers `[]`), relay tabs inert;
+  (4) `JiraTicketChips` reads it by node id (the project picks among duplicates) on the session card
+  (both boards) and the card modal. `server/integration-jira-wiring.test.ts` pins each hop.
 
 ## Hosted team relay (Server Edition as a relay host)
 

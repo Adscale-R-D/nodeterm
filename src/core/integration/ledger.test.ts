@@ -145,3 +145,76 @@ describe('IntegrationLedger', () => {
     expect(sanitizeNodeRecord({ ...row(), agentSessionId: '$(rm -rf /)' })).not.toHaveProperty('agentSessionId')
   })
 })
+
+describe('IntegrationLedger — declared Jira tickets', () => {
+  const SITE = 'https://ad-scale.atlassian.net'
+  const t = (key: string, status?: string) => ({ key, site: SITE, ...(status ? { status } : {}) })
+
+  it('upserts by ticket key, keeps order, and says whether anything changed', () => {
+    let changes = 0
+    const l = new IntegrationLedger(undefined, undefined, () => 7)
+    l.setOnChange(() => changes++)
+    l.add(row())
+    const r = l.openNode('sink', 'APP-1')!
+    changes = 0
+    expect(l.declareJira(r, [t('A3-1', 'Open'), t('A3-2')], 10)).toEqual({
+      jira: [{ ...t('A3-1', 'Open'), at: 10 }, { ...t('A3-2'), at: 10 }],
+      changed: true
+    })
+    expect(changes).toBe(1)
+    // The same content again: nothing written, no change event, the old receipt time kept.
+    expect(l.declareJira(r, [t('A3-1', 'Open')], 20)).toMatchObject({ changed: false })
+    expect(changes).toBe(1)
+    // A status-only change is a change.
+    expect(l.declareJira(r, [t('A3-1', 'In Review')], 30)).toMatchObject({ changed: true })
+    expect(l.declaredJira(r)).toEqual([{ ...t('A3-1', 'In Review'), at: 30 }, { ...t('A3-2'), at: 10 }])
+    expect(l.undeclareJira(r, 'A3-2')).toEqual({ jira: [{ ...t('A3-1', 'In Review'), at: 30 }], changed: true })
+    expect(l.undeclareJira(r, 'A3-2')).toMatchObject({ changed: false })
+    expect(l.jiraLinks()).toEqual([{ projectId: 'project-1', nodeId: 'term-a', principal: 'sink', tickets: [{ ...t('A3-1', 'In Review'), at: 30 }] }])
+  })
+
+  it('refuses past the cap without changing anything', () => {
+    const l = new IntegrationLedger()
+    l.add(row())
+    const r = l.openNode('sink', 'APP-1')!
+    l.declareJira(r, Array.from({ length: 20 }, (_, i) => t(`A3-${i + 1}`)), 1)
+    expect(l.declareJira(r, [t('A3-99')], 2)).toBe('too-many')
+    expect(l.declaredJira(r)).toHaveLength(20)
+  })
+
+  it('closing a key drops its tickets; emptying its PRs does not', () => {
+    const l = new IntegrationLedger()
+    l.add(row())
+    const r = l.openNode('sink', 'APP-1')!
+    l.declarePulls(r, 'a/b', [5])
+    l.declareJira(r, [t('A3-1')], 1)
+    l.undeclarePull(r, 'a/b', 5)
+    expect(l.declaredJira(r)).toHaveLength(1)
+    l.close(r)
+    expect(r.jira).toBeUndefined()
+    expect(l.jiraLinks()).toEqual([])
+  })
+
+  it('a moved grant carries its tickets', () => {
+    const l = new IntegrationLedger()
+    expect(l.grant({ principal: 'sink', key: 'LANE-1', nodeId: 'term-a', projectId: 'project-1' })).toBe('granted')
+    l.declareJira(l.openNode('sink', 'LANE-1')!, [t('A3-1')], 1)
+    expect(l.grant({ principal: 'sink', key: 'LANE-1', nodeId: 'term-b', projectId: 'project-1' })).toBe('moved')
+    expect(l.jiraLinks()).toEqual([{ projectId: 'project-1', nodeId: 'term-b', principal: 'sink', tickets: [{ ...t('A3-1'), at: 1 }] }])
+  })
+
+  it('tickets survive a reload of the real file; hostile entries on disk are dropped, the row kept', () => {
+    const dir = testTmpDir('nt-jira-ledger-')
+    const a = openIntegrationLedger(dir)
+    a.ledger.add(row())
+    a.ledger.declareJira(a.ledger.openNode('sink', 'APP-1')!, [t('A3-1', 'Open')], 3)
+    a.dispose()
+    const b = openIntegrationLedger(dir)
+    expect(b.ledger.jiraLinks()).toEqual([{ projectId: 'project-1', nodeId: 'term-a', principal: 'sink', tickets: [{ ...t('A3-1', 'Open'), at: 3 }] }])
+    b.dispose()
+    expect(sanitizeNodeRecord({ ...row(), jira: [{ key: 'A3-1', site: 'javascript:x', at: 1 }, { ...t('A3-2'), at: 1 }] })).toMatchObject({
+      jira: [{ ...t('A3-2'), at: 1 }]
+    })
+    expect(sanitizeNodeRecord({ ...row(), jira: 'A3-1' })).not.toHaveProperty('jira')
+  })
+})

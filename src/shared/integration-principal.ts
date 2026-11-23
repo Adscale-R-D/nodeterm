@@ -26,7 +26,9 @@ export const INTEGRATION_VERBS = [
   'list',
   'comment',
   'link-pull',
-  'unlink-pull'
+  'unlink-pull',
+  'link-jira',
+  'unlink-jira'
 ] as const
 export type IntegrationVerb = (typeof INTEGRATION_VERBS)[number]
 
@@ -142,6 +144,10 @@ export interface IntegrationOpenRequest {
    *  key; an `existing` upsert UNIONS them into what is already declared. Ignored (not refused) on a
    *  project whose board has no GitHub repository. ≤ `INTEGRATION_PULLS_MAX`. */
   pulls?: number[]
+  /** Jira tickets this card is about, with the status and summary the principal read from Jira
+   *  (src/shared/integration-jira.ts). An `existing` upsert UPSERTS them by ticket key. ≤
+   *  `INTEGRATION_JIRA_MAX`. */
+  jira?: import('./integration-jira').JiraTicketInput[]
 }
 
 export interface IntegrationOpenResult {
@@ -162,6 +168,21 @@ export interface IntegrationOpenResult {
   /** `pulls` were not recorded: the project has no GitHub repository (no board repository and no
    *  GitHub git remote). */
   pullsIgnored?: 'no-repository'
+  /** Only when the request carried `jira`: the key's declared tickets after this call. */
+  jira?: import('./integration-jira').JiraTicketLink[]
+}
+
+/** `link-jira`: one ticket (upserted by key). `unlink-jira`: `ticket` is the ticket key. */
+export interface IntegrationJiraRequest {
+  key: string
+  ticket: import('./integration-jira').JiraTicketInput | string
+}
+
+export interface IntegrationJiraResult {
+  key: string
+  nodeId: string
+  /** The key's declared tickets after the call, in declaration order. */
+  jira: import('./integration-jira').JiraTicketLink[]
 }
 
 /** `link-pull` / `unlink-pull`. */
@@ -292,6 +313,8 @@ export interface IntegrationListRow {
   lastTurnError?: boolean
   /** Open rows: the pull requests declared on the card (`open.pulls`, `link-pull`), ascending. */
   pulls?: number[]
+  /** Open rows: the Jira tickets declared on the card (`open.jira`, `link-jira`). */
+  jira?: import('./integration-jira').JiraTicketLink[]
 }
 
 /** How a queued `send` ended. Pull-based: returned by `list`. */

@@ -740,6 +740,12 @@ export function buildStubApi(): Omit<
       onChanged: noopUnsub,
       reportDropped: noop
     },
+    // The Server Edition overrides it (`buildIntegrationJiraApi`); a relay tab keeps this: its cards
+    // are the host's, and the host's list is host-only.
+    integrationJira: {
+      list: async () => [],
+      onChanged: noopUnsub
+    },
     // Same split: the Server Edition overrides it (`buildStationOutcomeApi`); a relay tab keeps this.
     stationOutcome: {
       list: async () => [],

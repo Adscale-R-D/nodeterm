@@ -51,6 +51,7 @@ import { openIntegrationLedger } from '../core/integration/ledger'
 import { PrincipalRegistryReader } from '../core/integration/registry'
 import { saveUpload } from '../core/uploads'
 import { transcriptPresence } from '../core/transcript-reader'
+import type { JiraCardLinks } from '../shared/integration-jira'
 import { createIntegrationService, type IntegrationHttpReply, type IntegrationRequest } from './integration-service'
 import { createIntegrationGrantHandler } from './integration-grant'
 import { sendSettledEnvelope } from './settled-envelope'
@@ -109,6 +110,9 @@ export interface ServerCanvasControl {
   /** The pull requests principals declared on a project's cards (the GitHub service's
    *  `setDeclaredPulls` source). Read from the durable integration ledger. */
   declaredPulls(projectId: string): Array<{ nodeId: string; pulls: number[]; repository: string }>
+  /** The Jira tickets principals declared on cards, every project (the `integration-jira:list`
+   *  source). Changes are broadcast on `integration-jira:changed`. */
+  jiraLinks(): JiraCardLinks[]
   stop(): void
 }
 
@@ -302,6 +306,16 @@ export async function initServerCanvasControl(
     standDown: deps.ownsDurableState === false
   })
   messaging.principalOwnsTarget = (principal, nodeId, key) => integrationLedger.ledger.owns(principal, nodeId, key)
+  // Declared Jira tickets reach every board on any change to the node rows (a declaration, a closed
+  // key, a moved grant) — sent only when the list really changed.
+  let lastJira = JSON.stringify(integrationLedger.ledger.jiraLinks())
+  integrationLedger.ledger.setOnChange(() => {
+    const links = integrationLedger.ledger.jiraLinks()
+    const text = JSON.stringify(links)
+    if (text === lastJira) return
+    lastJira = text
+    platform().broadcast(IPC.integrationJiraChanged, links)
+  })
   const principalRegistry = new PrincipalRegistryReader(platform().userDataDir)
   const integration = createIntegrationService({
     registry: principalRegistry,
@@ -457,7 +471,9 @@ export async function initServerCanvasControl(
     stationHandovers,
     integration: (req) => integration.handle(req),
     declaredPulls: (projectId) => integrationLedger.ledger.declaredForProject(projectId),
+    jiraLinks: () => integrationLedger.ledger.jiraLinks(),
     stop: () => {
+      integrationLedger.ledger.setOnChange(undefined)
       factory.stop()
       queue.resetForTests()
       stationNotices.stop()

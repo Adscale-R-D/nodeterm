@@ -26,6 +26,7 @@ import {
   type IntegrationAgent,
   type IntegrationCloseResult,
   type IntegrationCommentResult,
+  type IntegrationJiraResult,
   type IntegrationListResult,
   type IntegrationListRow,
   type IntegrationOpenResult,
@@ -34,6 +35,13 @@ import {
   type IntegrationResumeResult,
   type IntegrationSendResult
 } from '../shared/integration-principal'
+import {
+  INTEGRATION_JIRA_MAX,
+  parseJiraKey,
+  parseJiraTicketInput,
+  parseJiraTicketInputs,
+  type JiraTicketInput
+} from '../shared/integration-jira'
 import { AGENT_CONFIG, FALLBACK_AGENT_COLOR, type BuiltinAgentId } from '../shared/agents/config'
 import { LAUNCH_PROMPT_FILE_PREFIX } from '../shared/launch-prompt'
 import { sanitizeChatText } from '../shared/mobile-chat'
@@ -186,6 +194,12 @@ export function createIntegrationService(deps: IntegrationServiceDeps): {
     return { pulls: after }
   }
 
+  const jiraShape = (lead: string): string =>
+    `${lead} { key: "ABC-123", site: "https://<your>.atlassian.net", status?: one line, category?: todo | in-progress | done, summary?: one line }`
+
+  const tooManyJira = (): IntegrationHttpReply =>
+    fail(409, 'too-many-jira', `a key declares at most ${INTEGRATION_JIRA_MAX} Jira tickets`)
+
   const unknownKey = (key: string): IntegrationHttpReply =>
     fail(404, 'unknown-key', `no open node for key ${key} (never opened, closed, or removed from the canvas)`)
 
@@ -212,18 +226,23 @@ export function createIntegrationService(deps: IntegrationServiceDeps): {
       return fail(400, 'bad-column', 'column: one printable line of at most 48 characters')
     const pulls = b.pulls === undefined ? undefined : parseDeclaredPulls(b.pulls)
     if (pulls === null) return fail(400, 'bad-pull', `pulls: at most ${INTEGRATION_PULLS_MAX} pull request numbers (positive integers)`)
+    const jira = b.jira === undefined ? undefined : parseJiraTicketInputs(b.jira)
+    if (jira === null) return fail(400, 'bad-jira', jiraShape(`jira: at most ${INTEGRATION_JIRA_MAX} tickets, each`))
 
     return withKeyLock(`${p.name}|${key}`, async () => {
       const existing = liveRow(p.name, key)
       if (existing) {
         const declared = pulls ? await declareOnOpen(existing, existing.projectId, pulls) : undefined
         if (declared === 'too-many') return tooManyPulls()
+        const tickets = jira ? deps.ledger.declareJira(existing, jira, now()) : undefined
+        if (tickets === 'too-many') return tooManyJira()
         const result: IntegrationOpenResult = {
           key,
           nodeId: existing.nodeId,
           projectId: existing.projectId,
           status: 'existing',
-          ...(declared ?? {})
+          ...(declared ?? {}),
+          ...(tickets ? { jira: tickets.jira } : {})
         }
         return ok(result)
       }
@@ -283,6 +302,8 @@ export function createIntegrationService(deps: IntegrationServiceDeps): {
       // A fresh key: at most INTEGRATION_PULLS_MAX by validation, so it cannot overflow.
       const ownRow = deps.ledger.openNode(p.name, key)
       const declared = pulls && ownRow ? await declareOnOpen(ownRow, projectId, pulls) : undefined
+      // A fresh key holds no tickets and `jira` is capped by validation, so it cannot overflow.
+      const tickets = jira && ownRow ? deps.ledger.declareJira(ownRow, jira, now()) : undefined
       const result: IntegrationOpenResult = {
         key,
         nodeId: opened.nodeId,
@@ -292,7 +313,8 @@ export function createIntegrationService(deps: IntegrationServiceDeps): {
         ...(opened.reason ? { reason: opened.reason } : {}),
         ...(opened.frameId ? { frameId: opened.frameId } : {}),
         ...(opened.column !== undefined ? { column: opened.column } : {}),
-        ...(declared && declared !== 'too-many' ? declared : {})
+        ...(declared && declared !== 'too-many' ? declared : {}),
+        ...(tickets && tickets !== 'too-many' ? { jira: tickets.jira } : {})
       }
       return ok(result)
     })
@@ -465,6 +487,35 @@ export function createIntegrationService(deps: IntegrationServiceDeps): {
     })
   }
 
+  /**
+   * `link-jira` / `unlink-jira`: add or update one DECLARED Jira ticket on the key's card, or remove
+   * one. Both are idempotent and answer the key's whole declared set. nodeterm never reads Jira: the
+   * status and summary are what the principal sends, and it sends them again when they change.
+   */
+  async function changeJira(p: PrincipalEntry, b: Record<string, unknown>, add: boolean): Promise<IntegrationHttpReply> {
+    if (!isSafePrincipalKey(b.key)) return fail(400, 'bad-key', 'key: required')
+    let ticket: JiraTicketInput | undefined
+    let ticketKey: string | null
+    if (add) {
+      ticket = parseJiraTicketInput(b.ticket) ?? undefined
+      if (!ticket) return fail(400, 'bad-jira', jiraShape('ticket:'))
+      ticketKey = ticket.key
+    } else {
+      ticketKey = parseJiraKey(b.ticket)
+      if (!ticketKey) return fail(400, 'bad-jira', 'ticket: a Jira ticket key, e.g. "ABC-123"')
+    }
+    const key = b.key
+    return withKeyLock(`${p.name}|${key}`, async () => {
+      const row = liveRow(p.name, key)
+      if (!row) return unknownKey(key)
+      const next = ticket ? deps.ledger.declareJira(row, [ticket], now()) : deps.ledger.undeclareJira(row, ticketKey!)
+      if (next === 'too-many') return tooManyJira()
+      if (next === undefined) return unknownKey(key)
+      const result: IntegrationJiraResult = { key, nodeId: row.nodeId, jira: next.jira }
+      return ok(result)
+    })
+  }
+
   async function list(p: PrincipalEntry, b: Record<string, unknown>): Promise<IntegrationHttpReply> {
     if (b.key !== undefined && !isSafePrincipalKey(b.key)) return fail(400, 'bad-key', 'key: a key, or omit it')
     if (b.includeClosed !== undefined && typeof b.includeClosed !== 'boolean') return fail(400, 'bad-include-closed', 'includeClosed: true or false')
@@ -499,6 +550,7 @@ export function createIntegrationService(deps: IntegrationServiceDeps): {
           if (deps.lastTurnErrored) base.lastTurnError = deps.lastTurnErrored(r.nodeId)
         }
         base.pulls = [...(r.pulls ?? [])]
+        base.jira = (r.jira ?? []).map((t) => ({ ...t }))
       }
       rows.push(base)
     }
@@ -534,6 +586,10 @@ export function createIntegrationService(deps: IntegrationServiceDeps): {
           return changePull(principal, body, true)
         case 'unlink-pull':
           return changePull(principal, body, false)
+        case 'link-jira':
+          return changeJira(principal, body, true)
+        case 'unlink-jira':
+          return changeJira(principal, body, false)
       }
     },
     onQueuedResult(req, outcome) {

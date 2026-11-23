@@ -12,6 +12,7 @@ import { PRIORITIES } from './CardMetaBar'
 import type { KanbanSession } from './KanbanView'
 import type { GitHubPullStatus, PullStatusFreshness } from '@shared/github-pull-status'
 import { PullRefChip } from './PullStatusBadges'
+import { JiraTicketChips } from './JiraTicketChips'
 import type { IssueRef } from '@shared/github-issue-ref'
 import { IssueRefChip } from '../IssueRefChip'
 import { IntegrationChip } from '../IntegrationChip'
@@ -243,6 +244,7 @@ export const SessionCard = memo(function SessionCard({
           ))}
         </div>
       )}
+      <JiraTicketChips nodeId={session.id} projectId={ports?.projectId} />
       {(labels.length > 0 || assignees.length > 0 || due !== undefined || priority !== undefined) && (
         <div className="kanban-card__metarow">
           {/* Labels share the priority/due/avatars row (left); the meta chips hug the right. */}

@@ -212,6 +212,7 @@ export function buildRelayApi(
     stationNotice: stub.stationNotice,
     boardDispatch: stub.boardDispatch,
     stationOutcome: stub.stationOutcome,
+    integrationJira: stub.integrationJira,
     stationHandover: stub.stationHandover,
     // Share with team drives THIS machine's ssh for one of THIS machine's SSH projects; a relay
     // tab's projects are the host's, so `...local` would aim a host project id at the local ssh

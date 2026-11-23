@@ -1055,6 +1055,14 @@ const api: NodeTerminalApi = {
       void ipcRenderer.invoke(IPC.stationNoticeDropped, nodeId, dropped).catch(() => undefined)
     }
   },
+  integrationJira: {
+    list: () => ipcRenderer.invoke(IPC.integrationJiraList),
+    onChanged: (cb) => {
+      const handler = (_e: unknown, links: Parameters<typeof cb>[0]) => cb(links)
+      ipcRenderer.on(IPC.integrationJiraChanged, handler)
+      return () => ipcRenderer.removeListener(IPC.integrationJiraChanged, handler)
+    }
+  },
   stationOutcome: {
     list: () => ipcRenderer.invoke(IPC.stationOutcomeList),
     onChanged: (cb) => {

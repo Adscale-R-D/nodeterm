@@ -578,3 +578,59 @@ describe('integration service — one node, several granted keys', () => {
     expect(outbox.find((e) => e.key === 'gh:1283')?.outcome).toBe('notPermitted')
   })
 })
+
+describe('integration service — declared Jira tickets', () => {
+  const SITE = 'https://ad-scale.atlassian.net'
+  const result = (r: { body: unknown }) => (r.body as { result: Record<string, unknown> }).result
+
+  it('open records tickets (also on a project with no GitHub repository) and an existing upsert updates them', async () => {
+    const { call, ledger, w } = setup()
+    const r = await call('open', { key: 'A3-1', agent: 'claude', project: 'p2', jira: [{ key: 'a3-1', site: SITE, status: 'Open', category: 'todo' }] })
+    expect(result(r)).toMatchObject({ status: 'created', jira: [{ key: 'A3-1', site: SITE, status: 'Open', category: 'todo', at: 5000 }] })
+    const again = await call('open', { key: 'A3-1', agent: 'claude', jira: [{ key: 'A3-1', site: SITE, status: 'In Review', category: 'in-progress' }] })
+    expect(result(again)).toMatchObject({ status: 'existing', jira: [{ key: 'A3-1', status: 'In Review', category: 'in-progress' }] })
+    expect(w.opens).toHaveLength(1)
+    expect(ledger.jiraLinks()).toHaveLength(1)
+  })
+
+  it('open refuses a malformed jira list before opening anything', async () => {
+    const { call, w } = setup()
+    for (const jira of ['A3-1', [{ key: 'A3-1' }], [{ key: 'A3-1', site: 'http://x.test' }], [{ key: 'A3-1', site: SITE, category: 'nope' }]]) {
+      expect((await call('open', { key: 'X', agent: 'claude', jira })).body).toMatchObject({ ok: false, error: 'bad-jira' })
+    }
+    expect(w.opens).toEqual([])
+  })
+
+  it('link-jira / unlink-jira: shapes, upsert and idempotency', async () => {
+    const { call } = setup()
+    await call('open', { key: 'K-1', agent: 'claude' })
+    const linked = await call('link-jira', { key: 'K-1', ticket: { key: 'A3-6926', site: SITE, status: 'Open', summary: 'Fix it' } })
+    expect(linked.body).toEqual({
+      ok: true,
+      result: { key: 'K-1', nodeId: 'term-1', jira: [{ key: 'A3-6926', site: SITE, status: 'Open', summary: 'Fix it', at: 5000 }] }
+    })
+    const updated = await call('link-jira', { key: 'K-1', ticket: { key: 'A3-6926', site: SITE, status: 'Done', category: 'done' } })
+    expect(result(updated).jira).toEqual([{ key: 'A3-6926', site: SITE, status: 'Done', category: 'done', at: 5000 }])
+    expect(result(await call('unlink-jira', { key: 'K-1', ticket: 'a3-6926' })).jira).toEqual([])
+    expect(result(await call('unlink-jira', { key: 'K-1', ticket: 'A3-6926' })).jira).toEqual([])
+    const list = result(await call('list', {})) as { rows: Array<{ jira?: unknown }> }
+    expect(list.rows[0].jira).toEqual([])
+  })
+
+  it('refusals: bad input, an unknown key, the cap', async () => {
+    const { call } = setup()
+    expect((await call('link-jira', { key: 'K-1', ticket: { key: 'A3-1', site: SITE } })).status).toBe(404)
+    await call('open', { key: 'K-1', agent: 'claude' })
+    expect((await call('link-jira', { key: 'K-1', ticket: { key: 'A3-1' } })).body).toMatchObject({ ok: false, error: 'bad-jira' })
+    expect((await call('unlink-jira', { key: 'K-1', ticket: 'nope' })).body).toMatchObject({ ok: false, error: 'bad-jira' })
+    for (let i = 1; i <= 20; i++) await call('link-jira', { key: 'K-1', ticket: { key: `A3-${i}`, site: SITE } })
+    expect((await call('link-jira', { key: 'K-1', ticket: { key: 'A3-21', site: SITE } })).body).toMatchObject({ ok: false, error: 'too-many-jira' })
+  })
+
+  it('closing the key drops its tickets', async () => {
+    const { call, ledger } = setup()
+    await call('open', { key: 'K-1', agent: 'claude', jira: [{ key: 'A3-1', site: SITE }] })
+    await call('close', { key: 'K-1' })
+    expect(ledger.jiraLinks()).toEqual([])
+  })
+})

@@ -5042,6 +5042,13 @@ export interface NodeTerminalApi {
    *  reported about its own task (durable across a restart) — what a `--after-success` wait reads. Desktop and
    *  Server Edition are real; a relay tab's stations belong to the host's core, so there it is inert
    *  (and its launch delivery is refused anyway). */
+  /** Jira tickets integration principals declared on kanban cards (src/shared/integration-jira.ts).
+   *  The Server Edition is real; the desktop has no integration principals and answers an empty
+   *  list; a relay tab's cards belong to the host, so there it is inert. */
+  integrationJira: {
+    list(): Promise<import('./integration-jira').JiraCardLinks[]>
+    onChanged(cb: (links: import('./integration-jira').JiraCardLinks[]) => void): () => void
+  }
   stationOutcome: {
     list(): Promise<import('./station-outcome').StationOutcomeRecord[]>
     onChanged(cb: (records: import('./station-outcome').StationOutcomeRecord[]) => void): () => void

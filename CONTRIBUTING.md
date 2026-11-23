@@ -1469,6 +1469,9 @@ being a node (`docs/integration-principal.md`). Before touching it:
   board only through `GitHubPullBoard.declared`. Add a new PR link source to `pullsForCard`
   (`src/shared/pull-card-links.ts`), not to a component: the card, the modal, auto-move and the `prs`
   verb must agree.
+- **Declared Jira tickets (`link-jira`) live on the ledger row too**, and the status is whatever the
+  principal pushed: nodeterm never reads Jira. Build the link with `jiraTicketUrl`
+  (`src/shared/integration-jira.ts`); never store or open a URL a caller sent.
 
 ## User-owned agent settings
 

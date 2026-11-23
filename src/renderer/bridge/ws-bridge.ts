@@ -97,6 +97,7 @@ import type { WhiteboardFile, WhiteboardSaveResult } from '../../shared/whiteboa
 import { fitsOneWsFrame } from '../../shared/ws-frame'
 import { buildStubApi, unsupported } from './stubs'
 import { sanitizeStationNotices } from '@shared/station-notice'
+import { sanitizeJiraCardLinks } from '@shared/integration-jira'
 import { sanitizeOutcomeRecords } from '@shared/station-outcome'
 import { sanitizeHandoverRecords } from '@shared/station-handover'
 import { mountPickerRoot, openDirectoryPicker } from './dialog-picker'
@@ -814,6 +815,18 @@ export function buildStationNoticeApi(
   }
 }
 
+/** The Server Edition's declared Jira tickets (src/shared/integration-jira.ts): the real bridge. */
+export function buildIntegrationJiraApi(client: RpcClient): Pick<NodeTerminalApi, 'integrationJira'> {
+  return {
+    integrationJira: {
+      list: () =>
+        (client.request(IPC.integrationJiraList) as Promise<unknown>).then(sanitizeJiraCardLinks, () => []),
+      onChanged: (cb) =>
+        client.subscribe(IPC.integrationJiraChanged, ((links: unknown) => cb(sanitizeJiraCardLinks(links))) as Listener)
+    }
+  }
+}
+
 /**
  * The Server Edition's station task outcomes — REAL, for the same reason as station notices: the
  * server's canvas-control runtime records `report-outcome` and honours `--after-success` headlessly,
@@ -1477,6 +1490,7 @@ export async function installWsBridge(): Promise<boolean> {
     ...buildAgentApi(client),
     ...buildStationNoticeApi(client),
     ...buildStationOutcomeApi(client),
+    ...buildIntegrationJiraApi(client),
     ...buildStationHandoverApi(client),
     ...buildCanvasApi(client),
     // Only in the BROWSER assembly, never the relay one: the shim path this returns is a path on

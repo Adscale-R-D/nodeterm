@@ -282,6 +282,10 @@ export const IPC = {
   stationOutcomeList: 'station-outcome:list',
   /** core → every renderer: the FULL current record list on each change, never a delta. */
   stationOutcomeChanged: 'station-outcome:changed',
+  /** Jira tickets integration principals declared on kanban cards (src/shared/integration-jira.ts):
+   *  the whole list (every project), and its change push. */
+  integrationJiraList: 'integration-jira:list',
+  integrationJiraChanged: 'integration-jira:changed',
   /** Stations with unfinished HANDED-OVER work (src/core/station-handover.ts): what plain `--after`
    *  reads so a `done` from before new work arrived does not release a dependent. invoke: the
    *  current list (StationHandoverRecord[]), for a renderer that booted after a push. */

@@ -82,3 +82,17 @@ describe('declared Jira tickets — validation', () => {
     ).toEqual([{ projectId: 'p1', nodeId: 'term-1', principal: 'sink', tickets: [{ key: 'A3-1', site: SITE, at: 1 }] }])
   })
 })
+
+describe('mergeJiraCards', () => {
+  const SITE2 = 'https://ad-scale.atlassian.net'
+  it("an integration's record beats the session's own for the same ticket, even when older", async () => {
+    const { mergeJiraCards } = await import('./integration-jira')
+    const sink = { projectId: 'p1', nodeId: 'term-1', principal: 'sink', tickets: [{ key: 'A3-1', site: SITE2, status: 'In Review', category: 'in-progress' as const, at: 10 }] }
+    const own = { projectId: 'p1', nodeId: 'term-1', tickets: [{ key: 'A3-1', site: SITE2, at: 50 }, { key: 'A3-2', site: SITE2, at: 60 }] }
+    for (const order of [[sink, own], [own, sink]]) {
+      const [card] = mergeJiraCards(order)
+      expect(card.tickets.find((t) => t.key === 'A3-1')).toMatchObject({ status: 'In Review', at: 10 })
+      expect(card.tickets.map((t) => t.key).sort()).toEqual(['A3-1', 'A3-2'])
+    }
+  })
+})

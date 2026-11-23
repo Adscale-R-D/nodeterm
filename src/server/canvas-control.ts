@@ -386,7 +386,8 @@ export async function initServerCanvasControl(
     agentIdOf: (nodeId) => mirrorEntry(nodeId)?.agentId,
     boardRepository: (projectId) =>
       deps.boardRepository?.(projectId) ?? Promise.resolve({ refused: 'no-repository' as const }),
-    defaultJiraSite: () => newestJiraSite(allJiraLinks()),
+    defaultJiraSite: (projectId) =>
+      newestJiraSite(integrationLedger.ledger.jiraLinks().filter((c) => c.projectId === projectId)),
     principalLinks: (nodeId, projectId) => ({
       pulls: integrationLedger.ledger
         .declaredForProject(projectId)
@@ -394,8 +395,10 @@ export async function initServerCanvasControl(
         .flatMap((r) => r.pulls),
       jira: integrationLedger.ledger.jiraLinks().find((c) => c.nodeId === nodeId && c.projectId === projectId)?.tickets ?? []
     }),
-    isLive: (nodeId, projectId) =>
-      deps.workspaceStore.persistedCanvases().some((c) => c.id === projectId && c.nodes.some((n) => n.id === nodeId)),
+    liveNodes: () => {
+      const byProject = new Map(deps.workspaceStore.persistedCanvases().map((c) => [c.id, new Set(c.nodes.map((n) => n.id))]))
+      return (nodeId, projectId) => byProject.get(projectId)?.has(nodeId) ?? true
+    },
     ...(deps.onDeclaredPullsChanged ? { onPullsChanged: deps.onDeclaredPullsChanged } : {})
   })
 

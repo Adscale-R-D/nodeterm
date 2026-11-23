@@ -226,7 +226,8 @@ function nodeLinkDocLines(): string[] {
     `- \`${linkJira} --ticket <KEY> [--site <https://….atlassian.net>] [--status <s>] [--category ${JIRA_CATEGORIES.join('|')}]`,
     `  [--summary <title>]\` — a Jira ticket (up to ${INTEGRATION_JIRA_MAX}). nodeterm never reads Jira: what you pass`,
     '  is what the chip shows, and linking it again REPLACES the whole record (repeat the status).',
-    '  `--site` defaults to the site of the newest ticket anyone declared on this server.',
+    '  `--site` defaults to the site of the newest ticket an integration declared in your project. If',
+    '  an integration declared the same ticket on your card, its record (read from Jira) is shown.',
     `- \`${unlinkJira} --ticket <KEY>\`; \`${links}\` — your card's links (and any an integration declared).`,
     '  Only your own card; every flag takes a value.'
   ]

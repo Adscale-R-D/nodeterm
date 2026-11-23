@@ -31,12 +31,15 @@ export interface NodeLinkVerbDeps {
   agentIdOf?(nodeId: string): string | undefined
   /** The GitHub repository PR numbers are recorded against (the board's, else the git remote). */
   boardRepository(projectId: string): Promise<{ repository: string } | { refused: 'no-repository' }>
-  /** The Jira site a `link-jira` without `--site` uses: the newest one any declared ticket names. */
-  defaultJiraSite(): string | undefined
+  /** The Jira site a `link-jira` without `--site` uses in this project: the newest one an
+   *  integration declared there (a session never sets another project's default). */
+  defaultJiraSite(projectId: string): string | undefined
   /** What integration principals declared on this card (shown by `links`, read-only). */
   principalLinks(nodeId: string, projectId: string): { pulls: number[]; jira: JiraTicketLink[] }
-  /** Is the node still on its project's canvas (`prune`)? */
-  isLive(nodeId: string, projectId: string): boolean
+  /** A snapshot of the saved canvases, taken once per call, answering "is this node still on its
+   *  project's canvas?" for `prune`. A project the snapshot does not hold (not loaded, unavailable)
+   *  must answer live: a failed read is never evidence that a node is gone. */
+  liveNodes(): (nodeId: string, projectId: string) => boolean
   onPullsChanged?(projectId: string): void
 }
 
@@ -76,7 +79,7 @@ export function createNodeLinkVerbHandler(deps: NodeLinkVerbDeps): (
     const who = caller(verb, nodeId)
     if ('ok' in who) return who
     const projectId = who.projectId
-    deps.store.prune(deps.isLive)
+    deps.store.prune(deps.liveNodes())
 
     if (verb === 'links') {
       const repository = await repositoryOf(projectId)
@@ -123,9 +126,9 @@ export function createNodeLinkVerbHandler(deps: NodeLinkVerbDeps): (
       const r = deps.store.unlinkJira(nodeId, projectId, key)
       return { ok: true, message: `${r.changed ? 'unlinked' : 'was not linked:'} ${key}`, result: { jira: r.jira } }
     }
-    const site = args.site ?? deps.defaultJiraSite()
+    const site = args.site ?? deps.defaultJiraSite(projectId)
     if (!site) {
-      return refuse('link-jira-no-site', '--site: the Jira site, e.g. --site https://<your>.atlassian.net (no ticket on this server names one yet)')
+      return refuse('link-jira-no-site', '--site: the Jira site, e.g. --site https://<your>.atlassian.net (no integration declared a ticket in this project yet)')
     }
     if (args.category !== undefined && !(JIRA_CATEGORIES as readonly string[]).includes(args.category)) {
       return refuse('link-jira-bad-category', `--category: one of ${JIRA_CATEGORIES.join(', ')}`)
@@ -140,6 +143,10 @@ export function createNodeLinkVerbHandler(deps: NodeLinkVerbDeps): (
     if (!ticket) return refuse('link-jira-bad-site', '--site: an https origin with no path, e.g. https://<your>.atlassian.net')
     const r = deps.store.linkJira(nodeId, projectId, ticket)
     if (r === 'too-many') return refuse('link-jira-too-many', `a card declares at most ${INTEGRATION_JIRA_MAX} Jira tickets; unlink some first`)
-    return { ok: true, message: `${r.changed ? 'linked' : 'already linked'} ${key} to this card`, result: { jira: r.jira } }
+    return {
+      ok: true,
+      message: `${r.changed ? 'linked' : 'already linked'} ${key} to this card (${ticket.site}/browse/${key})`,
+      result: { jira: r.jira }
+    }
   }
 }

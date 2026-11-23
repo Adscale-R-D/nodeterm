@@ -215,23 +215,29 @@ export function upsertJiraTickets(
 
 /**
  * ONE entry per (project, node) out of any number of sources (a node's principal keys, its own
- * links): a ticket declared twice appears once, as its most recently changed record. `principal` is
- * that of the most recently changed ticket; absent when the node's own link is the newest.
+ * links): a ticket declared twice appears once. An INTEGRATION's record always beats the session's
+ * own for the same ticket (the integration reads Jira; a session's `link-jira` may carry no status
+ * at all), and between two records of the same kind the most recently changed one wins. `principal`
+ * is that of the most recently changed winning ticket; absent when that one is the session's own.
  */
 export function mergeJiraCards(entries: readonly JiraCardLinks[]): JiraCardLinks[] {
-  const byCard = new Map<string, { card: JiraCardLinks; newest: number }>()
+  const byCard = new Map<string, { card: JiraCardLinks; newest: number; fromPrincipal: Set<string> }>()
   for (const e of entries) {
     const id = `${e.projectId}\n${e.nodeId}`
     let slot = byCard.get(id)
     if (!slot) {
-      slot = { card: { projectId: e.projectId, nodeId: e.nodeId, tickets: [] }, newest: -Infinity }
+      slot = { card: { projectId: e.projectId, nodeId: e.nodeId, tickets: [] }, newest: -Infinity, fromPrincipal: new Set() }
       byCard.set(id, slot)
     }
     for (const t of e.tickets) {
       const i = slot.card.tickets.findIndex((x) => x.key === t.key)
+      const held = i >= 0 && slot.fromPrincipal.has(t.key)
+      const wins =
+        i < 0 || (e.principal ? !held || t.at > slot.card.tickets[i].at : !held && t.at > slot.card.tickets[i].at)
+      if (!wins) continue
       if (i < 0) slot.card.tickets.push({ ...t })
-      else if (t.at > slot.card.tickets[i].at) slot.card.tickets[i] = { ...t }
-      else continue
+      else slot.card.tickets[i] = { ...t }
+      if (e.principal) slot.fromPrincipal.add(t.key)
       if (t.at >= slot.newest) {
         slot.newest = t.at
         if (e.principal) slot.card.principal = e.principal

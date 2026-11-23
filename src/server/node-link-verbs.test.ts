@@ -16,7 +16,7 @@ function setup(over: Partial<NodeLinkVerbDeps> = {}) {
     boardRepository: async () => ({ repository: 'Adscale-R-D/app_ms' }),
     defaultJiraSite: () => undefined,
     principalLinks: () => ({ pulls: [77], jira: [] }),
-    isLive: (nodeId, projectId) => canvas.get(projectId)?.includes(nodeId) ?? false,
+    liveNodes: () => (nodeId, projectId) => canvas.get(projectId)?.includes(nodeId) ?? true,
     onPullsChanged: (projectId) => changed.push(projectId),
     ...over
   })
@@ -39,7 +39,7 @@ describe('card link verbs', () => {
     expect(await handle('link-jira', 'term-a', { ticket: 'A3-1' })).toMatchObject({ ok: false, error: 'link-jira-no-site' })
     const r = await handle('link-jira', 'term-a', { ticket: 'a3-1', site: SITE, status: 'In Review', category: 'in-progress', summary: 'Fix it' })
     expect(r).toMatchObject({ ok: true, result: { jira: [{ key: 'A3-1', site: SITE, status: 'In Review', category: 'in-progress', summary: 'Fix it', at: 9 }] } })
-    const withDefault = setup({ defaultJiraSite: () => SITE })
+    const withDefault = setup({ defaultJiraSite: (projectId) => (projectId === 'p1' ? SITE : undefined) })
     expect(await withDefault.handle('link-jira', 'term-a', { ticket: 'A3-2' })).toMatchObject({ ok: true, result: { jira: [{ key: 'A3-2', site: SITE }] } })
   })
 
@@ -57,6 +57,16 @@ describe('card link verbs', () => {
     const listed = await handle('links', 'term-a', {})
     expect(listed).toMatchObject({ ok: true, result: { pulls: [5], jira: [], integrations: { pulls: [77] } } })
     expect(listed.ok && listed.message).toContain('not yours to unlink')
+  })
+
+  it('a project the canvas snapshot does not hold keeps its links (not loaded is not gone)', async () => {
+    const { handle, store, canvas } = setup()
+    store.linkJira('term-x', 'p9', { key: 'A3-9', site: SITE })
+    await handle('links', 'term-a', {})
+    expect(store.jiraLinks().map((c) => c.nodeId)).toEqual(['term-x'])
+    canvas.set('p9', [])
+    await handle('links', 'term-a', {})
+    expect(store.jiraLinks()).toEqual([])
   })
 
   it('a node no longer on its canvas loses its links on the next verb', async () => {

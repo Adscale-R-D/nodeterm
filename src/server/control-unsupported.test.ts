@@ -242,6 +242,27 @@ describe('the enabled Server Edition handler parses and dispatches the v1 surfac
     expect(a.assign).toHaveBeenCalledTimes(1)
   })
 
+  it('routes the card-link verbs to their action, after the shared parse', async () => {
+    const a = actions()
+    const handler = createServerEditionControlHandler(a)
+    for (const [verb, args] of [
+      ['link-pr', { pull: '1045' }],
+      ['unlink-pr', { pull: '1045' }],
+      ['link-jira', { ticket: 'A3-1' }],
+      ['unlink-jira', { ticket: 'A3-1' }],
+      ['links', {}]
+    ] as const) {
+      await expect(handler({ verb, nodeId: 'term-source', args, verified: true })).resolves.toMatchObject({ ok: true })
+      expect(a.nodeLinks).toHaveBeenLastCalledWith(verb, 'term-source', args)
+    }
+    // A missing required flag never reaches the action.
+    await expect(handler({ verb: 'link-pr', nodeId: 'term-source', args: {}, verified: true })).resolves.toEqual({
+      ok: false,
+      error: 'link-pr requires --pull <n>'
+    })
+    expect(a.nodeLinks).toHaveBeenCalledTimes(5)
+  })
+
   it('routes report-outcome to its action, after the shared parse', async () => {
     const a = actions()
     const handler = createServerEditionControlHandler(a)

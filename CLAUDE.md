@@ -10475,7 +10475,10 @@ Rules a refactor must not undo:
   verified-only, the caller's card only). Stored per node in `core/integration/node-links.ts`
   (`node-links.json`, never `project.json`), merged with the principals' declarations at the two
   board sources: `declaredPulls` concatenates both stores (`declaredPullsFor` unions), and the Jira
-  list is `mergeJiraCards` over both. Both stores share one upsert rule (`upsertJiraTickets`).
+  list is `mergeJiraCards` over both, where an INTEGRATION's record of a ticket always beats the
+  session's own (it reads Jira; a session's may carry no status). Both stores share one upsert rule
+  (`upsertJiraTickets`). The verb's prune treats a project missing from `persistedCanvases()` as
+  LIVE (not loaded is not gone), and `--site` defaults per project, from integration tickets only.
 
 ## Hosted team relay (Server Edition as a relay host)
 

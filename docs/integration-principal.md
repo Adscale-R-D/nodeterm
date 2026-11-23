@@ -344,8 +344,11 @@ They follow the same rules and render the same way as a principal's declarations
 ticket set per card, merged with the principals'). Stored per node in
 `<dataDir>/orchestration-state/node-links.json` (`src/core/integration/node-links.ts`), never in
 `project.json`; a node removed from its canvas loses them on the next verb. `link-jira` replaces the
-ticket's whole record, and `--site` defaults to the site of the newest ticket declared on this
-server. A session cannot unlink what an integration declared.
+ticket's whole record, and `--site` defaults to the site of the newest ticket an integration
+declared in the same project (a session never sets another project's default). When an integration
+declared the same ticket on the card, the integration's record is shown, whatever its age: it reads
+Jira, the session may have sent no status. Cleanup only drops links of nodes missing from a project
+the server has loaded; a project it could not read keeps its links. A session cannot unlink what an integration declared.
 
 ### `POST /integration/list`
 

@@ -101,7 +101,14 @@ const STORE_ANSWERED_VERBS: ReadonlySet<string> = new Set([
   // on the desktop. No canvas at either end.
   'integration-grant',
   'integration-revoke',
-  'integration-grants'
+  'integration-grants',
+  // A session's links on its own card: a durable-store write on the Server Edition, refused by name
+  // on the desktop. No canvas at either end.
+  'link-pr',
+  'unlink-pr',
+  'link-jira',
+  'unlink-jira',
+  'links'
 ])
 
 /**

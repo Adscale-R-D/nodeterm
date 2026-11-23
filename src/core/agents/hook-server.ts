@@ -322,7 +322,14 @@ export const requiresVerified: ReadonlySet<string> = new Set([
   // node's pane, so only a caller provably this node may make it (or list or revoke it).
   'integration-grant',
   'integration-revoke',
-  'integration-grants'
+  'integration-grants',
+  // A session declaring the PRs and Jira tickets it works on, on its OWN card: the card is resolved
+  // from the caller's node, so only a caller provably that node may write it.
+  'link-pr',
+  'unlink-pr',
+  'link-jira',
+  'unlink-jira',
+  'links'
 ])
 
 /**
@@ -353,6 +360,9 @@ export { REPORT_OUTCOME_CONTROL_REFUSAL }
 
 /** The flat refusal for an unverified integration grant verb (src/server/integration-grant.ts). */
 export const INTEGRATION_GRANT_CONTROL_REFUSAL = 'Integration grant refused.'
+
+/** The flat refusal for an unverified card-link verb (src/server/node-link-verbs.ts). */
+export const NODE_LINK_CONTROL_REFUSAL = 'Card link refused.'
 
 /** The flat refusal for an unverified `issues` / `prs` read (core/github/control-read.ts). */
 export const GITHUB_READ_CONTROL_REFUSAL = 'GitHub lane read refused.'
@@ -385,6 +395,9 @@ export function verifiedRefusalFor(verb: string): string {
   if (verb === 'report-outcome') return REPORT_OUTCOME_CONTROL_REFUSAL
   if (verb === 'issues' || verb === 'prs') return GITHUB_READ_CONTROL_REFUSAL
   if (verb.startsWith('integration-')) return INTEGRATION_GRANT_CONTROL_REFUSAL
+  if (verb === 'link-pr' || verb === 'unlink-pr' || verb === 'link-jira' || verb === 'unlink-jira' || verb === 'links') {
+    return NODE_LINK_CONTROL_REFUSAL
+  }
   return MESSAGING_CONTROL_REFUSAL
 }
 

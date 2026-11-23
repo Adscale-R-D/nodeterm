@@ -42,8 +42,9 @@ export type JiraTicketInput = Omit<JiraTicketLink, 'at'>
 export interface JiraCardLinks {
   projectId: string
   nodeId: string
-  /** The principal that declared them (shown in the tooltip). */
-  principal: string
+  /** The principal that last changed a ticket here (shown in the tooltip). Absent: the session
+   *  declared them itself (`link-jira` on the canvas-control shim). */
+  principal?: string
   tickets: JiraTicketLink[]
 }
 
@@ -169,9 +170,11 @@ export function sanitizeJiraCardLinks(raw: unknown): JiraCardLinks[] {
     const e = r as Record<string, unknown>
     if (typeof e.projectId !== 'string' || !PROJECT_ID_RE.test(e.projectId)) continue
     if (typeof e.nodeId !== 'string' || !NODE_ID_RE.test(e.nodeId)) continue
-    if (typeof e.principal !== 'string' || !PRINCIPAL_RE.test(e.principal)) continue
+    if (e.principal !== undefined && (typeof e.principal !== 'string' || !PRINCIPAL_RE.test(e.principal))) continue
     const tickets = sanitizeJiraTicketLinks(e.tickets, JIRA_CARD_TICKETS_MAX)
-    if (tickets.length) out.push({ projectId: e.projectId, nodeId: e.nodeId, principal: e.principal, tickets })
+    if (tickets.length) {
+      out.push({ projectId: e.projectId, nodeId: e.nodeId, ...(typeof e.principal === 'string' ? { principal: e.principal } : {}), tickets })
+    }
   }
   return out
 }
@@ -181,4 +184,67 @@ export function sameJiraTicket(a: JiraTicketInput, b: JiraTicketInput): boolean 
   return (
     a.key === b.key && a.site === b.site && a.status === b.status && a.category === b.category && a.summary === b.summary
   )
+}
+
+/**
+ * Upserts tickets into a declared set by ticket key: a known ticket whose record differs is replaced
+ * WHOLE (a field left out is cleared) and stamped `at`, a new one is appended. `changed` is false when
+ * every ticket said the same as before. The one rule, for principal rows and a node's own links.
+ */
+export function upsertJiraTickets(
+  current: readonly JiraTicketLink[],
+  tickets: readonly JiraTicketInput[],
+  at: number
+): { jira: JiraTicketLink[]; changed: boolean } {
+  const next = current.map((t) => ({ ...t }))
+  let changed = false
+  for (const t of tickets) {
+    const i = next.findIndex((x) => x.key === t.key)
+    if (i >= 0) {
+      if (!sameJiraTicket(next[i], t)) {
+        next[i] = { ...t, at }
+        changed = true
+      }
+    } else {
+      next.push({ ...t, at })
+      changed = true
+    }
+  }
+  return { jira: next, changed }
+}
+
+/**
+ * ONE entry per (project, node) out of any number of sources (a node's principal keys, its own
+ * links): a ticket declared twice appears once, as its most recently changed record. `principal` is
+ * that of the most recently changed ticket; absent when the node's own link is the newest.
+ */
+export function mergeJiraCards(entries: readonly JiraCardLinks[]): JiraCardLinks[] {
+  const byCard = new Map<string, { card: JiraCardLinks; newest: number }>()
+  for (const e of entries) {
+    const id = `${e.projectId}\n${e.nodeId}`
+    let slot = byCard.get(id)
+    if (!slot) {
+      slot = { card: { projectId: e.projectId, nodeId: e.nodeId, tickets: [] }, newest: -Infinity }
+      byCard.set(id, slot)
+    }
+    for (const t of e.tickets) {
+      const i = slot.card.tickets.findIndex((x) => x.key === t.key)
+      if (i < 0) slot.card.tickets.push({ ...t })
+      else if (t.at > slot.card.tickets[i].at) slot.card.tickets[i] = { ...t }
+      else continue
+      if (t.at >= slot.newest) {
+        slot.newest = t.at
+        if (e.principal) slot.card.principal = e.principal
+        else delete slot.card.principal
+      }
+    }
+  }
+  return [...byCard.values()].map(({ card }) => ({ ...card, tickets: card.tickets.slice(0, JIRA_CARD_TICKETS_MAX) }))
+}
+
+/** The most recently used Jira site among declared tickets (a `link-jira` without `--site`). */
+export function newestJiraSite(entries: readonly JiraCardLinks[]): string | undefined {
+  let best: JiraTicketLink | undefined
+  for (const e of entries) for (const t of e.tickets) if (!best || t.at > best.at) best = t
+  return best?.site
 }

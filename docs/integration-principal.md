@@ -325,6 +325,28 @@ under "Jira".
   channel (`integration-jira:list` / `:changed`), pushed on every change and read again when the page
   comes back into view.
 
+### Links a session declares itself
+
+An agent node can declare the PRs and Jira tickets IT works on, on its own card, with no principal
+involved (canvas-control shim verbs, Server Edition only; the desktop refuses them by name;
+verified-only):
+
+```sh
+sh "$SHIM" link-pr --pull 1045          # a PR in this project's GitHub repository
+sh "$SHIM" unlink-pr --pull 1045
+sh "$SHIM" link-jira --ticket A3-6926 [--site https://ad-scale.atlassian.net] \
+    [--status "In Review"] [--category todo|in-progress|done] [--summary "…"]
+sh "$SHIM" unlink-jira --ticket A3-6926
+sh "$SHIM" links                        # this card's own links, and any an integration declared
+```
+
+They follow the same rules and render the same way as a principal's declarations (one PR and
+ticket set per card, merged with the principals'). Stored per node in
+`<dataDir>/orchestration-state/node-links.json` (`src/core/integration/node-links.ts`), never in
+`project.json`; a node removed from its canvas loses them on the next verb. `link-jira` replaces the
+ticket's whole record, and `--site` defaults to the site of the newest ticket declared on this
+server. A session cannot unlink what an integration declared.
+
 ### `POST /integration/list`
 
 ```ts
@@ -443,6 +465,8 @@ same data dir stands down, like the other orchestration facts).
 | `src/server/headless-node-factory.ts` | `principalOpen` / `principalResume` / `principalClose` |
 | `src/server/integration-service.ts` | authentication, validation, the ten verbs |
 | `src/shared/integration-jira.ts` | declared Jira tickets: validation, the link builder |
+| `src/core/integration/node-links.ts` | a session's own card links (`link-pr`, `link-jira`) |
+| `src/server/node-link-verbs.ts` | the shim verbs `link-pr` / `unlink-pr` / `link-jira` / `unlink-jira` / `links` |
 | `src/core/integration/jira-links-ipc.ts` | the boards' `integration-jira:list` read (both shells) |
 | `src/renderer/components/kanban/JiraTicketChips.tsx` | the Jira chips (card and card modal) |
 | `src/core/github/service.ts` | `setDeclaredPulls`, `declaredPullsChanged`, `readPullBoard` (single-PR reads) |

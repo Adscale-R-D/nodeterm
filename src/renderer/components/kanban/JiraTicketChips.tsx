@@ -23,7 +23,7 @@ export function JiraTicketChip({ ticket, principal }: { ticket: JiraTicketLink; 
   const title = [
     [ticket.key, status].filter(Boolean).join(' · '),
     ticket.summary,
-    [changedAt(ticket.at), principal ? `from ${principal}` : ''].filter(Boolean).join(', '),
+    [changedAt(ticket.at), principal ? `from ${principal}` : 'declared by the session'].filter(Boolean).join(', '),
     url ? 'Open in Jira' : undefined
   ]
     .filter(Boolean)

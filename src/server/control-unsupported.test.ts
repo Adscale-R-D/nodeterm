@@ -217,6 +217,7 @@ describe('the enabled Server Edition handler parses and dispatches the v1 surfac
     reportOutcome: vi.fn(async () => ({ ok: true as const, message: 'recorded' })),
     githubRead: vi.fn(async () => ({ ok: true as const, message: 'lane' })),
     integrationGrant: vi.fn(async () => ({ ok: true as const, message: 'granted' })),
+    nodeLinks: vi.fn(async () => ({ ok: true as const, message: 'linked' })),
     board: vi.fn(async () => ({ ok: true as const, message: 'board' })),
     assign: vi.fn(async () => ({ ok: true as const, message: 'assigned' })),
     deliver: vi.fn(async () => ({ ok: true as const, message: 'queued' }))
@@ -571,6 +572,7 @@ describe('the enabled Server Edition handler, behind the request ledger', () => 
       run: vi.fn(),
       reportOutcome: vi.fn(),
       integrationGrant: vi.fn(),
+      nodeLinks: vi.fn(),
       githubRead: vi.fn(),
       board: vi.fn(),
       assign: vi.fn(),

@@ -1,6 +1,6 @@
 import { registerUpdatePrepIpc } from './update-prep'
 import { registerIntegrationJiraIpc } from '../core/integration/jira-links-ipc'
-import { INTEGRATION_GRANT_VERBS } from '../shared/integration-principal'
+import { INTEGRATION_GRANT_VERBS, NODE_LINK_VERBS } from '../shared/integration-principal'
 import { installOpenLinks } from './open-link-wiring'
 import { nodetermUrlFromArgv } from '../shared/open-link'
 import { createRemoteContextEnsure } from '../core/remote-context-ensure'
@@ -4614,6 +4614,11 @@ app.whenReady().then(async () => {
     // no ledger here to grant a node to. A permanent, named refusal — never a forward.
     if ((INTEGRATION_GRANT_VERBS as readonly string[]).includes(verb)) {
       const msg = `${verb}-unsupported: integration principals are a nodeterm Server Edition feature; this desktop has none. Do not retry.`
+      return { ok: false, error: msg, message: msg }
+    }
+    // Card links are kept by the Server Edition's link store; the desktop board does not read them.
+    if ((NODE_LINK_VERBS as readonly string[]).includes(verb)) {
+      const msg = `${verb}-unsupported: card links (link-pr, link-jira) are a nodeterm Server Edition feature. Do not retry.`
       return { ok: false, error: msg, message: msg }
     }
     // A station's report about ITSELF: recorded in main's store, board-logged on its own card, and

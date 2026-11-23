@@ -51,7 +51,9 @@ import { openIntegrationLedger } from '../core/integration/ledger'
 import { PrincipalRegistryReader } from '../core/integration/registry'
 import { saveUpload } from '../core/uploads'
 import { transcriptPresence } from '../core/transcript-reader'
-import type { JiraCardLinks } from '../shared/integration-jira'
+import { mergeJiraCards, newestJiraSite, type JiraCardLinks } from '../shared/integration-jira'
+import { openNodeLinkStore } from '../core/integration/node-links'
+import { createNodeLinkVerbHandler } from './node-link-verbs'
 import { createIntegrationService, type IntegrationHttpReply, type IntegrationRequest } from './integration-service'
 import { createIntegrationGrantHandler } from './integration-grant'
 import { sendSettledEnvelope } from './settled-envelope'
@@ -306,16 +308,23 @@ export async function initServerCanvasControl(
     standDown: deps.ownsDurableState === false
   })
   messaging.principalOwnsTarget = (principal, nodeId, key) => integrationLedger.ledger.owns(principal, nodeId, key)
-  // Declared Jira tickets reach every board on any change to the node rows (a declaration, a closed
+  // A session's own card links (`link-pr`, `link-jira`; src/server/node-link-verbs.ts).
+  const nodeLinks = openNodeLinkStore(platform().userDataDir, { standDown: deps.ownsDurableState === false })
+  // Every card's Jira tickets: the principals' (per key, merged per node) and the sessions' own.
+  const allJiraLinks = (): JiraCardLinks[] =>
+    mergeJiraCards([...integrationLedger.ledger.jiraLinks(), ...nodeLinks.store.jiraLinks()])
+  // Declared Jira tickets reach every board on any change to either store (a declaration, a closed
   // key, a moved grant) — sent only when the list really changed.
-  let lastJira = JSON.stringify(integrationLedger.ledger.jiraLinks())
-  integrationLedger.ledger.setOnChange(() => {
-    const links = integrationLedger.ledger.jiraLinks()
+  let lastJira = JSON.stringify(allJiraLinks())
+  const jiraChanged = (): void => {
+    const links = allJiraLinks()
     const text = JSON.stringify(links)
     if (text === lastJira) return
     lastJira = text
     platform().broadcast(IPC.integrationJiraChanged, links)
-  })
+  }
+  integrationLedger.ledger.setOnChange(jiraChanged)
+  nodeLinks.store.setOnChange(jiraChanged)
   const principalRegistry = new PrincipalRegistryReader(platform().userDataDir)
   const integration = createIntegrationService({
     registry: principalRegistry,
@@ -367,6 +376,29 @@ export async function initServerCanvasControl(
     agentIdOf: (nodeId) => mirrorEntry(nodeId)?.agentId
   })
 
+  const nodeLinkHandler = createNodeLinkVerbHandler({
+    store: nodeLinks.store,
+    placements: (nodeId) =>
+      deps.workspaceStore.persistedCanvases().flatMap((c) => {
+        const node = c.nodes.find((n) => n.id === nodeId)
+        return node ? [{ projectId: c.id, ...(node.agentId ? { agentId: node.agentId } : {}) }] : []
+      }),
+    agentIdOf: (nodeId) => mirrorEntry(nodeId)?.agentId,
+    boardRepository: (projectId) =>
+      deps.boardRepository?.(projectId) ?? Promise.resolve({ refused: 'no-repository' as const }),
+    defaultJiraSite: () => newestJiraSite(allJiraLinks()),
+    principalLinks: (nodeId, projectId) => ({
+      pulls: integrationLedger.ledger
+        .declaredForProject(projectId)
+        .filter((r) => r.nodeId === nodeId)
+        .flatMap((r) => r.pulls),
+      jira: integrationLedger.ledger.jiraLinks().find((c) => c.nodeId === nodeId && c.projectId === projectId)?.tickets ?? []
+    }),
+    isLive: (nodeId, projectId) =>
+      deps.workspaceStore.persistedCanvases().some((c) => c.id === projectId && c.nodes.some((n) => n.id === nodeId)),
+    ...(deps.onDeclaredPullsChanged ? { onPullsChanged: deps.onDeclaredPullsChanged } : {})
+  })
+
   const actions: ServerEditionControlActions = {
     openProject: (sourceNodeId, args, verified) =>
       factory.openProject(sourceNodeId, args, verified),
@@ -402,6 +434,7 @@ export async function initServerCanvasControl(
     // The board's GitHub lane, read-only, from the GitHub service's cache — the same core module the
     // desktop answers with. Own project only: this edition keeps no `open-project` grant ledger.
     integrationGrant: async (verb, sourceNodeId, args) => grantHandler(verb, sourceNodeId, args),
+    nodeLinks: (verb, sourceNodeId, args) => nodeLinkHandler(verb, sourceNodeId, args),
     githubRead: async (verb, sourceNodeId, args) => {
       const read = deps.githubRead
       if (!read) {
@@ -470,10 +503,15 @@ export async function initServerCanvasControl(
     stationOutcomes,
     stationHandovers,
     integration: (req) => integration.handle(req),
-    declaredPulls: (projectId) => integrationLedger.ledger.declaredForProject(projectId),
-    jiraLinks: () => integrationLedger.ledger.jiraLinks(),
+    declaredPulls: (projectId) => [
+      ...integrationLedger.ledger.declaredForProject(projectId),
+      ...nodeLinks.store.declaredForProject(projectId)
+    ],
+    jiraLinks: allJiraLinks,
     stop: () => {
       integrationLedger.ledger.setOnChange(undefined)
+      nodeLinks.store.setOnChange(undefined)
+      nodeLinks.dispose()
       factory.stop()
       queue.resetForTests()
       stationNotices.stop()

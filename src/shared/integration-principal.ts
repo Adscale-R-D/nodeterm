@@ -41,6 +41,12 @@ export function isIntegrationVerb(v: string): v is IntegrationVerb {
 export const INTEGRATION_GRANT_VERBS = ['integration-grant', 'integration-revoke', 'integration-grants'] as const
 export type IntegrationGrantVerb = (typeof INTEGRATION_GRANT_VERBS)[number]
 
+/** The CANVAS-CONTROL verbs a session uses to declare the pull requests and Jira tickets it works on,
+ *  on its OWN card (src/server/node-link-verbs.ts). Node-authenticated, verified-only, Server Edition
+ *  only. */
+export const NODE_LINK_VERBS = ['link-pr', 'unlink-pr', 'link-jira', 'unlink-jira', 'links'] as const
+export type NodeLinkVerb = (typeof NODE_LINK_VERBS)[number]
+
 /** The agents a principal may open: exactly the Server Edition's own open allowlist. */
 export const INTEGRATION_AGENTS = ['claude', 'codex', 'gemini'] as const
 export type IntegrationAgent = (typeof INTEGRATION_AGENTS)[number]

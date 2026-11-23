@@ -2,7 +2,9 @@ import { LINK_ENDPOINT_NOT_FOUND } from '../shared/canvas-link'
 // Pure core for agent canvas control: the verb model, request validation, and the standalone
 // CLI source. No electron imports, so this module + CONTROL_CLI_SCRIPT are unit-testable.
 // Electron/ipc/server wiring lives in canvas-control.ts + index.ts + hook-server.ts.
-import { INTEGRATION_GRANT_VERBS } from '../shared/integration-principal'
+import { INTEGRATION_GRANT_VERBS, NODE_LINK_VERBS } from '../shared/integration-principal'
+import { INTEGRATION_JIRA_MAX, JIRA_CATEGORIES } from '../shared/integration-jira'
+import { INTEGRATION_PULLS_MAX } from '../shared/integration-principal'
 import { HOOK_CURL_HEADERS_SH } from './agents/hook-curl-config-sh'
 import { CODEX_SANDBOX_HINT_SH } from './agents/hook-sandbox-hint-sh'
 import {
@@ -207,6 +209,26 @@ function integrationGrantDocLines(): string[] {
     `- \`${revoke} --principal <name> --key <key>\` — end your own grant (only the node that holds it can).`,
     `- \`${grants}\` — list your grants (principal and key).`,
     '  Every flag takes a value.'
+  ]
+}
+
+/**
+ * A session's own card links (src/server/node-link-verbs.ts). Names and bounds come from the modules
+ * that enforce them.
+ */
+function nodeLinkDocLines(): string[] {
+  const [linkPr, unlinkPr, linkJira, unlinkJira, links] = NODE_LINK_VERBS
+  return [
+    'Card links (nodeterm Server Edition only; the desktop refuses them by name). Say which pull',
+    'requests and Jira tickets YOUR session works on; they show as chips on your kanban card:',
+    `- \`${linkPr} --pull <n>\` / \`${unlinkPr} --pull <n>\` — a PR in this project's GitHub repository`,
+    `  (up to ${INTEGRATION_PULLS_MAX}); the card then shows its CI, review and merge state.`,
+    `- \`${linkJira} --ticket <KEY> [--site <https://….atlassian.net>] [--status <s>] [--category ${JIRA_CATEGORIES.join('|')}]`,
+    `  [--summary <title>]\` — a Jira ticket (up to ${INTEGRATION_JIRA_MAX}). nodeterm never reads Jira: what you pass`,
+    '  is what the chip shows, and linking it again REPLACES the whole record (repeat the status).',
+    '  `--site` defaults to the site of the newest ticket anyone declared on this server.',
+    `- \`${unlinkJira} --ticket <KEY>\`; \`${links}\` — your card's links (and any an integration declared).`,
+    '  Only your own card; every flag takes a value.'
   ]
 }
 
@@ -544,6 +566,11 @@ export type ControlVerb =
   | 'integration-grant'
   | 'integration-revoke'
   | 'integration-grants'
+  | 'link-pr'
+  | 'unlink-pr'
+  | 'link-jira'
+  | 'unlink-jira'
+  | 'links'
 
 export interface ControlCommand {
   verb: ControlVerb
@@ -616,7 +643,14 @@ const VERBS: ControlVerb[] = [
   // integration ledger; refused by name on the desktop (no principals there). Verified-only.
   'integration-grant',
   'integration-revoke',
-  'integration-grants'
+  'integration-grants',
+  // A session declares the PRs and Jira tickets it works on, on its OWN card
+  // (src/server/node-link-verbs.ts). Server Edition only; verified-only.
+  'link-pr',
+  'unlink-pr',
+  'link-jira',
+  'unlink-jira',
+  'links'
 ]
 
 /**
@@ -770,6 +804,8 @@ export function parseControlRequest(
   if ((v === 'integration-grant' || v === 'integration-revoke') && (!args.principal || !args.key)) {
     return { error: `${v} requires --principal <name> --key <key>` }
   }
+  if ((v === 'link-pr' || v === 'unlink-pr') && !args.pull) return { error: `${v} requires --pull <n>` }
+  if ((v === 'link-jira' || v === 'unlink-jira') && !args.ticket) return { error: `${v} requires --ticket <KEY>` }
   if (v === 'write' && !args.node) return { error: 'write requires --node <id>' }
   if (v === 'write' && !args.text) return { error: 'write requires --text' }
   if ((v === 'show-image' || v === 'show-video') && !args.path) {
@@ -1142,6 +1178,7 @@ export function buildCanvasControlInstructions(shimPath: string): string {
     '  Edition you may assign only cards you opened (the ownership rule above).',
     ...githubReadDocLines(),
     ...integrationGrantDocLines(),
+    ...nodeLinkDocLines(),
     ...settingsVerbDocLines(),
     ...reportIssueDocLines(),
     ...browserVerbDocLines(),
@@ -1792,6 +1829,7 @@ ${boardCommentGuidanceLines().map((l) => `  ${l}`).join('\n')}
 ${githubReadDocLines().join('\n')}
 
 ${integrationGrantDocLines().join('\n')}
+${nodeLinkDocLines().join('\n')}
 ${settingsVerbDocLines().join('\n')}
 ${reportIssueDocLines().join('\n')}
 ${browserVerbDocLines().join('\n')}

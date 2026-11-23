@@ -1471,7 +1471,9 @@ being a node (`docs/integration-principal.md`). Before touching it:
   verb must agree.
 - **Declared Jira tickets (`link-jira`) live on the ledger row too**, and the status is whatever the
   principal pushed: nodeterm never reads Jira. Build the link with `jiraTicketUrl`
-  (`src/shared/integration-jira.ts`); never store or open a URL a caller sent.
+  (`src/shared/integration-jira.ts`); never store or open a URL a caller sent. A session's own
+  links (`link-pr`, `link-jira` shim verbs) are a second store merged at the same two board sources:
+  add a new link kind to both, never to one.
 
 ## User-owned agent settings
 

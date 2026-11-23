@@ -201,11 +201,16 @@ describe('where the verbs sit in the routing tables', () => {
     // could read any project's GitHub lane (bound sessions, dispatch state); new verbs.
     // `integration-grant` / `-revoke` / `-grants`: a grant lets a local integration type into THIS
     // node's pane, so only a caller provably this node may make it; new verbs.
+    // `link-pr` / `unlink-pr` / `link-jira` / `unlink-jira` / `links`: the card is resolved from the
+    // CALLER's node, so only a caller provably that node may write it; new verbs.
     expect([...requiresVerified].sort()).toEqual([
       'integration-grant',
       'integration-grants',
       'integration-revoke',
       'issues',
+      'link-jira',
+      'link-pr',
+      'links',
       'notify',
       'open-project',
       'prs',
@@ -215,7 +220,9 @@ describe('where the verbs sit in the routing tables', () => {
       'run',
       'send',
       'settings',
-      'sticky'
+      'sticky',
+      'unlink-jira',
+      'unlink-pr'
     ])
   })
 

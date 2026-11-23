@@ -21,7 +21,13 @@ describe('declared pull links: the Server Edition wiring', () => {
     expect(integration).toMatch(/boardRepository:\s*\(projectId\)\s*=>\s*deps\.boardRepository/)
     expect(read('index.ts')).toMatch(/boardRepository:\s*\(projectId\)\s*=>\s*github\.controller\.boardRepository\(projectId\)/)
     expect(integration).toMatch(/onPullsChanged:\s*deps\.onDeclaredPullsChanged/)
-    expect(src).toMatch(/declaredPulls:\s*\(projectId\)\s*=>\s*integrationLedger\.ledger\.declaredForProject\(projectId\)/)
+    // Both declared sources: principals' keys and the sessions' own `link-pr`.
+    expect(src).toMatch(
+      /declaredPulls:\s*\(projectId\)\s*=>\s*\[\s*\.\.\.integrationLedger\.ledger\.declaredForProject\(projectId\),\s*\.\.\.nodeLinks\.store\.declaredForProject\(projectId\)\s*\]/
+    )
+    // A session's `link-pr` refreshes the boards through the same hook.
+    const links = src.slice(src.indexOf('createNodeLinkVerbHandler({'), src.indexOf('const actions'))
+    expect(links).toMatch(/onPullsChanged: deps\.onDeclaredPullsChanged/)
   })
   it('the principal creator check passes the KEY (a node may hold several grants; revoking one key must stop its sends)', () => {
     expect(read('canvas-control.ts')).toMatch(

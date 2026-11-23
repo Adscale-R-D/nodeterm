@@ -10470,6 +10470,12 @@ Rules a refactor must not undo:
   `jiraLinks()` merges a node's keys into ONE entry per (project, node), deduped by ticket key;
   (4) `JiraTicketChips` reads it by node id (the project picks among duplicates) on the session card
   (both boards) and the card modal. `server/integration-jira-wiring.test.ts` pins each hop.
+- **A SESSION can declare its own card's links** (shim verbs `link-pr`, `unlink-pr`, `link-jira`,
+  `unlink-jira`, `links`; `server/node-link-verbs.ts`, Server Edition only, desktop refuses by name,
+  verified-only, the caller's card only). Stored per node in `core/integration/node-links.ts`
+  (`node-links.json`, never `project.json`), merged with the principals' declarations at the two
+  board sources: `declaredPulls` concatenates both stores (`declaredPullsFor` unions), and the Jira
+  list is `mergeJiraCards` over both. Both stores share one upsert rule (`upsertJiraTickets`).
 
 ## Hosted team relay (Server Edition as a relay host)
 

@@ -8,8 +8,12 @@ const read = (p: string): string => readFileSync(join(__dirname, '..', p), 'utf8
 describe('declared Jira tickets — wiring', () => {
   it('the server broadcasts a changed list and serves the read', () => {
     const cc = read('server/canvas-control.ts')
-    expect(cc).toMatch(/ledger\.setOnChange\(\(\) => \{[\s\S]*?broadcast\(IPC\.integrationJiraChanged, links\)/)
-    expect(cc).toMatch(/jiraLinks: \(\) => integrationLedger\.ledger\.jiraLinks\(\)/)
+    expect(cc).toMatch(/const jiraChanged = \(\): void => \{[\s\S]*?broadcast\(IPC\.integrationJiraChanged, links\)/)
+    expect(cc).toMatch(/integrationLedger\.ledger\.setOnChange\(jiraChanged\)/)
+    expect(cc).toMatch(/nodeLinks\.store\.setOnChange\(jiraChanged\)/)
+    expect(cc).toMatch(/mergeJiraCards\(\[\.\.\.integrationLedger\.ledger\.jiraLinks\(\), \.\.\.nodeLinks\.store\.jiraLinks\(\)\]\)/)
+    expect(cc).toMatch(/jiraLinks: allJiraLinks,/)
+    expect(cc).toMatch(/nodeLinks: \(verb, sourceNodeId, args\) => nodeLinkHandler\(verb, sourceNodeId, args\)/)
     expect(read('server/index.ts')).toMatch(/registerIntegrationJiraIpc\(platform, \(\) => \(canvasControl \? \(\) => canvasControl!\.jiraLinks\(\) : null\)\)/)
   })
   it('the desktop answers an empty list, and the read is host-only', () => {

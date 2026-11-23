@@ -225,7 +225,8 @@ Part of the integration-principal fork work, not a separate patch row.
 (`open.jira`, `link-jira`, `unlink-jira`): the principal pushes each ticket's status and summary
 (nodeterm holds no Jira credential), stored on the ledger row, sent to the browser on a host-only
 `integration-jira:*` channel, drawn as key + status-dot chips on the card and in the card modal. Also
-part of the integration-principal fork work.
+part of the integration-principal fork work. A session can declare the same links on its OWN card
+through the shim (`link-pr`, `unlink-pr`, `link-jira`, `unlink-jira`, `links`; 2026-11-23).
 
 Plus one UI keep: **the frame context menu's "close group and its nodes"** (`closeGroupWithChildren`
 + `groupSubtreeIds`). Upstream deleted the frame's `×` rather than implementing it, so this is the

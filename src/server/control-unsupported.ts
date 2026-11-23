@@ -114,6 +114,12 @@ export interface ServerEditionControlActions {
     sourceNodeId: string,
     args: Record<string, string>
   ): Promise<ServerControlReply>
+  /** A session's own card links (src/server/node-link-verbs.ts). The CALLER's card only. */
+  nodeLinks(
+    verb: 'link-pr' | 'unlink-pr' | 'link-jira' | 'unlink-jira' | 'links',
+    sourceNodeId: string,
+    args: Record<string, string>
+  ): Promise<ServerControlReply>
   deliver(input: {
     verb: 'send' | 'reply' | 'notify'
     sourceNodeId: string
@@ -144,7 +150,12 @@ const SERVER_V1_VERBS: ReadonlySet<string> = new Set([
   'prs',
   'integration-grant',
   'integration-revoke',
-  'integration-grants'
+  'integration-grants',
+  'link-pr',
+  'unlink-pr',
+  'link-jira',
+  'unlink-jira',
+  'links'
 ])
 
 /** A permanent, verb-specific refusal used only while canvas control itself is enabled. */
@@ -224,6 +235,12 @@ export function createServerEditionControlHandler(actions: ServerEditionControlA
       case 'integration-revoke':
       case 'integration-grants':
         return actions.integrationGrant(command.verb, nodeId, command.args)
+      case 'link-pr':
+      case 'unlink-pr':
+      case 'link-jira':
+      case 'unlink-jira':
+      case 'links':
+        return actions.nodeLinks(command.verb, nodeId, command.args)
       case 'send':
       case 'reply':
       case 'notify':

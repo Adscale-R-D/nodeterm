@@ -27,9 +27,9 @@ import {
 } from '../../shared/integration-principal'
 import {
   INTEGRATION_JIRA_MAX,
-  JIRA_CARD_TICKETS_MAX,
-  sameJiraTicket,
+  mergeJiraCards,
   sanitizeJiraTicketLinks,
+  upsertJiraTickets,
   type JiraCardLinks,
   type JiraTicketInput,
   type JiraTicketLink
@@ -461,20 +461,7 @@ export class IntegrationLedger {
   ): { jira: JiraTicketLink[]; changed: boolean } | 'too-many' | undefined {
     const r = this.openRow(row)
     if (!r || r.kind !== 'node') return undefined
-    const next = (r.jira ?? []).map((t) => ({ ...t }))
-    let changed = false
-    for (const t of tickets) {
-      const i = next.findIndex((x) => x.key === t.key)
-      if (i >= 0) {
-        if (!sameJiraTicket(next[i], t)) {
-          next[i] = { ...t, at }
-          changed = true
-        }
-      } else {
-        next.push({ ...t, at })
-        changed = true
-      }
-    }
+    const { jira: next, changed } = upsertJiraTickets(r.jira ?? [], tickets, at)
     if (next.length > INTEGRATION_JIRA_MAX) return 'too-many'
     if (!changed) return { jira: next, changed }
     r.jira = next
@@ -495,29 +482,14 @@ export class IntegrationLedger {
     return { jira: next.map((t) => ({ ...t })), changed: true }
   }
 
-  /**
-   * The declared Jira tickets of every card, for the boards (all projects): ONE entry per (project,
-   * node). A node may hold several keys (grants), so their tickets are merged, a ticket declared on
-   * two keys appearing once (its most recently changed record). `principal` is the one that changed a
-   * ticket last.
-   */
+  /** The declared Jira tickets of every card (all projects), ONE entry per (project, node): a node
+   *  may hold several keys (grants), merged by `mergeJiraCards`. */
   jiraLinks(): JiraCardLinks[] {
-    const byCard = new Map<string, JiraCardLinks>()
-    for (const r of this.rows) {
-      if (r.kind !== 'node' || r.state !== 'open' || !r.jira?.length) continue
-      const id = `${r.projectId}\n${r.nodeId}`
-      const card = byCard.get(id) ?? { projectId: r.projectId, nodeId: r.nodeId, principal: r.principal, tickets: [] }
-      byCard.set(id, card)
-      for (const t of r.jira) {
-        const i = card.tickets.findIndex((x) => x.key === t.key)
-        if (i < 0) card.tickets.push({ ...t })
-        else if (t.at > card.tickets[i].at) card.tickets[i] = { ...t }
-        else continue
-        if (t.at >= Math.max(...card.tickets.map((x) => x.at))) card.principal = r.principal
-      }
-    }
-    for (const card of byCard.values()) card.tickets = card.tickets.slice(0, JIRA_CARD_TICKETS_MAX)
-    return [...byCard.values()]
+    return mergeJiraCards(
+      this.rows
+        .filter((r) => r.kind === 'node' && r.state === 'open' && r.jira?.length)
+        .map((r) => ({ projectId: r.projectId, nodeId: r.nodeId, principal: r.principal, tickets: r.jira! }))
+    )
   }
 
   /** Would upserting `tickets` take the row past `INTEGRATION_JIRA_MAX`? (Checked before an `open`

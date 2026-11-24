@@ -9,6 +9,7 @@ import { PANE_PROBE_TIMEOUT_MS, probeWithin } from './pane-probe'
 import {
   decideDelivery,
   decidePreProbe,
+  screenIdleWaivable,
   type AgentMessageOutcome,
   type DeliveryFacts,
   type NotPermittedReason,
@@ -155,6 +156,13 @@ export interface DeliveryDeps {
   trace(input: DeliveryTraceInput): Promise<{ traceId: string; traced: TraceKind }>
   /** Subscribe to hook events for the receipt. Returns an unsubscribe. */
   subscribeEvents(cb: (e: ReceiptEvent) => void): () => void
+  /**
+   * Does the target's pane show its agent idle at an EMPTY prompt (`PtyManager.composerIdle`)?
+   * Asked only when the node's status is unknowable (`screenIdleWaivable`) and only after gate 1
+   * proved the agent owns the pane. Optional: absent ⇒ such a target waits for its next turn, as
+   * before.
+   */
+  screenIdle?(nodeId: string): Promise<boolean>
 }
 
 /**
@@ -378,7 +386,18 @@ export async function deliverAgentMessage(
       tokenFilePresent: deps.tokenFilePresent(req.targetNodeId),
       targetIsRemote: req.targetIsRemote
     })
-    if (cheap) return refuse(cheap)
+    const probeMs = deps.paneProbeTimeoutMs?.(req.targetNodeId) ?? PANE_PROBE_TIMEOUT_MS
+    // A status that cannot be known (a CLI resumed after a reboot, a status restored from disk) may
+    // be answered by the pane itself — but only an agent-owned pane is ever read, so gate 1's probe
+    // runs FIRST here, once, and is reused below.
+    let early: PaneOwner | null | undefined
+    let screenIdle = false
+    if (cheap && deps.screenIdle && screenIdleWaivable(cheap, deps.mirrorEntry(req.targetNodeId))) {
+      early = await probeWithin(() => deps.paneOwner(req.targetNodeId), probeMs)
+      if (isAgentPane(early, req.targetAgentId, req.targetBinaries) === 'agent')
+        screenIdle = await deps.screenIdle(req.targetNodeId).catch(() => false)
+    }
+    if (cheap && !screenIdle) return refuse(cheap)
 
     // ── DO NOT RETRY AN `unknown` PANE VERDICT ON A FIXED SHORT TIMER WITHOUT A CIRCUIT BREAKER ──
     //
@@ -391,8 +410,7 @@ export async function deliverAgentMessage(
     // ssh-controlmaster-fallback). This module probes AT MOST TWICE per delivery and never loops;
     // any caller that wants to retry an `unknown` needs backoff plus a per-target cap BEFORE its
     // second attempt, not after the incident.
-    const probeMs = deps.paneProbeTimeoutMs?.(req.targetNodeId) ?? PANE_PROBE_TIMEOUT_MS
-    const before = await probeWithin(() => deps.paneOwner(req.targetNodeId), probeMs)
+    const before = early !== undefined ? early : await probeWithin(() => deps.paneOwner(req.targetNodeId), probeMs)
     const verdict = isAgentPane(before, req.targetAgentId, req.targetBinaries)
     const facts: DeliveryFacts = {
       notPermitted: req.notPermitted,
@@ -402,7 +420,8 @@ export async function deliverAgentMessage(
       paneObserved: before?.command,
       target: deps.mirrorEntry(req.targetNodeId),
       tokenFilePresent: deps.tokenFilePresent(req.targetNodeId),
-      targetIsRemote: req.targetIsRemote
+      targetIsRemote: req.targetIsRemote,
+      screenIdle
       // `pasteAware` deliberately absent: the flag costs a second tmux round-trip and there is no
       // point paying for it to tell a rate-limited caller something it cannot act on.
     }

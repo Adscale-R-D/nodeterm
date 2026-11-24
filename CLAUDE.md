@@ -2846,6 +2846,39 @@ started a moment ago (`--run-now`, `run`) that has not posted its first hook —
 ordinary TTL: a retry cannot help before that hook, and its first verified `done` flushes the queue.
 Both shells wire `heldLaunch`.
 
+**A status that cannot be KNOWN is answered by the pane's screen** (fork patch, 2026-11-24;
+`screenIdleWaivable` in `agent-message-decide.ts`, `PtyManager.composerIdle`, `readClaudeIdle` in
+`shared/agents/claude-screen.ts`). A message waits for a verified `done`, and a queue flushes only on
+one. Two kinds of target never send another: a CLI resumed after a machine reboot (it posts
+`SessionStart` and then nothing until its next turn — MEASURED on Claude Code 2.1.331: two minutes
+idle, no further event, no `idle_prompt`), and an idle session whose status came off disk after a
+server restart. So a message for an idle session waited for a turn that only the message could
+start; on a box that reboots daily every sink update to an idle session sat in the queue until a
+person typed into it. Rules a refactor must keep:
+- **Only an unknowable status is waived**, never one that says something: `targetNotIdleUnknown` on
+  a node between sessions or whose entry is restored/expired, and `targetStatusStale` on a
+  restored/expired entry. A RESTORED `waiting`/`blocked` (the session was in a dialog when the
+  server went down; only a question dialog has been captured live, a permission prompt has not), a
+  live `working`/`waiting`/`blocked`, an `idle_prompt`-inferred `done`, a
+  node that never posted, a stale hook script, a missing token file, and an unverified node observed
+  THIS run all keep their refusal.
+- **The screen is read only after gate 1 proved the agent owns the pane** (one pane-owner probe,
+  reused by the gate), and only for an agent with a measured screen reader (`readsScreenDialogs`,
+  claude). Idle = a live input box, no dialog, nothing typed (`readClaudeComposer` → `empty`), and no
+  `esc to interrupt` under the box or on the spinner line above it — the composer stays empty while a
+  turn runs, and that hint is the only on-screen difference (measured on 2.1.331). Plain text
+  parsing of `tmux capture-pane -e`; no model is involved. An SSH pane's capture carries no styling,
+  so it reads `draft` and is never waived.
+- **A queue held by such a refusal is WATCHED, silently** (`DeliveryQueue.watch`: from `heldBy`, a
+  flush's requeue, and every target at `restore`), because no event will ever flush it. The watch
+  asks the read-only `readyByScreen` (a live session, the free gates, then the pane gate and the
+  screen) every 60 s, doubling to 15 min, and flushes only on a yes. A "not yet" removes nothing and
+  traces nothing — both matter: before a resumed session exists a full delivery answers
+  `targetGone` (terminal: the message would be DROPPED), and every refused delivery writes a
+  never-folded board-log row. A busy target is not watched; its own turn end flushes it.
+- The dep rides `ptyPaneProbeDeps`, which both shells spread, so neither can forward the pane read
+  and forget the screen read.
+
 **A board comment that @mentions a session is a message from a PERSON** (`@shared/board-comment`,
 `deliverBoardCommentFromUi` in `core/agents/agent-messaging.ts`). The comment composer's @ picker
 inserts an id-based token `@[label](node:<id>)` (the id is the authority, the label only a fallback

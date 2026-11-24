@@ -18,7 +18,7 @@
  *   a phone-spawned node is a valid TARGET and resolves like any other store node.
  */
 import type { NormalizedAgentEvent } from '../../shared/agents/normalize'
-import { binariesFor, type PaneOwner } from '../../shared/agents/pane-owner-predicate'
+import { binariesFor, isAgentPane, type PaneOwner } from '../../shared/agents/pane-owner-predicate'
 import type { BoardLogEntry } from '../../shared/types'
 import type {
   AgentMessageDeliverRequest,
@@ -38,9 +38,12 @@ import {
 } from './agent-message'
 import {
   RETRYABLE,
+  decidePreProbe,
+  screenIdleWaivable,
   type AgentMessageOutcome,
   type NotPermittedReason
 } from './agent-message-decide'
+import { PANE_PROBE_TIMEOUT_MS, probeWithin } from './pane-probe'
 import { noteNewTurn, noteSent, reserveFlow } from './agent-message-flow'
 import { recordDelivery } from './agent-message-trace'
 import {
@@ -168,10 +171,14 @@ export interface MessagingStoredNode {
 export function ptyPaneProbeDeps(pty: {
   paneOwner(nodeId: string): Promise<PaneOwner | null>
   paneProbeTimeoutMs(nodeId: string): number
-}): Pick<AgentMessagingDeps, 'paneOwner' | 'paneProbeTimeoutMs'> {
+  composerIdle?(nodeId: string, agentId: string): Promise<boolean>
+}): Pick<AgentMessagingDeps, 'paneOwner' | 'paneProbeTimeoutMs' | 'composerIdle'> {
   return {
     paneOwner: (nodeId) => pty.paneOwner(nodeId),
-    paneProbeTimeoutMs: (nodeId) => pty.paneProbeTimeoutMs(nodeId)
+    paneProbeTimeoutMs: (nodeId) => pty.paneProbeTimeoutMs(nodeId),
+    // The screen read rides with the pane read: both shells spread this helper, so neither can
+    // forward one and forget the other.
+    ...(pty.composerIdle ? { composerIdle: (nodeId: string, agentId: string) => pty.composerIdle!(nodeId, agentId) } : {})
   }
 }
 
@@ -182,6 +189,13 @@ export interface AgentMessagingDeps {
   paneProbeTimeoutMs?(nodeId: string): number
   sendEnvelope(nodeId: string, envelope: string, expected?: PaneOwner): Promise<boolean | 'dialog'>
   envelopePasteReady?(nodeId: string): Promise<boolean>
+  /**
+   * Is the agent in this pane idle at an EMPTY prompt, read off its screen
+   * (`PtyManager.composerIdle`)? Asked only for a target whose status cannot be known — resumed
+   * after a reboot, restored from disk after a restart — which otherwise waits for a turn nobody
+   * starts. Optional; absent ⇒ such a target waits for its next turn, as before.
+   */
+  composerIdle?(nodeId: string, agentId: string): Promise<boolean>
   /**
    * Does a session exist for this node at all — attached in this process OR held by a backend
    * after its client was released (`PtyManager.sessionExists`)? The delivery's `targetLive` fact.
@@ -469,11 +483,35 @@ export function createDeliveryQueue(
         return m && (m.sessionId || m.agentId)
           ? { ...(m.sessionId ? { sessionId: m.sessionId } : {}), ...(m.agentId ? { agentId: m.agentId } : {}) }
           : undefined
-      }
+      },
+      // The watch for a queue nothing else will flush. Read-only and untraced.
+      ...(deps.composerIdle ? { readyByScreen: (id: string) => readyByScreen(id, deps) } : {})
     },
     { capacity: opts.capacity, ttlMs: opts.ttlMs }
   )
   return queue
+}
+
+/**
+ * Would a delivery to `nodeId` go through right now? The SAME free gates the delivery runs
+ * (`decidePreProbe`), then — only when the refusal is one the screen may answer
+ * (`screenIdleWaivable`) — the pane gate and the screen read. READ-ONLY: no trace, no write, no
+ * flow reservation; the real flush that follows a yes re-runs every gate, scope and ownership
+ * included. A verified `done` the queue somehow missed also answers yes.
+ */
+async function readyByScreen(nodeId: string, deps: AgentMessagingDeps): Promise<boolean> {
+  if (!deps.composerIdle) return false
+  if (!(await deps.hasLiveSession(nodeId))) return false
+  const entry = (deps.mirrorEntry ?? coreMirrorEntry)(nodeId)
+  const pre = decidePreProbe({ targetLive: true, target: entry, tokenFilePresent: nodeTokenFilePresent(nodeId) })
+  if (pre === null) return true
+  if (!screenIdleWaivable(pre, entry)) return false
+  const agentId =
+    deps.projects().flatMap((p) => p.nodes).find((n) => n.id === nodeId)?.agentId ?? entry?.agentId ?? ''
+  const probeMs = deps.paneProbeTimeoutMs?.(nodeId) ?? PANE_PROBE_TIMEOUT_MS
+  const owner = await probeWithin(() => deps.paneOwner(nodeId), probeMs)
+  if (isAgentPane(owner, agentId, binariesFor(agentId, deps.customAgents())) !== 'agent') return false
+  return deps.composerIdle(nodeId, agentId)
 }
 
 /**
@@ -895,7 +933,8 @@ export async function runDelivery(
           traceProject ? deps.appendBoardLog(traceProject, entry) : Promise.resolve(false),
         now
       }),
-    subscribeEvents: deps.subscribeReceipts ?? subscribeBus
+    subscribeEvents: deps.subscribeReceipts ?? subscribeBus,
+    ...(deps.composerIdle ? { screenIdle: (id: string) => deps.composerIdle!(id, targetAgentId) } : {})
   }
 
   // The body. notify's is APP-OWNED (#98): substituted here, in main, whatever the request carried
@@ -1030,10 +1069,11 @@ async function deliverWithQueue(
         },
         { hibernated, ...(ttlMs !== undefined ? { ttlMs } : {}) }
       )
-    if (QUEUE_ON_BUSY.has(outcome.kind))
-      return answer(
-        await queued(false, outcome.kind === 'targetNotStarted' ? NOT_STARTED_TTL_MS : opts.ttlMs)
-      )
+    if (QUEUE_ON_BUSY.has(outcome.kind)) {
+      const held = await queued(false, outcome.kind === 'targetNotStarted' ? NOT_STARTED_TTL_MS : opts.ttlMs)
+      if (held.kind === 'queued') queue.heldBy(req.targetNodeId, outcome.kind)
+      return answer(held)
+    }
     if (req.verb === 'board-comment' && BOARD_QUEUE_ON.has(outcome.kind)) {
       const held = await queued(false)
       // Held by the pair window, not by the target's turn: nothing will report "idle" when the

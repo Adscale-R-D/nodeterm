@@ -157,6 +157,13 @@ export interface DeliveryQueueDeps {
   /** The target's current agent and session (the status mirror), recorded at enqueue and compared
    *  when a RESTORED entry flushes. Absent ⇒ nothing is recorded, and a restored entry is refused. */
   bindingOf?(nodeId: string): QueueBinding | undefined
+  /**
+   * READ-ONLY: would a delivery to this target go through right now on its screen's word — a live
+   * session, the agent owning its pane, an unknowable status the screen may answer, and an idle
+   * screen (or a verified `done` after all)? The watch for a queue nothing else will flush
+   * (`watch`). Must trace nothing and change nothing. Absent ⇒ no watch.
+   */
+  readyByScreen?(nodeId: string): Promise<boolean>
 }
 
 /** Which conversation a queued message was addressed to. */
@@ -334,10 +341,30 @@ const REQUEUE_ON: ReadonlySet<AgentMessageOutcome['kind']> = new Set(
   )
 )
 
+/**
+ * Outcomes that say the target's status cannot be KNOWN, as opposed to busy: a CLI resumed after a
+ * reboot or a status restored from disk after a server restart posts no hook until its next turn, so
+ * no `done` will ever come to flush the queue. Such a target is re-offered on a timer instead
+ * (`UNKNOWN_STATUS_RETRY_MS`), and the delivery reads the pane's screen to decide
+ * (`screenIdleWaivable`). A busy target is not: its own turn end flushes it.
+ */
+const RETRY_ON_UNKNOWN: ReadonlySet<AgentMessageOutcome['kind']> = new Set([
+  'targetNotIdleUnknown',
+  'targetStatusStale'
+])
+
+/** How often a queue held only by an unknowable status is checked: first after this, then doubling
+ *  to `UNKNOWN_STATUS_RETRY_MAX_MS`. One pane read per check, and only while messages wait. */
+export const UNKNOWN_STATUS_RETRY_MS = 60_000
+export const UNKNOWN_STATUS_RETRY_MAX_MS = 15 * 60_000
+
 export class DeliveryQueue {
   private readonly queues = new Map<string, QueueEntry[]>()
   /** At most one pending retry nudge per target (`retryAfter`). */
   private readonly nudges = new Map<string, CancelTimer>()
+  /** At most one pending screen watch per target (`watch`), and how many checks said "not yet". */
+  private readonly watches = new Map<string, CancelTimer>()
+  private readonly watchSteps = new Map<string, number>()
   private readonly capacity: number
   private readonly ttlMs: number
   private readonly schedule: (ms: number, fn: () => void) => CancelTimer
@@ -434,6 +461,8 @@ export class DeliveryQueue {
         : 'deliver'
       if (verdict === 'wait') {
         this.requeueFront(nodeId, entry)
+        // The session it was queued for has not come back yet; nothing else will ask again.
+        this.watch(nodeId)
         return
       }
       const outcome: AgentMessageOutcome =
@@ -442,6 +471,7 @@ export class DeliveryQueue {
         // Not ready yet (busy again, still unverified, or rate-limited): keep it, TTL counting from
         // its ORIGINAL enqueue, and stop draining — the target is evidently not idle after all.
         this.requeueFront(nodeId, entry)
+        if (RETRY_ON_UNKNOWN.has(outcome.kind)) this.watch(nodeId)
         return
       }
       // Terminal: delivered, or a refusal waiting will not fix (notPermitted from a revoked grant,
@@ -590,6 +620,54 @@ export class DeliveryQueue {
     // one twice at the next boot, never not at all.
     for (const entry of lapsed) await this.reportExpired(entry)
     this.persist()
+    // A target restored here may never post another hook on its own (a resumed or idle CLI), so it
+    // is watched, not left to its next `done`.
+    for (const nodeId of this.queues.keys()) this.watch(nodeId)
+  }
+
+  /** The message just queued for `nodeId` refused as `outcome`: watch the target when nothing else
+   *  will flush it (an unknowable status), else leave it to the target's next `done`. */
+  heldBy(nodeId: string, outcome: AgentMessageOutcome['kind']): void {
+    if (RETRY_ON_UNKNOWN.has(outcome)) this.watch(nodeId)
+  }
+
+  /**
+   * Watch a target whose queue nothing will flush: every `UNKNOWN_STATUS_RETRY_MS`, doubling to
+   * `UNKNOWN_STATUS_RETRY_MAX_MS`, ask `deps.readyByScreen` — a READ-ONLY check (a live session, the
+   * agent in its pane, an idle screen) — and flush only on a yes. A "not yet" ends nothing and
+   * traces nothing: before a resumed session exists a full delivery answers `targetGone`, which
+   * would drop the message, and every refusal writes a board-log row. Stops when the queue empties.
+   * Absent `readyByScreen` ⇒ nothing is watched (the target waits for its next `done`, as before).
+   */
+  private watch(nodeId: string): void {
+    if (!this.deps.readyByScreen || this.watches.has(nodeId)) return
+    const step = this.watchSteps.get(nodeId) ?? 0
+    const ms = Math.min(UNKNOWN_STATUS_RETRY_MS * 2 ** step, UNKNOWN_STATUS_RETRY_MAX_MS)
+    const cancel = this.schedule(ms, () => {
+      this.watches.delete(nodeId)
+      void this.watchFire(nodeId)
+    })
+    this.watches.set(nodeId, cancel)
+  }
+
+  private async watchFire(nodeId: string): Promise<void> {
+    if (this.depth(nodeId) === 0) {
+      this.watchSteps.delete(nodeId)
+      return
+    }
+    let ready = false
+    try {
+      ready = (await this.deps.readyByScreen?.(nodeId)) === true
+    } catch {
+      ready = false
+    }
+    if (ready) {
+      this.watchSteps.delete(nodeId)
+      await this.onTargetIdle(nodeId)
+      return
+    }
+    this.watchSteps.set(nodeId, (this.watchSteps.get(nodeId) ?? 0) + 1)
+    this.watch(nodeId)
   }
 
   private persist(): void {
@@ -603,5 +681,8 @@ export class DeliveryQueue {
     this.queues.clear()
     for (const cancel of this.nudges.values()) cancel()
     this.nudges.clear()
+    for (const cancel of this.watches.values()) cancel()
+    this.watches.clear()
+    this.watchSteps.clear()
   }
 }

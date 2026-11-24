@@ -192,6 +192,12 @@ export interface DeliveryFacts {
   /** Is the target on an SSH project? Only affects which ACTION a stale-script note names. */
   targetIsRemote?: boolean
   /**
+   * The pane, read this delivery, shows the agent idle at an EMPTY prompt (`readClaudeIdle`). Only
+   * ever set after gate 1 proved the agent owns the pane, and it waives exactly the refusals
+   * `screenIdleWaivable` names: a status that cannot be known, never a status that says busy.
+   */
+  screenIdle?: boolean
+  /**
    * Did the target's pane request bracketed paste? Deliberately OPTIONAL and deliberately last.
    *
    * `deliverAgentMessage` probes this only AFTER the gate passes, because the probe is a second
@@ -351,6 +357,7 @@ export function decidePreProbe(
     | 'target'
     | 'tokenFilePresent'
     | 'targetIsRemote'
+    | 'screenIdle'
   >
 ): AgentMessageOutcome | null {
   if (f.notPermitted) return { kind: 'notPermitted', reason: f.notPermitted }
@@ -368,9 +375,38 @@ export function decidePreProbe(
   if (!f.targetLive) return { kind: 'targetGone' }
   // Identity and idleness are BOTH free — a map lookup and a local stat — so they belong here,
   // ahead of anything that touches a pane. See FIRST_PAID_DECISION.
-  const identity = identityRefusal(f)
-  if (identity) return identity
-  return idleRefusal(f.target)
+  const refusal = identityRefusal(f) ?? idleRefusal(f.target)
+  if (refusal && f.screenIdle === true && screenIdleWaivable(refusal, f.target)) return null
+  return refusal
+}
+
+/**
+ * Can the pane's own screen stand in for a status hook? Only when the status is UNKNOWABLE, never
+ * when it says something:
+ *
+ *  - `targetNotIdleUnknown` on a node between sessions, or whose status was restored from disk or
+ *    expired. A CLI resumed after a machine reboot posts `SessionStart` and then nothing until its
+ *    next turn (MEASURED on Claude Code 2.1.331: two minutes idle, no further event, no
+ *    `idle_prompt`), so a message queued for it waited for a turn that only the message could start.
+ *  - `targetStatusStale` on a RESTORED or EXPIRED entry: after a server restart nothing this run has
+ *    observed the node, and an idle session never posts again on its own.
+ *
+ * Never waived: a live busy state (`targetBusy`), a RESTORED `waiting`/`blocked`, a `done` inferred from `idle_prompt` (a node
+ * holding an approval also idles), a node that never posted, a stale hook script, a missing token
+ * file, or an unverified node that HAS been observed this run. The screen read itself
+ * (`readClaudeIdle`) refuses a dialog, a draft and a running turn, so what it admits is exactly
+ * what a verified `done` would have admitted: an agent at an empty prompt.
+ */
+export function screenIdleWaivable(refusal: AgentMessageOutcome, e: MirrorEntry | undefined): boolean {
+  if (!e) return false
+  const fromThisRun = e.restored !== true && e.stateExpired !== true
+  // A status restored as `waiting`/`blocked` says the session was in a dialog when the server went
+  // down; it waits for its next turn as before rather than resting on the screen alone (only a
+  // question dialog has been captured live; a permission prompt has not).
+  if (!fromThisRun && (e.state === 'waiting' || e.state === 'blocked')) return false
+  if (refusal.kind === 'targetNotIdleUnknown') return !fromThisRun || e.state === undefined
+  if (refusal.kind === 'targetStatusStale') return !fromThisRun
+  return false
 }
 
 /**

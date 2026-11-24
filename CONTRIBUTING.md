@@ -96,6 +96,10 @@ seconds when cold, so they get their own `WINDOWS_PANE_PROBE_TIMEOUT_MS` through
 `PtyManager.paneProbeTimeoutMs`, derived from the probe's own deadlines
 (`session-host/windows-probe-budget.ts`) — change a probe deadline there, not a literal; ssh and
 tmux keep the 2 s bound. A shell that wires agent messaging must forward that optional dep.
+A message for a target whose status cannot be known (resumed after a reboot, restored from disk
+after a restart) is decided by reading the pane's screen (`screenIdleWaivable`, `readClaudeIdle`):
+only that case, only after the pane gate passed, only for claude. Never widen the waiver to a status
+that says busy.
 Never put the submitting Enter in the same write as a message paste: `core/settled-submit.ts`
 pastes, waits for the envelope to render, then submits separately, on every backend.
 The persistent session-host transport has its own versioned messaging extension: the host checks

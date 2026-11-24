@@ -228,6 +228,37 @@ export function readClaudeComposer(styledScreen: string): ClaudeComposer {
   return hasUndimmedText(styled[promptAt], 1) ? 'draft' : 'empty'
 }
 
+/** The words Claude Code shows while a turn runs: in the status line under the input box
+ *  ("⏵⏵ auto mode on · 1 shell · esc to interrupt", MEASURED on 2.1.331), and on the spinner line
+ *  above it in older builds ("✻ Thinking… (esc to interrupt)"). Case-insensitive on purpose: an
+ *  extra match only holds a message back. */
+const BUSY_HINT = /\besc to interrupt\b/i
+/** How far above the input box the spinner line may sit. */
+const BUSY_HINT_ABOVE_BOX_LINES = 3
+
+/**
+ * Is Claude Code sitting IDLE at an empty prompt? Read from a STYLED capture: `readClaudeComposer`
+ * says `empty` (a live input box, no dialog, nothing typed), and no line around the box says
+ * `esc to interrupt`. The composer stays empty while a turn runs, so the busy hint is the only
+ * difference between idle and working on screen (measured on 2.1.331).
+ *
+ * Agent messaging's answer to a status it cannot know: a CLI resumed after a reboot, or a session
+ * whose last status came off disk after a server restart, posts no hook until its next turn, and a
+ * queued message waits for exactly that turn (see `screenIdleWaivable`). Every doubt answers false.
+ */
+export function readClaudeIdle(styledScreen: string): boolean {
+  if (readClaudeComposer(styledScreen) !== 'empty') return false
+  const lines = styledScreen.split(/\r?\n/).map((l) => l.replace(ANSI, '').trimEnd())
+  const box = inputBox(lines)
+  if (!box) return false
+  const from = Math.max(0, box[0] - BUSY_HINT_ABOVE_BOX_LINES)
+  for (let i = from; i < lines.length; i++) {
+    if (i >= box[0] && i <= box[1]) continue
+    if (BUSY_HINT.test(lines[i])) return false
+  }
+  return true
+}
+
 /**
  * What the user's draft in Claude Code's composer says, read from a STYLED capture, with all
  * whitespace removed: the undimmed text of every line in the live input box, minus the `❯` prompt

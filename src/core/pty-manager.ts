@@ -10,6 +10,7 @@ import type {
 import {
   claudeScreenBlocksInput,
   readClaudeComposer,
+  readClaudeIdle,
   readClaudeDraft,
   readClaudeDraftBox,
   readClaudeDraftLine,
@@ -6429,6 +6430,24 @@ export class PtyManager {
       if (delivered === true) return { sent: true }
       return { sent: false, reason: delivered === 'pasted-not-submitted' ? 'not-submitted' : 'failed' }
     })
+  }
+
+  /**
+   * Is the agent in this pane sitting idle at an EMPTY prompt, read off the screen (`readClaudeIdle`:
+   * a live input box, no dialog, nothing typed, no `esc to interrupt`)? Agent messaging asks it only
+   * when the node's status cannot be known — a CLI resumed after a reboot, or a status restored from
+   * disk after a server restart, posts no hook until its next turn — and only after the pane gate
+   * proved the agent owns the pane. Only an agent with a measured screen reader can answer
+   * (`readsScreenDialogs`); every other agent, an empty capture, or any failure answers false.
+   */
+  async composerIdle(persistKey: string, agentId: string): Promise<boolean> {
+    if (!readsScreenDialogs(agentId)) return false
+    try {
+      const styled = await this.captureStyledScreen(persistKey)
+      return styled !== '' && readClaudeIdle(styled)
+    } catch {
+      return false
+    }
   }
 
   /**

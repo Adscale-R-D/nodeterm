@@ -384,11 +384,14 @@ function reportOutcomeDocLines(): string[] {
     '  are unsure: that is `failed`, with the reason in `--note`. Report last, when nothing is left to do.',
     '  You report only about yourself — `--node` naming another node is refused — and a later report',
     `  replaces the earlier one. The note (one line, at most ${OUTCOME_NOTE_MAX} characters) is shown in \`list\`, on your`,
-    "  card and on the waiting node; it is never typed into anyone's session. `--notify-opener` also",
-    '  sends the agent that opened you ONE notice written by nodeterm carrying your outcome — never',
-    '  your note — and only when the outcome it last heard changes; without an opener the flag',
-    '  tells you so and sends nothing. Reporting does not end your session or your turn, and it',
-    '  moves no kanban card.'
+    '  card and on the waiting node. `--notify-opener` also sends the agent that opened you ONE notice',
+    '  written by nodeterm carrying your outcome and your note (quoted, marked as your words) — so make',
+    '  the note say what the opener needs: the result, the PR or file, the blocker. It is sent only when',
+    '  the outcome the opener last heard changes, waits up to two hours for the opener to go idle, and',
+    '  still arrives if the opener closes you first. A restart of nodeterm drops a notice still',
+    '  waiting; for a dependent that must not miss it, `--after-success` is the durable route. Without',
+    '  an opener the flag tells you so and sends nothing. Reporting does not end your session or your',
+    '  turn, and it moves no kanban card.'
   ]
 }
 

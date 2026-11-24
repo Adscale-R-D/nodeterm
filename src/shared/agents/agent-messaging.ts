@@ -41,6 +41,9 @@ export type DeliveryVerb = AgentMessageVerb | typeof STATION_NOTICE_VERB
 /** A delivery as the SERVICE sees it: the IPC request, or an app-composed notice. */
 export interface AgentMessageDeliveryInput extends Omit<AgentMessageDeliverRequest, 'verb'> {
   verb: DeliveryVerb
+  /** A `report-outcome --notify-opener` notice (core-set, never from IPC): it may outlive its
+   *  closed station in the queue. A station-FAILURE notice is not marked. */
+  outcomeNotice?: true
 }
 
 /** The `from:` line of a notice's envelope. The station is named in the body; the frame says who

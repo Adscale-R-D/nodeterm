@@ -1664,7 +1664,9 @@ describe('--after-success + report-outcome: a dependent that waits for a reporte
     expect(flat).toContain('not merely that you stopped')
     expect(flat).toContain('`--node` naming another node is refused')
     expect(flat).toContain(`at most ${OUTCOME_NOTE_MAX} characters`)
-    expect(flat).toContain('never typed into anyone\'s session')
+    // Fork patch: the opener's notice carries the note, quoted as the station's words.
+    expect(flat).toContain('carrying your outcome and your note (quoted, marked as your words)')
+    expect(flat).toContain('still arrives if the opener closes you first')
     // And orchestrators are told to ask for it.
     expect(flat).toMatch(/--after-success <upstream-id>/)
     expect(flat).toMatch(/report-outcome/)

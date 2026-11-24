@@ -125,7 +125,7 @@ worktree); pass **`--cwd`** when the target has neither, or they review the wron
 
 ---
 
-## 4. What the fork still adds (7 patches)
+## 4. What the fork still adds (8 patches)
 
 | Patch | Why it is still ours |
 |---|---|
@@ -136,6 +136,7 @@ worktree); pass **`--cwd`** when the target has neither, or they review the wron
 | **`/session/<id>` links open a Claude session** | upstream has no browser deep link to a session (its `nodeterm://` links are desktop-only and need a confirm). See below. |
 | **Agent ownership survives a restart** | upstream keeps the Server Edition creator ledger and the pane-owner record in memory, so after every restart an agent can no longer close, rename or message its own team. See below. |
 | **An idle session is messageable after a reboot or restart** | upstream waits for a verified `done` that a resumed or restored idle Claude never sends, so queued messages sat until a person typed into the session. Decided by reading the pane's screen instead; see CLAUDE.md, "A status that cannot be KNOWN". |
+| **`report-outcome --notify-opener` reaches its opener** | upstream's notice pointed at `list` (refused here), left the note out, expired after 5 min, and was dropped when the opener closed the station before it flushed. See CLAUDE.md, the `--notify-opener` paragraph. |
 
 **Kanban control (added 2026-09-24).** A pipeline files each lane's cards into one column per
 TASK, and the column cleans itself up:

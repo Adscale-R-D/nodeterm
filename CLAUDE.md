@@ -6041,7 +6041,18 @@ command-bearing opens; this does not add a human-confirm dialog or change mobile
   the outcome the opener last HEARD changes (`StationOutcomeStore.openerHeard` — process-local,
   dropped with the report), never when the previous RECORD had the same outcome: a report made
   without the flag, or whose notice was not sent, told the opener nothing, and a flagged repeat of
-  it must still wake the orchestrator. Rules a refactor must not undo:
+  it must still wake the orchestrator. Fork patch (2026-11-24), each from a measured failure on the
+  Server Edition: the notice now QUOTES the station's note, labelled as its own words
+  (`stationOutcomeNoticeBody`), because it pointed at `list`, which that edition refuses, and the
+  note was the only field saying what happened; it waits `STATION_NOTICE_TTL_MS` (2 h) instead of
+  5 min, because a station usually finishes while its opener is mid-build; and a queued notice whose
+  STATION WAS CLOSED before the flush is scoped by the opener's own project (`stationGone` in
+  `runDelivery`), because the closed station resolved `cross-project` and the notice was dropped
+  unseen — the usual end of a lane. The notice was scope- and creator-checked when queued, only core
+  composes one, and a restored one is still expired at boot. The longer wait and the closed-station
+  rule apply ONLY to outcome notices (`outcomeNotice` on the request, set by `tellOpener`): a
+  station-FAILURE notice keeps the 5-minute wait, because its "reassign: close it" option must not
+  land long after the station recovered. Rules a refactor must not undo:
   - **A success wait is `--after` plus the report.** Every `--after-success` id is FOLDED INTO
     `pendingLaunch.after` (renderer: once, right after `prWaitPre`; server: before `resolveAfter`),
     so the existing rules apply unchanged — the station must exist and report status, the wait rope

@@ -74,7 +74,11 @@ describe('handleReportOutcome', () => {
     const notice = (deliver.mock.calls[0] as unknown as [{ recipientNodeId: string; body: string }])[0]
     expect(notice.recipientNodeId).toBe('orch')
     expect(notice.body).toContain('reported its task failed')
-    expect(notice.body).not.toContain('flaky') // the station's words never ride the app's envelope
+    // The note rides the notice, quoted and labelled as the station's own words (fork patch): it is
+    // the one field that says what happened, and `list` is refused on the Server Edition.
+    expect(notice.body).toContain('its note: "flaky"')
+    expect(notice.body).toContain("the note is the station's own words")
+    expect(notice.body).not.toContain('`list`')
 
     // The same outcome again does not wake the opener a second time.
     const d = deps({ opener })

@@ -382,6 +382,7 @@ export interface ReportOutcomeDeps {
       stationNodeId: string
       recipientNodeId: string
       body: string
+      outcome?: true
     }): Promise<AgentMessageOutcome>
   }
 }
@@ -484,13 +485,13 @@ async function tellOpener(
 ): Promise<string> {
   const recipient = opener.recipientFor(record.nodeId)
   if (!recipient) return 'No opener to tell: no agent opened you through canvas control.'
-  const body = stationOutcomeNoticeBody({ id: record.nodeId, title: recipient.stationTitle }, record.outcome)
+  const body = stationOutcomeNoticeBody({ id: record.nodeId, title: recipient.stationTitle }, record.outcome, record.note)
   const outcome = await opener
-    .deliver({ stationNodeId: record.nodeId, recipientNodeId: recipient.recipientNodeId, body })
+    .deliver({ stationNodeId: record.nodeId, recipientNodeId: recipient.recipientNodeId, body, outcome: true })
     .catch(() => null)
   const { pane, paneDetail } = outcome ? paneResult(outcome) : { pane: 'not-sent', paneDetail: 'error' }
   // Queued counts as heard: the queue delivers it on the opener's next idle. A queued notice that
-  // then expires is the one case this cannot see — the opener reads `list` as it always could.
+  // then expires is the one case this cannot see.
   if (pane === 'told' || pane === 'queued') store.markOpenerHeard(record.nodeId, record.outcome)
   if (pane === 'told') return `Your opener ${recipient.recipientNodeId} was told.`
   if (pane === 'queued') return `Your opener ${recipient.recipientNodeId} is told when it next goes idle.`

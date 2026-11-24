@@ -69,6 +69,7 @@ import {
 import type { DurableFactFile } from '../durable-state'
 import { INTEGRATION_MESSAGE_VERB } from '../../shared/integration-principal'
 import { randomUUID } from 'crypto'
+import { isSafeNodeId } from '../remote-safety'
 import { nodeTokenFilePresent } from './node-token-files'
 import { mirrorEntry as coreMirrorEntry, type MirrorEntry } from '../agent-status-mirror'
 import {
@@ -424,7 +425,8 @@ export function createDeliveryQueue(
                 verb: qreq.verb as AgentMessageDeliveryInput['verb'],
                 sourceNodeId: qreq.sourceNodeId,
                 targetNodeId: qreq.targetNodeId,
-                body: qreq.body
+                body: qreq.body,
+                ...((qreq as { outcomeNotice?: unknown }).outcomeNotice === true ? { outcomeNotice: true as const } : {})
               },
           deps
         )
@@ -810,11 +812,29 @@ export async function runDelivery(
   // no sender node, so its scope is the comment's own board.
   // An integration principal has no sender node either: its scope is the project it opened the
   // target in (the "is the target on this board" rule, reused).
+  // An OUTCOME notice (`report-outcome --notify-opener`) whose station was CLOSED while it waited in
+  // the queue (the usual end of
+  // a lane: the station reports, the opener closes it, the notice flushes on the opener's next idle).
+  // The notice was scoped and creator-checked when it was queued — a refused one is never queued —
+  // and only core composes one (`STATION_NOTICE_VERB` is no IPC verb; a restored one is expired at
+  // boot), so the vanished station is not evidence against it. It is scoped by the OPENER's own
+  // project instead; everything about the opener (runtime pane ownership, grant, idle) still runs.
+  // Before this, such a notice was refused `cross-project` and dropped, unseen (fork patch,
+  // 2026-11-24).
+  const stationGone =
+    stationNotice &&
+    (req as { outcomeNotice?: unknown }).outcomeNotice === true &&
+    isSafeNodeId(ident.sourceNodeId) && !projects.some((p) => p.nodes.some((n) => n.id === ident.sourceNodeId))
+  const openerProjects = stationGone ? projects.filter((p) => p.nodes.some((n) => n.id === req.targetNodeId)) : []
   const scope = board
     ? resolveBoardCommentScope(projects, board.projectId, req.targetNodeId)
     : integration
       ? resolveBoardCommentScope(projects, integration.projectId, req.targetNodeId)
-      : resolveDeliveryScope(projects, ident.sourceNodeId, req.targetNodeId)
+      : stationGone
+        ? openerProjects.length === 1
+          ? resolveBoardCommentScope(projects, openerProjects[0].id, req.targetNodeId)
+          : resolveDeliveryScope(projects, ident.sourceNodeId, req.targetNodeId)
+        : resolveDeliveryScope(projects, ident.sourceNodeId, req.targetNodeId)
   let notPermitted = scopeRefusal(scope)
   const projectId = scope.kind === 'same-project' ? scope.projectId : undefined
   // A shell with a creator ledger (the Server Edition) authorizes control by which AGENT spawned
@@ -831,7 +851,7 @@ export async function runDelivery(
     if (board) notPermitted = 'unsupported-edition'
     else if (
       !(stationNotice
-        ? deps.callerOwnsTarget(req.targetNodeId, ident.sourceNodeId)
+        ? stationGone || deps.callerOwnsTarget(req.targetNodeId, ident.sourceNodeId)
         : deps.callerOwnsTarget(ident.sourceNodeId, req.targetNodeId) ||
           (req.verb === 'reply' && deps.callerOwnsTarget(req.targetNodeId, ident.sourceNodeId)))
     )
@@ -1143,20 +1163,35 @@ export async function deliverBoardCommentFromUi(
  * this function with a body of its own, because `STATION_NOTICE_VERB` is not an IPC verb.
  */
 export async function deliverStationNotice(
-  notice: { stationNodeId: string; recipientNodeId: string; body: string },
+  notice: {
+    stationNodeId: string
+    recipientNodeId: string
+    body: string
+    /** A `report-outcome --notify-opener` notice: waits `STATION_NOTICE_TTL_MS` and may outlive its
+     *  closed station. A failure notice keeps the ordinary 5-minute wait: it can suggest closing the
+     *  station, which must not land long after the station recovered. */
+    outcome?: true
+  },
   deps: AgentMessagingDeps
 ): Promise<AgentMessageOutcome> {
-  const { outcome } = await deliverFromControl(
+  const { outcome } = await deliverWithQueue(
     {
       verb: STATION_NOTICE_VERB,
       sourceNodeId: notice.stationNodeId,
       targetNodeId: notice.recipientNodeId,
-      body: notice.body
+      body: notice.body,
+      ...(notice.outcome ? { outcomeNotice: true as const } : {})
     },
-    deps
+    deps,
+    notice.outcome ? { ttlMs: STATION_NOTICE_TTL_MS } : {}
   )
   return outcome
 }
+
+/** How long an OUTCOME notice waits for its opener to go idle. The ordinary 5 minutes lost the
+ *  normal case: a station finishes while its opener is mid-build or mid-tick, which can run far
+ *  longer (fork patch, 2026-11-24). Not carried across a restart either way. */
+export const STATION_NOTICE_TTL_MS = 2 * 60 * 60_000
 
 /** Guard for the IPC boundary: the request came over a channel, so its shape is asserted here.
  *  `AGENT_MESSAGE_VERBS` does not contain `STATION_NOTICE_VERB`, so a notice with a body of the

@@ -1,3 +1,6 @@
+import { workStatusNotifiesOpener, type NodeWorkStatus } from '../shared/node-work-status'
+import { stationWorkStatusNoticeBody } from '../shared/station-notice'
+import { paneResult } from '../core/agents/station-notice'
 import fs from 'node:fs'
 import path from 'node:path'
 
@@ -210,6 +213,9 @@ export async function initServerCanvasControl(
   const ownersFile = new DurableFactFile(HEADLESS_OWNER_FACT, { userDataDir: platform().userDataDir })
   if (deps.ownsDurableState === false) ownersFile.standDown()
   const factory = new HeadlessNodeFactory({
+    // A station entering a hand-off status (waiting / ready / blocked) tells the node that opened it,
+    // through the same recipient and delivery as `report-outcome --notify-opener`.
+    onWorkStatusSet: (nodeId, before, next) => notifyOpenerOfWorkStatus(nodeId, before, next),
     ownership: createHeadlessNodeOwnership(ownersFile),
     workspaceStore: deps.workspaceStore,
     ptyManager: deps.ptyManager,
@@ -300,6 +306,29 @@ export async function initServerCanvasControl(
       ),
     deliver: (notice: Parameters<typeof deliverStationNotice>[0]) =>
       deliverStationNotice(notice, messaging)
+  }
+  // Declared before use by closure only: the factory above calls it after construction.
+  async function notifyOpenerOfWorkStatus(
+    nodeId: string,
+    before: NodeWorkStatus | undefined,
+    next: NodeWorkStatus | undefined
+  ): Promise<string | undefined> {
+    if (!workStatusNotifiesOpener(before, next) || !next) return undefined
+    const recipient = opener.recipientFor(nodeId)
+    if (!recipient) return undefined
+    const outcome = await opener
+      .deliver({
+        stationNodeId: nodeId,
+        recipientNodeId: recipient.recipientNodeId,
+        body: stationWorkStatusNoticeBody({ id: nodeId, title: recipient.stationTitle }, next),
+        outcome: true,
+        replaceKey: `work-status:${nodeId}`
+      })
+      .catch(() => null)
+    const { pane, paneDetail } = outcome ? paneResult(outcome) : { pane: 'not-sent', paneDetail: 'error' }
+    if (pane === 'told') return `Your opener ${recipient.recipientNodeId} was told.`
+    if (pane === 'queued') return `Your opener ${recipient.recipientNodeId} is told when it next goes idle.`
+    return `Your opener could not be told (${paneDetail ?? 'not sent'}).`
   }
   // Integration principals (docs/integration-principal.md): a registered local program that owns the
   // nodes it opened through a DURABLE ledger, not through a node of its own. Its `send` rides this

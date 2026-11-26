@@ -8,6 +8,7 @@ import {
   SET_STATUS_VERB,
   WORK_STATUS_CLEAR,
   WORK_STATUS_KINDS,
+  WORK_STATUS_HANDOFF_KINDS,
   WORK_STATUS_LABELS,
   WORK_STATUS_MEANING,
   WORK_STATUS_NOTE_MAX
@@ -253,7 +254,10 @@ function workStatusDocLines(): string[] {
     `  The note (up to ${WORK_STATUS_NOTE_MAX} characters, one line) says what or whom it is about, e.g.`,
     '  `--status ready --note "scope agreed with the ticket author"`. Setting it again replaces both.',
     '  Update it every time your phase changes; `ready` means the person can act now, never just "my',
-    '  turn ended". Only your own node; every flag takes a value.'
+    '  turn ended". Only your own node; every flag takes a value.',
+    `  Entering ${[...WORK_STATUS_HANDOFF_KINDS].map((k) => `\`${k}\``).join(', ')} also tells the agent that OPENED you (it gets one`,
+    '  notice, with your note quoted, when it next goes idle; a newer one replaces a notice still',
+    '  waiting). Moving between the other kinds, or changing only the note, tells nobody.'
   ]
 }
 

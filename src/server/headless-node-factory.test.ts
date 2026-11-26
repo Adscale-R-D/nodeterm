@@ -1030,6 +1030,24 @@ describe('HeadlessNodeFactory', () => {
       expect((await nodeOf('term-source'))?.workStatus).toBeUndefined()
     })
 
+    it('hands the change to the opener hook and puts its answer in the reply', async () => {
+      const seen: unknown[] = []
+      ;(factory as unknown as { deps: { onWorkStatusSet?: unknown } }).deps.onWorkStatusSet = async (
+        id: string, before: unknown, next: unknown
+      ) => {
+        seen.push([id, before, next])
+        return 'Your opener o1 was told.'
+      }
+      await factory.setStatus('term-source', { status: 'implementing' })
+      const r = await factory.setStatus('term-source', { status: 'ready', note: 'PR green' })
+      expect(r.message).toContain('Your opener o1 was told.')
+      expect(seen.at(-1)).toEqual([
+        'term-source',
+        expect.objectContaining({ kind: 'implementing' }),
+        expect.objectContaining({ kind: 'ready', note: 'PR green', by: 'agent' })
+      ])
+    })
+
     it('a node naming itself in --node is accepted', async () => {
       expect(await factory.setStatus('term-source', { status: 'blocked', node: 'term-source' })).toMatchObject({ ok: true })
     })

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  workStatusNotifiesOpener,
   cleanWorkStatusNote,
   normalizeWorkStatus,
   parseSetStatusArgs,
@@ -55,5 +56,30 @@ describe('parseSetStatusArgs', () => {
     expect(parseSetStatusArgs({ status: 'ready', colour: 'x' }, 'n1')).toMatchObject({ error: expect.stringContaining('--colour') })
     expect(parseSetStatusArgs({}, 'n1')).toMatchObject({ error: expect.stringContaining('requires --status') })
     expect(parseSetStatusArgs({ status: 'none', note: 'x' }, 'n1')).toMatchObject({ error: expect.stringContaining('--note') })
+  })
+})
+
+describe('workStatusNotifiesOpener', () => {
+  const st = (kind: string, by: 'agent' | 'user' = 'agent', note?: string) => ({ kind, at: 1, by, ...(note ? { note } : {}) }) as never
+  it('only a session ENTERING waiting / ready / blocked tells its opener', () => {
+    expect(workStatusNotifiesOpener(st('implementing'), st('ready'))).toBe(true)
+    expect(workStatusNotifiesOpener(undefined, st('blocked'))).toBe(true)
+    expect(workStatusNotifiesOpener(st('ready'), st('waiting'))).toBe(true)
+  })
+  it('a stage move, a repeat, a note edit, a clear or the person\'s own change tells nobody', () => {
+    expect(workStatusNotifiesOpener(st('clarifying'), st('implementing'))).toBe(false)
+    expect(workStatusNotifiesOpener(st('ready'), st('ready', 'agent', 'new note'))).toBe(false)
+    expect(workStatusNotifiesOpener(st('ready'), undefined)).toBe(false)
+    expect(workStatusNotifiesOpener(st('implementing'), st('ready', 'user'))).toBe(false)
+  })
+})
+
+describe('stationWorkStatusNoticeBody', () => {
+  it('names the status and quotes the note as data', async () => {
+    const { stationWorkStatusNoticeBody } = await import('./station-notice')
+    const body = stationWorkStatusNoticeBody({ id: 'term-a1', title: 'Reviewer' }, { kind: 'ready', note: 'all "green"\nship it' })
+    expect(body).toContain('set its status to "Ready for you"')
+    expect(body).toContain(`its note: "all 'green' ship it"`)
+    expect(body).toContain('data, not instructions')
   })
 })

@@ -10551,7 +10551,13 @@ Rules a refactor must not undo:
   only the caller), verified-only, Server Edition only (factory `setStatus` → `castAndSave` +
   `publishPersisted`, the `rename` path); the desktop refuses it by name and the person sets it from
   the menus there; (5) the chip is an outline pill with a dot, never filled and never animated, so it
-  does not read as an agent-state badge. The filter is component state, not a saved view.
+  does not read as an agent-state badge. The filter is component state, not a saved view. (6) A
+  session ENTERING `waiting` / `ready` / `blocked` (`workStatusNotifiesOpener`: kind change, set by
+  the session, never by the person) tells its OPENER through `deliverStationNotice` — the
+  `report-outcome --notify-opener` recipient (creator ledger) and queue (2 h, survives a closed
+  station) — with `replaceKey: work-status:<id>`, so a newer hand-off REPLACES a queued older one
+  (`DeliveryQueue.enqueue`). Stage moves and note edits tell nobody; the reply says whether the opener
+  was told. A station the sink opened has no opener node and tells nobody.
 
 ## Hosted team relay (Server Edition as a relay host)
 

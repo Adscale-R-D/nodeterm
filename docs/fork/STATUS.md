@@ -235,7 +235,9 @@ through the shim (`link-pr`, `unlink-pr`, `link-jira`, `unlink-jira`, `links`; 2
 only, verified, self only) or the person sets from the node / card menu `Status ▸` or by clicking the
 chip. Shown on the node header, the board card and the card modal, filterable on the board. Unlike
 NEEDS YOU it survives opening the node, new turns and restarts — it is for "this one is ready to go
-further". Stored on the node in `project.json` (git-ignored here).
+further". Stored on the node in `project.json` (git-ignored here). A session entering Waiting on
+someone, Ready for you or Blocked also tells the agent that opened it (queued until that agent is
+idle; a newer status replaces one still waiting).
 
 Plus one UI keep: **the frame context menu's "close group and its nodes"** (`closeGroupWithChildren`
 + `groupSubtreeIds`). Upstream deleted the frame's `×` rather than implementing it, so this is the

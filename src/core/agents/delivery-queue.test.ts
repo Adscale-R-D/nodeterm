@@ -213,3 +213,27 @@ describe('DeliveryQueue', () => {
     expect(Number.isFinite(DELIVERY_QUEUE_TTL_MS)).toBe(true)
   })
 })
+
+describe('replaceKey — a newer notice replaces a queued older one', () => {
+  const req = (body: string, replaceKey?: string): QueuedDeliveryRequest => ({
+    sourceNodeId: 'st1',
+    targetNodeId: 'op1',
+    sourceTitle: 'Station',
+    body,
+    verb: 'station-notice',
+    ...(replaceKey ? { replaceKey } : {})
+  })
+
+  it('keeps only the latest entry with the same key, and leaves other entries alone', async () => {
+    const h = harness()
+    const q = new DeliveryQueue(h.deps)
+    await q.enqueue(req('unrelated'))
+    await q.enqueue(req('waiting', 'work-status:st1'))
+    await q.enqueue(req('ready', 'work-status:st1'))
+    expect(q.depth('op1')).toBe(2)
+    // The replaced entry's TTL timer is cancelled, so it can never be reported as expired.
+    expect(h.timers.filter((t) => t.cancelled)).toHaveLength(1)
+    await q.onTargetIdle('op1')
+    expect(h.delivered.map((r) => r.body)).toEqual(['unrelated', 'ready'])
+  })
+})

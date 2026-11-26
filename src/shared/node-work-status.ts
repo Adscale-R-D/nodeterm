@@ -112,6 +112,16 @@ export function sameWorkStatus(a: NodeWorkStatus | undefined, b: NodeWorkStatus 
   return a.kind === b.kind && a.note === b.note && a.at === b.at && a.by === b.by
 }
 
+/** The kinds that tell a station's OPENER (the node that opened it through canvas control): the
+ *  moments the opener may have to act. The stage kinds (clarifying … review) stay on the chip. */
+export const WORK_STATUS_HANDOFF_KINDS: ReadonlySet<WorkStatusKind> = new Set(['waiting', 'ready', 'blocked'])
+
+/** Does a change from `before` to `next` (set by the session itself) owe the opener a notice? Only
+ *  ENTERING a hand-off kind: a note edit, a repeat, a clear or a stage move does not. */
+export function workStatusNotifiesOpener(before: NodeWorkStatus | undefined, next: NodeWorkStatus | undefined): boolean {
+  return !!next && next.by === 'agent' && WORK_STATUS_HANDOFF_KINDS.has(next.kind) && before?.kind !== next.kind
+}
+
 // ── The control verb ────────────────────────────────────────────────────────────────────────────
 
 export const SET_STATUS_VERB = 'set-status'

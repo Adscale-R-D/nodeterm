@@ -400,7 +400,17 @@ export class DeliveryQueue {
   ): Promise<
     Extract<AgentMessageOutcome, { kind: 'queued' } | { kind: 'queueFull' }>
   > {
-    const list = this.queues.get(req.targetNodeId) ?? []
+    let list = this.queues.get(req.targetNodeId) ?? []
+    // A newer notice replaces a queued one with the same key (a station's latest work status): the
+    // older one says something no longer true, and reading both costs the target a turn for nothing.
+    if (typeof req.replaceKey === 'string' && req.replaceKey) {
+      const stale = list.filter((e) => e.req.replaceKey === req.replaceKey)
+      if (stale.length) {
+        for (const e of stale) e.cancelTimer()
+        list = list.filter((e) => !stale.includes(e))
+        this.queues.set(req.targetNodeId, list)
+      }
+    }
     if (list.length >= this.capacity) {
       // Refused, not dropped-oldest: an accepted message is never silently discarded to make room.
       return { kind: 'queueFull', capacity: this.capacity }

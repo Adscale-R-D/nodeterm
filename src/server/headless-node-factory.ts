@@ -126,6 +126,9 @@ export interface HeadlessPty {
 export type HeadlessWorkspace = Pick<WorkspaceStore, 'load' | 'save'>
 
 export interface HeadlessNodeFactoryDeps {
+  /** A session's own `set-status` landed (@shared/node-work-status). Answers the line the station is
+   *  told about its opener, or nothing when there was nothing to tell. */
+  onWorkStatusSet?(nodeId: string, before: NodeWorkStatus | undefined, next: NodeWorkStatus | undefined): Promise<string | undefined>
   workspaceStore: HeadlessWorkspace
   ptyManager: HeadlessPty
   settings(): Settings
@@ -1706,9 +1709,10 @@ export class HeadlessNodeFactory {
       })
       await this.castAndSave(workspace)
       await this.publishPersisted([source.project.id])
+      const told = await this.deps.onWorkStatusSet?.(sourceNodeId, before, next).catch(() => undefined)
       return {
         ok: true,
-        message: next ? `status set: ${workStatusLine(next)}` : 'status cleared',
+        message: `${next ? `status set: ${workStatusLine(next)}` : 'status cleared'}${told ? ` ${told}` : ''}`,
         result: { status: next ?? null, changed: true }
       }
     })

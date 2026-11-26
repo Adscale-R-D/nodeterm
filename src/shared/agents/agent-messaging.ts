@@ -44,6 +44,9 @@ export interface AgentMessageDeliveryInput extends Omit<AgentMessageDeliverReque
   /** A `report-outcome --notify-opener` notice (core-set, never from IPC): it may outlive its
    *  closed station in the queue. A station-FAILURE notice is not marked. */
   outcomeNotice?: true
+  /** Core-set, never from IPC: a queued notice with the same key for the same target is REPLACED
+   *  by this one (a station's work status — only its latest hand-off is worth reading). */
+  replaceKey?: string
 }
 
 /** The `from:` line of a notice's envelope. The station is named in the body; the frame says who

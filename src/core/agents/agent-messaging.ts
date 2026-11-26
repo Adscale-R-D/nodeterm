@@ -1171,6 +1171,9 @@ export async function deliverStationNotice(
      *  closed station. A failure notice keeps the ordinary 5-minute wait: it can suggest closing the
      *  station, which must not land long after the station recovered. */
     outcome?: true
+    /** A newer notice with the same key REPLACES a queued older one for the same recipient (a
+     *  station's work status: only its latest hand-off is worth reading). */
+    replaceKey?: string
   },
   deps: AgentMessagingDeps
 ): Promise<AgentMessageOutcome> {
@@ -1180,7 +1183,8 @@ export async function deliverStationNotice(
       sourceNodeId: notice.stationNodeId,
       targetNodeId: notice.recipientNodeId,
       body: notice.body,
-      ...(notice.outcome ? { outcomeNotice: true as const } : {})
+      ...(notice.outcome ? { outcomeNotice: true as const } : {}),
+      ...(notice.replaceKey ? { replaceKey: notice.replaceKey } : {})
     },
     deps,
     notice.outcome ? { ttlMs: STATION_NOTICE_TTL_MS } : {}

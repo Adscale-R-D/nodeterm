@@ -191,7 +191,6 @@ export const SessionCard = memo(function SessionCard({
           <IssueRefChip issueRef={session.issueRef} onOpen={onOpenIssue} />
         )}
         {session.kind === 'terminal' && <IntegrationChip marker={session.integration} />}
-        {session.kind === 'terminal' && <WorkStatusChip status={session.workStatus} onSet={onSetWorkStatus ? (st) => onSetWorkStatus(session.id, st) : undefined} compact />}
         {session.kind === 'terminal' && team && team.length > 0 && onTravel && (
           <TeamProgressChip stations={team} onTravel={onTravel} statusStore={statusStore} />
         )}
@@ -299,6 +298,16 @@ export const SessionCard = memo(function SessionCard({
               )}
             </>
           )}
+        </div>
+      )}
+      {/* The work status sits on its own line under the model / context row, not beside the title:
+          the title row is where space is shortest, and here the note has room to be read. */}
+      {session.kind === 'terminal' && session.workStatus && (
+        <div className="kanban-card__workstatus">
+          <WorkStatusChip
+            status={session.workStatus}
+            onSet={onSetWorkStatus ? (st) => onSetWorkStatus(session.id, st) : undefined}
+          />
         </div>
       )}
     </div>

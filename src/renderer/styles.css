@@ -12738,6 +12738,15 @@ button.pull-checks__name {
   white-space: nowrap;
   overflow: hidden;
 }
+.kanban-card__workstatus {
+  display: flex;
+  min-width: 0;
+  margin-top: 4px;
+}
+.kanban-card__workstatus .work-status-chip {
+  margin-left: 0;
+  max-width: 100%;
+}
 .work-status-chip--button {
   cursor: pointer;
 }

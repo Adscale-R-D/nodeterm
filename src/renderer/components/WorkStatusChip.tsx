@@ -1,4 +1,5 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { isTopDialog, nextDialogId, popDialog, pushDialog } from './dialog-stack'
 import {
   normalizeWorkStatus,
   WORK_STATUS_KINDS,
@@ -110,15 +111,58 @@ export function WorkStatusChip({
       >
         {body}
       </button>
-      {menu && (
-        <ContextMenu
-          x={menu.x}
-          y={menu.y}
-          zIndex={70}
-          items={workStatusMenuItems(s, onSet)}
-          onClose={() => setMenu(null)}
-        />
-      )}
+      {menu && <ChipMenu at={menu} items={workStatusMenuItems(s, onSet)} onClose={() => setMenu(null)} />}
     </>
+  )
+}
+
+/**
+ * The chip's own menu. Two things a plain `ContextMenu` here would get wrong:
+ *  - React events bubble through a portal to the component tree it is MOUNTED in, so a click on a
+ *    row would also reach the board card behind it (opening the card modal) or the node header.
+ *    The wrapper stops every pointer/click event at the chip.
+ *  - Escape: the card modal listens in the capture phase and closes the whole modal. The menu
+ *    therefore registers on the dialog stack, so the modal is no longer the top dialog, and takes
+ *    Escape itself.
+ */
+function ChipMenu({
+  at,
+  items,
+  onClose
+}: {
+  at: { x: number; y: number }
+  items: MenuItem[]
+  onClose: () => void
+}): React.JSX.Element {
+  // The menu registers ONCE for its lifetime; the latest close callback is read through a ref.
+  const close = useRef(onClose)
+  close.current = onClose
+  useEffect(() => {
+    const id = nextDialogId()
+    pushDialog(id)
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key !== 'Escape' || !isTopDialog(id)) return
+      e.preventDefault()
+      e.stopPropagation()
+      close.current()
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => {
+      window.removeEventListener('keydown', onKey, true)
+      popDialog(id)
+    }
+  }, [])
+  const stop = (e: React.SyntheticEvent): void => e.stopPropagation()
+  return (
+    <span
+      className="nodrag"
+      onClick={stop}
+      onPointerDown={stop}
+      onMouseDown={stop}
+      onDoubleClick={stop}
+      onContextMenu={stop}
+    >
+      <ContextMenu x={at.x} y={at.y} zIndex={70} items={items} onClose={onClose} />
+    </span>
   )
 }

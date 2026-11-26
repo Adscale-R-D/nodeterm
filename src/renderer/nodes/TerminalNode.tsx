@@ -6347,6 +6347,7 @@ export function TerminalNode({
             (`set-status`) or here. The same chip the board card and the card modal draw. */}
         <WorkStatusChip
           status={data.workStatus}
+          compact
           onSet={(workStatus) => {
             updateNodeData(id, { workStatus })
             markWorkspaceDirty()

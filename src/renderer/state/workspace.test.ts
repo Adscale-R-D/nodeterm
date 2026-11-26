@@ -11,6 +11,7 @@ import {
   createDinoNode,
   createWhiteboardNode,
   duplicateNode,
+  applyMutationToFlow,
   createSystemLoginNode,
   isAccountLoginNode,
   fitGroupToChildren,
@@ -819,6 +820,17 @@ describe('work status at the serializer seams (@shared/node-work-status)', () =>
     expect(flow[0].data.workStatus).toBeUndefined()
     flow[0].data.workStatus = { kind: 'ready', at: 'soon' } as never
     expect(flowToNodeStates(flow)[0].workStatus).toBeUndefined()
+  })
+
+  it('a peer op sets it on the live node, and a later op without it clears it', () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const live = nodeStatesToFlow([state(undefined) as any])
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const set = applyMutationToFlow(live, { op: 'upsert', node: state(ok) as any })
+    expect(set[0].data.workStatus).toEqual(ok)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const cleared = applyMutationToFlow(set, { op: 'upsert', node: state(undefined) as any })
+    expect(cleared[0].data.workStatus).toBeUndefined()
   })
 
   it('a duplicate does not inherit it (the copy is a new session)', () => {

@@ -16,6 +16,11 @@ describe('normalizeWorkStatus', () => {
     })
   })
 
+  it('a status saved under the first list\'s name reads as its successor', () => {
+    expect(normalizeWorkStatus({ kind: 'investigating', at: 1, by: 'agent' })).toEqual({ kind: 'clarifying', at: 1, by: 'agent' })
+    expect(normalizeWorkStatus({ kind: 'review', at: 1 })?.kind).toBe('review')
+  })
+
   it('anything malformed is no status; an unknown author reads as the person', () => {
     expect(normalizeWorkStatus(undefined)).toBeUndefined()
     expect(normalizeWorkStatus('ready')).toBeUndefined()
@@ -39,6 +44,8 @@ describe('parseSetStatusArgs', () => {
   it('accepts a kind with a note, case-insensitively, and none as a clear', () => {
     expect(parseSetStatusArgs({ status: 'Ready', note: 'go' }, 'n1')).toEqual({ clear: false, kind: 'ready', note: 'go' })
     expect(parseSetStatusArgs({ status: 'none' }, 'n1')).toEqual({ clear: true })
+    expect(parseSetStatusArgs({ status: 'investigating' }, 'n1')).toEqual({ clear: false, kind: 'clarifying' })
+    expect(parseSetStatusArgs({ status: 'review', note: 'PR #12' }, 'n1')).toEqual({ clear: false, kind: 'review', note: 'PR #12' })
     expect(parseSetStatusArgs({ status: 'waiting', node: 'n1' }, 'n1')).toEqual({ clear: false, kind: 'waiting' })
   })
 

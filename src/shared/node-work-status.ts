@@ -13,23 +13,54 @@
 // that carries it, and that file is hand-editable input: `normalizeWorkStatus` runs at both
 // serializer seams and in every reader; anything malformed is no status (the node is kept).
 
-export const WORK_STATUS_KINDS = ['investigating', 'waiting', 'ready', 'blocked'] as const
+/** In dev-flow order: the stages a ticket session moves through, then the two "someone else is
+ *  next" kinds, then blocked. The menus, the board filter and the agent docs use this order. */
+export const WORK_STATUS_KINDS = [
+  'clarifying',
+  'planning',
+  'implementing',
+  'review',
+  'waiting',
+  'ready',
+  'blocked'
+] as const
 export type WorkStatusKind = (typeof WORK_STATUS_KINDS)[number]
 
 export const WORK_STATUS_LABELS: Record<WorkStatusKind, string> = {
-  investigating: 'Investigating',
+  clarifying: 'Clarifying',
+  planning: 'Planning',
+  implementing: 'Implementing',
+  review: 'In review',
   waiting: 'Waiting on someone',
-  ready: 'Ready to go',
+  ready: 'Ready for you',
   blocked: 'Blocked'
+}
+
+/** What each kind means — the menus' hints and the agent docs. */
+export const WORK_STATUS_MEANING: Record<WorkStatusKind, string> = {
+  clarifying: 'working out the scope, asking the reporter',
+  planning: 'designing the change, agreeing the approach',
+  implementing: 'writing the code, running the local gate',
+  review: 'a pull request is open, waiting on reviewers or CI',
+  waiting: 'a person must answer before it can go on',
+  ready: "this session's part is done; the person decides what is next",
+  blocked: 'cannot continue (say why in the note)'
 }
 
 /** Shorter labels for the chip itself (the full label is in its tooltip and the menus). */
 export const WORK_STATUS_SHORT: Record<WorkStatusKind, string> = {
-  investigating: 'Investigating',
+  clarifying: 'Clarifying',
+  planning: 'Planning',
+  implementing: 'Implementing',
+  review: 'In review',
   waiting: 'Waiting',
   ready: 'Ready',
   blocked: 'Blocked'
 }
+
+/** Names from the first version of the list, read as their successor (a stored status, a skill
+ *  still written against the old name). `investigating` was the first list's "working it out". */
+const LEGACY_KINDS: Record<string, WorkStatusKind> = { investigating: 'clarifying' }
 
 /** The note: one printable line. */
 export const WORK_STATUS_NOTE_MAX = 120
@@ -47,6 +78,12 @@ export function isWorkStatusKind(v: unknown): v is WorkStatusKind {
   return typeof v === 'string' && (WORK_STATUS_KINDS as readonly string[]).includes(v)
 }
 
+/** A current kind, or a legacy name mapped to its successor; anything else is undefined. */
+export function resolveWorkStatusKind(v: unknown): WorkStatusKind | undefined {
+  if (isWorkStatusKind(v)) return v
+  return typeof v === 'string' && Object.hasOwn(LEGACY_KINDS, v) ? LEGACY_KINDS[v] : undefined
+}
+
 /** Controls, format characters (bidi, zero-width) and line breaks go; whitespace is collapsed. */
 export function cleanWorkStatusNote(raw: unknown): string | undefined {
   if (typeof raw !== 'string') return undefined
@@ -62,10 +99,11 @@ export function cleanWorkStatusNote(raw: unknown): string | undefined {
 export function normalizeWorkStatus(raw: unknown): NodeWorkStatus | undefined {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
   const r = raw as Record<string, unknown>
-  if (!isWorkStatusKind(r.kind)) return undefined
+  const kind = resolveWorkStatusKind(r.kind)
+  if (!kind) return undefined
   if (typeof r.at !== 'number' || !Number.isFinite(r.at) || r.at < 0) return undefined
   const note = cleanWorkStatusNote(r.note)
-  return { kind: r.kind, ...(note ? { note } : {}), at: r.at, by: r.by === 'agent' ? 'agent' : 'user' }
+  return { kind, ...(note ? { note } : {}), at: r.at, by: r.by === 'agent' ? 'agent' : 'user' }
 }
 
 /** Same status, as every reader sees it (the time and author count: they are on the tooltip). */
@@ -102,11 +140,12 @@ export function parseSetStatusArgs(args: Record<string, string>, selfId: string)
     if (args.note !== undefined) return { error: `${SET_STATUS_VERB}: --note needs a status; --status none clears it` }
     return { clear: true }
   }
-  if (!isWorkStatusKind(status)) {
+  const kind = resolveWorkStatusKind(status)
+  if (!kind) {
     return { error: `${SET_STATUS_VERB}: unknown status "${status.slice(0, 40)}" — use ${[...WORK_STATUS_KINDS, WORK_STATUS_CLEAR].join('|')}` }
   }
   const note = cleanWorkStatusNote(args.note)
-  return { clear: false, kind: status, ...(note ? { note } : {}) }
+  return { clear: false, kind, ...(note ? { note } : {}) }
 }
 
 export function workStatusLine(s: NodeWorkStatus | undefined): string {

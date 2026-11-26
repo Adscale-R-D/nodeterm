@@ -52,15 +52,15 @@ describe('Status ▸ in the node menu', () => {
   it('offers the four kinds for a session node, and Clear once one is set', () => {
     const write = vi.fn()
     const fresh = statusMenu(buildNodeActionItems(['t1'], undefined, offCanvasNodeActionCtx(input([stored('t1')], write))))!
-    expect(labels(fresh.children)).toEqual(['Investigating', 'Waiting on someone', 'Ready to go', 'Blocked'])
-    const ready = fresh.children[2] as { onClick: () => void }
+    expect(labels(fresh.children)).toEqual(['Clarifying', 'Planning', 'Implementing', 'In review', 'Waiting on someone', 'Ready for you', 'Blocked'])
+    const ready = fresh.children[5] as { onClick: () => void }
     ready.onClick()
     expect(write).toHaveBeenCalledWith(['t1'], expect.objectContaining({ kind: 'ready', by: 'user' }))
 
     const set = statusMenu(
       buildNodeActionItems(['t1'], undefined, offCanvasNodeActionCtx(input([stored('t1', { workStatus: { kind: 'ready', at: 1, by: 'agent' } })], write)))
     )!
-    expect(labels(set.children)).toEqual(['Investigating', 'Waiting on someone', 'Ready to go ✓', 'Blocked', '—', 'Clear status'])
+    expect(labels(set.children)).toEqual(['Clarifying', 'Planning', 'Implementing', 'In review', 'Waiting on someone', 'Ready for you ✓', 'Blocked', '—', 'Clear status'])
     ;(set.children.at(-1) as { onClick: () => void }).onClick()
     expect(write).toHaveBeenLastCalledWith(['t1'], undefined)
   })
@@ -71,7 +71,7 @@ describe('Status ▸ in the node menu', () => {
       buildNodeActionItems(['t1', 't2'], undefined, offCanvasNodeActionCtx(input([stored('t1'), stored('t2')], write)))
     )!
     ;(many.children[0] as { onClick: () => void }).onClick()
-    expect(write).toHaveBeenCalledWith(['t1', 't2'], expect.objectContaining({ kind: 'investigating' }))
+    expect(write).toHaveBeenCalledWith(['t1', 't2'], expect.objectContaining({ kind: 'clarifying' }))
     const sticky = buildNodeActionItems(['s1'], undefined, offCanvasNodeActionCtx(input([stored('s1', { kind: 'sticky' })])))
     expect(statusMenu(sticky)).toBeUndefined()
   })

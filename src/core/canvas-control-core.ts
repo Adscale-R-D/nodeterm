@@ -9,6 +9,7 @@ import {
   WORK_STATUS_CLEAR,
   WORK_STATUS_KINDS,
   WORK_STATUS_LABELS,
+  WORK_STATUS_MEANING,
   WORK_STATUS_NOTE_MAX
 } from '../shared/node-work-status'
 import { INTEGRATION_JIRA_MAX, JIRA_CATEGORIES } from '../shared/integration-jira'
@@ -243,17 +244,16 @@ function nodeLinkDocLines(): string[] {
 
 /** A session's own work status (@shared/node-work-status). Kinds and bounds come from that module. */
 function workStatusDocLines(): string[] {
-  const kinds = WORK_STATUS_KINDS.map((k) => `\`${k}\` (${WORK_STATUS_LABELS[k]})`).join(', ')
   return [
     'Work status (nodeterm Server Edition only; the desktop refuses it by name). Say where YOUR work',
     'stands, as a chip on your node and your kanban card that STAYS until you or the person change it',
     '(it is not cleared by a new turn, by the person opening you, or by a restart):',
-    `- \`${SET_STATUS_VERB} --status ${[...WORK_STATUS_KINDS, WORK_STATUS_CLEAR].join('|')} [--note "<one line>"]\` — ${kinds};`,
-    `  \`${WORK_STATUS_CLEAR}\` clears it. The note (up to ${WORK_STATUS_NOTE_MAX} characters, one line) says why, e.g.`,
+    `- \`${SET_STATUS_VERB} --status ${[...WORK_STATUS_KINDS, WORK_STATUS_CLEAR].join('|')} [--note "<one line>"]\`; \`${WORK_STATUS_CLEAR}\` clears it.`,
+    ...WORK_STATUS_KINDS.map((k) => `  - \`${k}\` (${WORK_STATUS_LABELS[k]}): ${WORK_STATUS_MEANING[k]}`),
+    `  The note (up to ${WORK_STATUS_NOTE_MAX} characters, one line) says what or whom it is about, e.g.`,
     '  `--status ready --note "scope agreed with the ticket author"`. Setting it again replaces both.',
-    '  Update it when your phase changes: `investigating` while you work something out, `waiting` when you',
-    '  are blocked on a person (a ticket author, a reviewer), `ready` when your part is done and the person',
-    '  can take it further, `blocked` when you cannot go on. Only your own node; every flag takes a value.'
+    '  Update it every time your phase changes; `ready` means the person can act now, never just "my',
+    '  turn ended". Only your own node; every flag takes a value.'
   ]
 }
 

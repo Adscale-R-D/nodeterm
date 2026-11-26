@@ -10535,8 +10535,9 @@ Rules a refactor must not undo:
   session's own (it reads Jira; a session's may carry no status). Both stores share one upsert rule
   (`upsertJiraTickets`). The verb's prune treats a project missing from `persistedCanvases()` as
   LIVE (not loaded is not gone), and `--site` defaults per project, from integration tickets only.
-- **A node's WORK STATUS** (`@shared/node-work-status`, fork 2026-11-26): Investigating / Waiting on
-  someone / Ready to go / Blocked + a one-line note, as a chip on the node header, the board card and
+- **A node's WORK STATUS** (`@shared/node-work-status`, fork 2026-11-26): Clarifying / Planning /
+  Implementing / In review / Waiting on someone / Ready for you / Blocked (dev-flow order; the first
+  list's `investigating` is read as `clarifying`) + a one-line note, as a chip on the node header, the board card and
   the card modal (one `WorkStatusChip`), and a board filter beside the Running / Needs you chips.
   Rules a refactor must keep: (1) **sticky** — nothing clears it but the session (`set-status`) or the
   person (node / card menu `Status ▸`, the chip's own menu); not a new turn, a read, a hook event or

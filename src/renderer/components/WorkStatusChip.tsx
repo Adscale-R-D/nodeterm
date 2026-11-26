@@ -4,6 +4,7 @@ import {
   normalizeWorkStatus,
   WORK_STATUS_KINDS,
   WORK_STATUS_LABELS,
+  WORK_STATUS_MEANING,
   WORK_STATUS_SHORT,
   type NodeWorkStatus,
   type WorkStatusKind
@@ -53,6 +54,7 @@ export function workStatusMenuItems(
 ): MenuItem[] {
   const rows: MenuItem[] = WORK_STATUS_KINDS.map((kind) => ({
     label: current?.kind === kind ? `${WORK_STATUS_LABELS[kind]} ✓` : WORK_STATUS_LABELS[kind],
+    hint: WORK_STATUS_MEANING[kind],
     icon: <WorkStatusDot kind={kind} />,
     onClick: () => {
       if (current?.kind === kind) return

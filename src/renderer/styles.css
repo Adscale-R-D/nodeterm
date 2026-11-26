@@ -12769,7 +12769,10 @@ button.pull-checks__name {
   height: 7px;
   border-radius: 50%;
 }
-.work-status-dot--investigating { background: var(--sys-indigo); }
+.work-status-dot--clarifying { background: var(--sys-cyan); }
+.work-status-dot--planning { background: var(--sys-purple); }
+.work-status-dot--implementing { background: var(--sys-orange); }
+.work-status-dot--review { background: var(--sys-indigo); }
 .work-status-dot--waiting { background: var(--sys-yellow); }
 .work-status-dot--ready { background: var(--sys-green); }
 .work-status-dot--blocked { background: var(--sys-red); }

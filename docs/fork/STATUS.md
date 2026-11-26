@@ -231,7 +231,7 @@ part of the integration-principal fork work. A session can declare the same link
 through the shim (`link-pr`, `unlink-pr`, `link-jira`, `unlink-jira`, `links`; 2026-11-23).
 
 **Node work status (2026-11-26).** A sticky status chip a session sets on its own node
-(`set-status --status investigating|waiting|ready|blocked|none [--note "<line>"]`, Server Edition
+(`set-status --status clarifying|planning|implementing|review|waiting|ready|blocked|none [--note "<line>"]`, Server Edition
 only, verified, self only) or the person sets from the node / card menu `Status ▸` or by clicking the
 chip. Shown on the node header, the board card and the card modal, filterable on the board. Unlike
 NEEDS YOU it survives opening the node, new turns and restarts — it is for "this one is ready to go

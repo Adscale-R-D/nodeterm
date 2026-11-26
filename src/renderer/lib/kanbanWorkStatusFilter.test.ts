@@ -16,7 +16,7 @@ describe('work-status filter', () => {
       ['a', 'ready'],
       ['b', 'waiting']
     ])
-    expect(workStatusCounts(by)).toEqual({ investigating: 0, waiting: 1, ready: 1, blocked: 0 })
+    expect(workStatusCounts(by)).toEqual({ clarifying: 0, planning: 0, implementing: 0, review: 0, waiting: 1, ready: 1, blocked: 0 })
   })
 
   it('no filter shows everything; a filter shows only its kinds (OR within)', () => {

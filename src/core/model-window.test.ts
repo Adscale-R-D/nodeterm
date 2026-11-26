@@ -8,6 +8,7 @@ import path from 'path'
 import {
   isOneMillionSelection,
   staticWindowFor,
+  isNative1mModel,
   cachedWindowFor,
   claudeWindowFor,
   geminiWindowFor,
@@ -48,11 +49,34 @@ describe('isOneMillionSelection (the CLI\'s `wS`)', () => {
 })
 
 describe('staticWindowFor', () => {
-  it('defaults to 200k for every bare first-party id', () => {
-    expect(staticWindowFor('claude-opus-5')).toBe(200_000)
-    expect(staticWindowFor('claude-sonnet-5')).toBe(200_000)
+  it('defaults to 200k for a bare id the current catalog does not mark native 1M', () => {
+    expect(staticWindowFor('claude-opus-4-5')).toBe(200_000)
+    expect(staticWindowFor('claude-sonnet-4-6')).toBe(200_000)
     expect(staticWindowFor('claude-haiku-4-5-20251001')).toBe(200_000)
     expect(staticWindowFor(null)).toBe(200_000)
+  })
+
+  it('answers 1M for the CLI 2.1.332 catalog\'s native-1M models, dated or not', () => {
+    for (const id of ['claude-opus-5', 'claude-opus-5-5', 'claude-opus-4-8', 'claude-sonnet-5', 'claude-haiku-5-5', 'claude-fable-5-2']) {
+      expect(staticWindowFor(id)).toBe(1_000_000)
+    }
+    expect(staticWindowFor('claude-opus-4-8-20260101')).toBe(1_000_000)
+    expect(isNative1mModel('claude-opus-5-9')).toBe(false)
+    expect(isNative1mModel('claude-opus-50')).toBe(false)
+    expect(isNative1mModel('claude-opus-4-5')).toBe(false)
+  })
+
+  it('CLAUDE_CODE_DISABLE_1M_CONTEXT turns every 1M answer back to 200k', () => {
+    const saved = process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT
+    process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT = '1'
+    try {
+      expect(staticWindowFor('claude-opus-5-5')).toBe(200_000)
+      expect(staticWindowFor('opus[1m]')).toBe(200_000)
+      expect(claudeWindowFor('claude-opus-5')).toBe(200_000)
+    } finally {
+      if (saved === undefined) delete process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT
+      else process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT = saved
+    }
   })
 
   it('answers 1M only for a marked selection', () => {
@@ -75,11 +99,11 @@ describe('the CLAUDE_CODE_MAX_CONTEXT_TOKENS override (the CLI\'s `Wmf`)', () =>
   it('wins over everything — but ONLY together with DISABLE_COMPACT', () => {
     process.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS = '350000'
     // No DISABLE_COMPACT: the CLI ignores it for first-party ids, so we do too.
-    expect(staticWindowFor('claude-opus-5')).toBe(200_000)
+    expect(staticWindowFor('claude-opus-4-5')).toBe(200_000)
     expect(staticWindowFor('opus[1m]')).toBe(1_000_000)
 
     process.env.DISABLE_COMPACT = '1'
-    expect(staticWindowFor('claude-opus-5')).toBe(350_000)
+    expect(staticWindowFor('claude-opus-4-5')).toBe(350_000)
     // …and it outranks the marker, matching `Wmf` returning before `qmf` is ever called.
     expect(staticWindowFor('opus[1m]')).toBe(350_000)
   })
@@ -88,7 +112,7 @@ describe('the CLAUDE_CODE_MAX_CONTEXT_TOKENS override (the CLI\'s `Wmf`)', () =>
     process.env.DISABLE_COMPACT = '1'
     for (const v of ['0', '-5', 'lots', '']) {
       process.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS = v
-      expect(staticWindowFor('claude-opus-5')).toBe(200_000)
+      expect(staticWindowFor('claude-opus-4-5')).toBe(200_000)
     }
   })
 })
@@ -100,15 +124,19 @@ describe('claudeWindowFor (id + the selection recovered from the transcript path
     // The case the user hit from the other side: the transcript NEVER carries `[1m]`, so without
     // this leg every 1M session would read as 200k and peg the meter.
     const { transcript } = fakeConfigDir({ model: 'opus[1m]' })
-    expect(claudeWindowFor('claude-opus-5', transcript)).toBe(1_000_000)
+    expect(claudeWindowFor('claude-opus-4-5', transcript)).toBe(1_000_000)
   })
 
   it('stays at 200k when the selection is unmarked, missing, or unreadable', () => {
-    expect(claudeWindowFor('claude-opus-5', fakeConfigDir({ model: 'opus' }).transcript)).toBe(200_000)
+    expect(claudeWindowFor('claude-opus-4-5', fakeConfigDir({ model: 'opus' }).transcript)).toBe(200_000)
     resetClaudeModelSelectionCache()
-    expect(claudeWindowFor('claude-opus-5', fakeConfigDir({}).transcript)).toBe(200_000)
+    expect(claudeWindowFor('claude-opus-4-5', fakeConfigDir({}).transcript)).toBe(200_000)
     resetClaudeModelSelectionCache()
-    expect(claudeWindowFor('claude-opus-5', fakeConfigDir(null).transcript)).toBe(200_000)
+    expect(claudeWindowFor('claude-opus-4-5', fakeConfigDir(null).transcript)).toBe(200_000)
+  })
+
+  it('a native-1M model is 1M whatever the selection says (the screenshot session: --model opus)', () => {
+    expect(claudeWindowFor('claude-opus-5', fakeConfigDir({ model: 'opus' }).transcript)).toBe(1_000_000)
   })
 
   it('never second-guesses an id that already states its variant', () => {
@@ -117,8 +145,8 @@ describe('claudeWindowFor (id + the selection recovered from the transcript path
   })
 
   it('is the plain default with no path at all', () => {
-    expect(claudeWindowFor('claude-opus-5')).toBe(200_000)
-    expect(claudeWindowFor('claude-opus-5[1m]')).toBe(1_000_000)
+    expect(claudeWindowFor('claude-opus-4-5')).toBe(200_000)
+    expect(claudeWindowFor('claude-opus-4-5[1m]')).toBe(1_000_000)
     expect(claudeWindowFor(null)).toBe(200_000)
   })
 })

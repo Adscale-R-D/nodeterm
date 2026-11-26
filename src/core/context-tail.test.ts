@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import fs from 'fs'
 import path from 'path'
-import { createContextTail, parseLatestUsage, parseTaskNotifications, hasToolResult } from './context-tail'
+import { createContextTail, parseLatestUsage, parseTaskNotifications, hasToolResult, claudeContextTokens } from './context-tail'
 import { testTmpDir } from './test-tmp'
 
 describe('parseLatestUsage', () => {
@@ -201,7 +201,8 @@ describe('createContextTail — the `parse` dep (gemini/codex)', () => {
   it('claude falls back to the CLI default window when NO parser is injected', async () => {
     // The regression guard for the byte-identical claim: same file, no `parse`, and the denominator
     // is still whatever claudeWindowFor answers for the id. That answer is 200k — the CLI's own
-    // default — because a bare `claude-opus-4-8` carries no `[1m]` marker, and this tmpdir is not
+    // default — because a bare `claude-opus-4-5` carries no `[1m]` marker and is not a native-1M
+    // model of the current catalog (`claude-opus-4-8` now is), and this tmpdir is not
     // `<configDir>/projects/<cwd>/…` so there is no selection to recover either. The old
     // expectation here was 1M, from the family table this file's rule replaced.
     const dir = testTmpDir('ctxtail-claude-')
@@ -210,7 +211,7 @@ describe('createContextTail — the `parse` dep (gemini/codex)', () => {
       file,
       JSON.stringify({
         type: 'assistant',
-        message: { model: 'claude-opus-4-8', usage: { input_tokens: 100, cache_read_input_tokens: 20 } }
+        message: { model: 'claude-opus-4-5', usage: { input_tokens: 100, cache_read_input_tokens: 20 } }
       }) + '\n'
     )
     const send = vi.fn()
@@ -221,7 +222,7 @@ describe('createContextTail — the `parse` dep (gemini/codex)', () => {
     expect(send.mock.calls[0][0]).toMatchObject({
       usedTokens: 120,
       windowTokens: 200_000,
-      model: 'claude-opus-4-8'
+      model: 'claude-opus-4-5'
     })
   })
 })
@@ -391,5 +392,28 @@ describe('createContextTail — effort (the ⌘M composer label)', () => {
     tail.untrack('s1')
     expect(send).toHaveBeenCalledTimes(1)
     expect(send.mock.calls[0][0]).not.toHaveProperty('effort')
+  })
+})
+
+describe('claudeContextTokens (a turn that consulted the advisor)', () => {
+  it('reads the LAST model call, never the sum over iterations', () => {
+    // MEASURED shape (CLI 2.1.33x): top level = sum of the iterations.
+    const usage = {
+      input_tokens: 4,
+      cache_read_input_tokens: 1_700_000,
+      cache_creation_input_tokens: 56_863,
+      iterations: [
+        { type: 'message', input_tokens: 2, cache_read_input_tokens: 820_000, cache_creation_input_tokens: 1_000 },
+        { type: 'advisor_message', input_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 56_000 },
+        { type: 'message', input_tokens: 2, cache_read_input_tokens: 878_000, cache_creation_input_tokens: 1_464 }
+      ]
+    }
+    expect(claudeContextTokens(usage)).toBe(879_466)
+    expect(parseLatestUsage(JSON.stringify({ type: 'assistant', message: { model: 'claude-opus-5-5', usage } }))?.used).toBe(879_466)
+  })
+
+  it('a record without iterations is read at the top level', () => {
+    expect(claudeContextTokens({ input_tokens: 10, cache_read_input_tokens: 20, cache_creation_input_tokens: 5 })).toBe(35)
+    expect(claudeContextTokens(null)).toBe(0)
   })
 })

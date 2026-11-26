@@ -251,10 +251,10 @@ describe('session windows with bounded remote reads', () => {
       const estimate = send.mock.calls.at(-1)![1].windowTokens
       expect(send.mock.calls.at(-1)![1]).toMatchObject({ windowSource: 'estimate' })
       // With no reported window a remote session falls to the id-only rule (`cachedWindowFor`):
-      // a bare `claude-opus-4-8` carries no `[1m]` marker, so the estimate is 200k — never the old
-      // opus-family 1M, which under-reported context pressure 5x. The config dir that would state
-      // the user's selection is on the HOST (see remote-context-tail.ts).
-      expect(estimate).toBe(200_000)
+      // `claude-opus-4-8` is a native-1M model of the current CLI catalog (core/model-window.ts),
+      // so the estimate is 1M. The config dir that would state the user's selection is on the
+      // HOST (see remote-context-tail.ts).
+      expect(estimate).toBe(1_000_000)
       // Even when the denominator is unchanged, the observation's provenance must update.
       tail.track('env', ref, estimate)
       await flush()

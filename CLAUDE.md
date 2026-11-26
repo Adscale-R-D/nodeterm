@@ -3283,6 +3283,18 @@ its agent status" under Hosted team relay.
     *excludes* cache reads, which is why claude sums them. **The formulas must not be unified.**
     The transcript jail is widened **per root** (`~/.gemini/tmp`, `<codexHome>/sessions`), never to
     `$HOME` — that predicate exists so a forged hook POST cannot aim a read at `~/.ssh/id_rsa`.
+  - **UPDATED 2026-11-26 (fork): current CLIs are native 1M for the 5-generation models.** CLI
+    2.1.332 takes the window from a model catalog compiled into its binary, where `claude-opus-5`,
+    `claude-opus-5-5`, `claude-opus-4-7/-4-8`, `claude-sonnet-5(-5)`, `claude-haiku-5-5` and the
+    fable/mythos ids are `context:{window:1e6,native_1m:!0}`; `CLAUDE_CODE_DISABLE_1M_CONTEXT` turns
+    it off. MEASURED here: the same `--model opus` session auto-compacted at 168,048 on 2.1.226 and
+    at 825,082 on 2.1.332, and every `claude-opus-5-5` auto-compaction since 2.1.316 was 879k–1.2M —
+    so the rule below read every current session 5× high. `NATIVE_1M_MODELS` in
+    `core/model-window.ts` is that catalog's list (update it when the CLI's catalog moves; there is
+    no on-disk copy to read). ALSO: a usage record of a turn that consulted the advisor has
+    `iterations` and its top-level counts are their SUM (worst seen: 1.76M top vs 879k in the last
+    call); `claudeContextTokens` reads the last `message` iteration. The paragraph below is the
+    pre-2.1.33x history.
   - **Claude's window is `200k` unless the model SELECTION carries `[1m]` — never the family**
     (`core/model-window.ts`, 2026-08-17). This file used to map opus/sonnet/fable → 1M and haiku →
     200k off a single `/context` reading, which **under-reported context pressure by 5× on every

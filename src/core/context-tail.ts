@@ -22,6 +22,29 @@ const toLines = (text: string | string[]): string[] =>
   Array.isArray(text) ? text : text.split('\n')
 
 /**
+ * The context a claude request actually held, from its `usage` record.
+ *
+ * A turn that consults a server-side tool model (the advisor) is recorded as ONE usage record whose
+ * top-level counts are the SUM over its `iterations` (`message`, `advisor_message`, `message`, …).
+ * MEASURED on CLI 2.1.33x: 676 such records in this host's transcripts, every one larger at the top
+ * level than its final call (worst: 1,756,867 summed vs 879,466 in the last call), which read as a
+ * context past the window. The context is what the LAST `message` iteration sent; the top level is
+ * used only when there are no iterations.
+ */
+export function claudeContextTokens(usage: unknown): number {
+  const sum = (u: Record<string, unknown>): number =>
+    (Number(u.input_tokens) || 0) + (Number(u.cache_read_input_tokens) || 0) + (Number(u.cache_creation_input_tokens) || 0)
+  if (!usage || typeof usage !== 'object') return 0
+  const u = usage as Record<string, unknown>
+  if (Array.isArray(u.iterations) && u.iterations.length > 0) {
+    const its = u.iterations.filter((x): x is Record<string, unknown> => !!x && typeof x === 'object')
+    const last = [...its].reverse().find((x) => x.type === 'message') ?? its[its.length - 1]
+    if (last) return sum(last)
+  }
+  return sum(u)
+}
+
+/**
  * Scan transcript text for the LATEST assistant message's token usage + model. Pure.
  *
  * Scans BACKWARDS and stops at the first line that settles both values: only the latest usage
@@ -41,16 +64,14 @@ export function parseLatestUsage(
   for (let i = lines.length - 1; i >= 0; i--) {
     const s = lines[i].trim()
     if (!s || !s.includes('"usage"') || !s.includes('"assistant"')) continue
-    let o: { type?: string; effort?: unknown; message?: { model?: string; usage?: Record<string, number> } }
+    let o: { type?: string; effort?: unknown; message?: { model?: string; usage?: Record<string, unknown> } }
     try {
       o = JSON.parse(s)
     } catch {
       continue
     }
     if (o.type !== 'assistant' || !o.message?.usage) continue
-    const u = o.message.usage
-    const used =
-      (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0)
+    const used = claudeContextTokens(o.message.usage)
     if (used <= 0) continue
     if (!found) {
       found = true

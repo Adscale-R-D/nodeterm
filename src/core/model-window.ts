@@ -37,11 +37,55 @@ export function sessionContextWindow(value: unknown): number | null {
 //   - the `context-1m` beta header and `native_1m` registry entries (`fW`/`B$`/`Zti`).
 //   - `CLAUDE_CODE_MAX_CONTEXT_TOKENS` without `DISABLE_COMPACT` — the CLI honours it only for
 //     ids that do NOT start with `claude-`, i.e. never for a first-party model.
+//
+// ── 2026-11-26: the `native_1m` branch is no longer an edge case ────────────────────────────────
+// CLI 2.1.332 resolves the window from a MODEL CATALOG compiled into the binary, and in it every
+// 5-generation model (plus opus-4-7/-4-8) is `context:{window:1e6,native_1m:!0}` — `claude-opus-5`
+// and `claude-opus-5-5` included. `CLAUDE_CODE_DISABLE_1M_CONTEXT` (the CLI's `U$()`) is what turns
+// it off. MEASURED on this host: the screenshot session (`claude-opus-5`, launched `--model opus`)
+// auto-compacted at 168,048 on 2.1.226 (Aug) and at 825,082 on 2.1.332 (today); every
+// `claude-opus-5-5` auto-compaction since 2.1.316 landed between 879,295 and 1,195,230. The
+// "200k unless `[1m]`" rule therefore read every current session 5× HIGH. `NATIVE_1M_MODELS` is
+// copied from that catalog (ids only; extracted with `strings` over the 2.1.332 binary).
 // Fully synchronous.
 import { claudeConfigDirFromTranscript, selectedClaudeModel } from './claude-model-selection'
 
 const DEFAULT_WINDOW = 200_000
 const LARGE_WINDOW = 1_000_000
+
+/** The CLI 2.1.332 catalog's `native_1m` models (see the header). A dated suffix
+ *  (`claude-opus-4-8-20260101`) still names the model. */
+const NATIVE_1M_MODELS = [
+  'claude-opus-5-5',
+  'claude-opus-5',
+  'claude-opus-4-8',
+  'claude-opus-4-7',
+  'claude-sonnet-5-5',
+  'claude-sonnet-5',
+  'claude-haiku-5-5',
+  'claude-fable-5-2',
+  'claude-fable-5-1',
+  'claude-fable-5',
+  'claude-mythos-5-2',
+  'claude-mythos-5-1',
+  'claude-mythos-5'
+] as const
+
+/** True for a model id the current CLI runs with a native 1M window. Matches the id exactly or
+ *  followed by a date / variant suffix, never a longer version (`claude-opus-5` is not
+ *  `claude-opus-5-5`'s prefix match: the list is checked longest first). */
+export function isNative1mModel(model: string | null | undefined): boolean {
+  if (!model) return false
+  const id = model.toLowerCase().replace(/\[[^\]]*\]$/, '')
+  return NATIVE_1M_MODELS.some((m) => id === m || (id.startsWith(`${m}-`) && /^\d{8}$/.test(id.slice(m.length + 1))))
+}
+
+/** The CLI's `U$()`: `CLAUDE_CODE_DISABLE_1M_CONTEXT` turns the 1M window off everywhere. Read from
+ *  the host env (a session started with it set in its own env is not visible here). */
+function oneMillionDisabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  const v = env.CLAUDE_CODE_DISABLE_1M_CONTEXT
+  return !!v && v !== '0' && v.toLowerCase() !== 'false'
+}
 
 /** The CLI's `wS`: the ONLY thing that buys a 1M window is the literal `[1m]` marker. */
 const ONE_M_MARKER = /\[1m\]/i
@@ -62,13 +106,16 @@ function envOverrideWindow(env: NodeJS.ProcessEnv = process.env): number | null 
 }
 
 /**
- * Context window from a model string ALONE: 1M when it carries `[1m]`, else 200k. A bare
- * `claude-opus-5` is 200k here, because that is what the CLI does with it — a transcript id is
- * not evidence of a 1M session. Callers that can also see the user's selection should prefer
- * {@link claudeWindowFor}, which is the one that gets a `opus[1m]` machine right.
+ * Context window from a model string ALONE: 1M when it carries `[1m]` or is a native-1M model of the
+ * current CLI's catalog (`claude-opus-5`, `claude-opus-5-5`, …), else 200k; 200k everywhere when
+ * `CLAUDE_CODE_DISABLE_1M_CONTEXT` is set. Callers that can also see the user's selection should
+ * prefer {@link claudeWindowFor}, which also gets an older model with an `opus[1m]` selection right.
  */
 export function staticWindowFor(model: string | null): number {
-  return envOverrideWindow() ?? (isOneMillionSelection(model) ? LARGE_WINDOW : DEFAULT_WINDOW)
+  const override = envOverrideWindow()
+  if (override !== null) return override
+  if (oneMillionDisabled()) return DEFAULT_WINDOW
+  return isOneMillionSelection(model) || isNative1mModel(model) ? LARGE_WINDOW : DEFAULT_WINDOW
 }
 
 /**
@@ -84,7 +131,8 @@ export function staticWindowFor(model: string | null): number {
 export function claudeWindowFor(model: string | null, transcriptPath?: string): number {
   const override = envOverrideWindow()
   if (override !== null) return override
-  if (isOneMillionSelection(model)) return LARGE_WINDOW
+  if (oneMillionDisabled()) return DEFAULT_WINDOW
+  if (isOneMillionSelection(model) || isNative1mModel(model)) return LARGE_WINDOW
   const selection = selectedClaudeModel(claudeConfigDirFromTranscript(transcriptPath))
   return isOneMillionSelection(selection) ? LARGE_WINDOW : DEFAULT_WINDOW
 }

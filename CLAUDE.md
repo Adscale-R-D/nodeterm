@@ -10523,6 +10523,22 @@ Rules a refactor must not undo:
   session's own (it reads Jira; a session's may carry no status). Both stores share one upsert rule
   (`upsertJiraTickets`). The verb's prune treats a project missing from `persistedCanvases()` as
   LIVE (not loaded is not gone), and `--site` defaults per project, from integration tickets only.
+- **A node's WORK STATUS** (`@shared/node-work-status`, fork 2026-11-26): Investigating / Waiting on
+  someone / Ready to go / Blocked + a one-line note, as a chip on the node header, the board card and
+  the card modal (one `WorkStatusChip`), and a board filter beside the Running / Needs you chips.
+  Rules a refactor must keep: (1) **sticky** — nothing clears it but the session (`set-status`) or the
+  person (node / card menu `Status ▸`, the chip's own menu); not a new turn, a read, a hook event or
+  a restart (the user's ask: NEEDS YOU clears on first open, so "which nodes are ready" was lost);
+  (2) it is **node data** (`CanvasNodeState.workStatus`), not a side store, so every view reads one
+  value and a closed node takes it along; `.nodeterm/project.json` is git-ignored in the repos this
+  box runs, so notes (which name people) are not committed — a repo that tracks the file commits
+  them; (3) **hostile input**: `normalizeWorkStatus` at both serializer seams, in every reader and
+  on reopen (`withCosmetics`); unknown kinds drop, the note is one line with `\p{Cc}\p{Cf}`
+  stripped, capped at 120; a duplicate drops it; (4) `set-status` is **self only** (`--node` may name
+  only the caller), verified-only, Server Edition only (factory `setStatus` → `castAndSave` +
+  `publishPersisted`, the `rename` path); the desktop refuses it by name and the person sets it from
+  the menus there; (5) the chip is an outline pill with a dot, never filled and never animated, so it
+  does not read as an agent-state badge. The filter is component state, not a saved view.
 
 ## Hosted team relay (Server Edition as a relay host)
 

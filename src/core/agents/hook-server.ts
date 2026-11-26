@@ -1,4 +1,5 @@
 import { REPORT_OUTCOME_CONTROL_REFUSAL } from '../../shared/station-outcome'
+import { SET_STATUS_CONTROL_REFUSAL } from '../../shared/node-work-status'
 import { sessionContextWindow } from '../model-window'
 import { labelHeldForRevision } from './permission-decision'
 import { createCursorApprovalWatch, type CursorApprovalWatch } from './cursor-approval'
@@ -313,6 +314,9 @@ export const requiresVerified: ReadonlySet<string> = new Set([
   // dependent armed with `--after-success`, so the claim must come from the node it is about — and
   // only a verified caller is provably that node.
   'report-outcome',
+  // A node's own work status (@shared/node-work-status): written onto the CALLER's node, so only a
+  // caller provably that node may set it. NEW verb: fail-closed strands nobody.
+  'set-status',
   // The board's GitHub lane (core/github/control-read.ts). The project read is resolved from the
   // CALLER's node, so a caller nobody can verify could name any node and read another project's
   // lane — bound sessions and dispatch state included. NEW verbs: fail-closed strands nobody.
@@ -393,6 +397,7 @@ export function verifiedRefusalFor(verb: string): string {
   if (verb === 'open-project') return OPEN_PROJECT_CONTROL_REFUSAL
   if (verb === 'run') return RUN_CONTROL_REFUSAL
   if (verb === 'report-outcome') return REPORT_OUTCOME_CONTROL_REFUSAL
+  if (verb === 'set-status') return SET_STATUS_CONTROL_REFUSAL
   if (verb === 'issues' || verb === 'prs') return GITHUB_READ_CONTROL_REFUSAL
   if (verb.startsWith('integration-')) return INTEGRATION_GRANT_CONTROL_REFUSAL
   if (verb === 'link-pr' || verb === 'unlink-pr' || verb === 'link-jira' || verb === 'unlink-jira' || verb === 'links') {

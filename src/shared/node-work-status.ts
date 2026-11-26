@@ -1,0 +1,115 @@
+// A node's WORK STATUS: where its work stands, said by the session itself (`set-status`) or by the
+// person (the node and card menus), and kept until one of them changes it. "Investigating",
+// "Waiting on someone", "Ready to go", "Blocked", plus an optional one-line note.
+//
+// It is NOT agent state. RUNNING / NEEDS YOU describe the CLI's turn right now and are transient; an
+// unread dot clears when the node is looked at. This is the opposite on purpose: a Jira-linked
+// session that agreed the scope with the ticket's author says "Ready to go", and the chip is still
+// there tomorrow, after the node has been opened ten times, after a restart. Nothing clears it on
+// its own — not a new turn, not a read, not a hook event.
+//
+// Stored on the node (`CanvasNodeState.workStatus`), so the canvas header, the kanban card and the
+// card modal read the same value with no channel of their own. `.nodeterm/project.json` is the file
+// that carries it, and that file is hand-editable input: `normalizeWorkStatus` runs at both
+// serializer seams and in every reader; anything malformed is no status (the node is kept).
+
+export const WORK_STATUS_KINDS = ['investigating', 'waiting', 'ready', 'blocked'] as const
+export type WorkStatusKind = (typeof WORK_STATUS_KINDS)[number]
+
+export const WORK_STATUS_LABELS: Record<WorkStatusKind, string> = {
+  investigating: 'Investigating',
+  waiting: 'Waiting on someone',
+  ready: 'Ready to go',
+  blocked: 'Blocked'
+}
+
+/** Shorter labels for the chip itself (the full label is in its tooltip and the menus). */
+export const WORK_STATUS_SHORT: Record<WorkStatusKind, string> = {
+  investigating: 'Investigating',
+  waiting: 'Waiting',
+  ready: 'Ready',
+  blocked: 'Blocked'
+}
+
+/** The note: one printable line. */
+export const WORK_STATUS_NOTE_MAX = 120
+
+export interface NodeWorkStatus {
+  kind: WorkStatusKind
+  note?: string
+  /** When it was set (epoch ms). */
+  at: number
+  /** Who set it: the session (`set-status`) or the person (a menu). Display only. */
+  by: 'agent' | 'user'
+}
+
+export function isWorkStatusKind(v: unknown): v is WorkStatusKind {
+  return typeof v === 'string' && (WORK_STATUS_KINDS as readonly string[]).includes(v)
+}
+
+/** Controls, format characters (bidi, zero-width) and line breaks go; whitespace is collapsed. */
+export function cleanWorkStatusNote(raw: unknown): string | undefined {
+  if (typeof raw !== 'string') return undefined
+  const one = raw
+    .replace(/[\p{Cc}\p{Cf}\u2028\u2029]+/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+  if (!one) return undefined
+  const points = Array.from(one)
+  return points.length > WORK_STATUS_NOTE_MAX ? `${points.slice(0, WORK_STATUS_NOTE_MAX - 1).join('').trimEnd()}…` : one
+}
+
+export function normalizeWorkStatus(raw: unknown): NodeWorkStatus | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const r = raw as Record<string, unknown>
+  if (!isWorkStatusKind(r.kind)) return undefined
+  if (typeof r.at !== 'number' || !Number.isFinite(r.at) || r.at < 0) return undefined
+  const note = cleanWorkStatusNote(r.note)
+  return { kind: r.kind, ...(note ? { note } : {}), at: r.at, by: r.by === 'agent' ? 'agent' : 'user' }
+}
+
+/** Same status, as every reader sees it (the time and author count: they are on the tooltip). */
+export function sameWorkStatus(a: NodeWorkStatus | undefined, b: NodeWorkStatus | undefined): boolean {
+  if (!a || !b) return !a && !b
+  return a.kind === b.kind && a.note === b.note && a.at === b.at && a.by === b.by
+}
+
+// ── The control verb ────────────────────────────────────────────────────────────────────────────
+
+export const SET_STATUS_VERB = 'set-status'
+/** `--status none` clears it (every flag takes a value, so a clear is a value too). */
+export const WORK_STATUS_CLEAR = 'none'
+export const SET_STATUS_FLAGS: ReadonlySet<string> = new Set(['status', 'note', 'node'])
+
+export const SET_STATUS_REQUIRES = `${SET_STATUS_VERB} requires --status ${[...WORK_STATUS_KINDS, WORK_STATUS_CLEAR].join('|')}`
+
+/** The flat refusal for an unverified `set-status` (house style: no diagnosis). */
+export const SET_STATUS_CONTROL_REFUSAL = 'Status change refused.'
+
+export type SetStatusRequest = { clear: true } | { clear: false; kind: WorkStatusKind; note?: string }
+
+/** Shape gate shared by every shell: a refusal sentence, or the request. `--node` may only name the
+ *  caller (`selfId`) — a node says where ITS work stands, never another's. */
+export function parseSetStatusArgs(args: Record<string, string>, selfId: string): SetStatusRequest | { error: string } {
+  const unknown = Object.keys(args).find((k) => !SET_STATUS_FLAGS.has(k))
+  if (unknown) return { error: `${SET_STATUS_VERB}: unknown flag --${unknown}` }
+  if (args.node !== undefined && args.node.trim() !== selfId) {
+    return { error: `${SET_STATUS_VERB}-not-self: a node sets only its own status; omit --node` }
+  }
+  const status = (args.status ?? '').trim().toLowerCase()
+  if (!status) return { error: SET_STATUS_REQUIRES }
+  if (status === WORK_STATUS_CLEAR) {
+    if (args.note !== undefined) return { error: `${SET_STATUS_VERB}: --note needs a status; --status none clears it` }
+    return { clear: true }
+  }
+  if (!isWorkStatusKind(status)) {
+    return { error: `${SET_STATUS_VERB}: unknown status "${status.slice(0, 40)}" — use ${[...WORK_STATUS_KINDS, WORK_STATUS_CLEAR].join('|')}` }
+  }
+  const note = cleanWorkStatusNote(args.note)
+  return { clear: false, kind: status, ...(note ? { note } : {}) }
+}
+
+export function workStatusLine(s: NodeWorkStatus | undefined): string {
+  if (!s) return 'no status'
+  return `${WORK_STATUS_LABELS[s.kind]}${s.note ? ` — ${s.note}` : ''}`
+}

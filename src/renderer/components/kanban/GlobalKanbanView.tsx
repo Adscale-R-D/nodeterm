@@ -1,3 +1,4 @@
+import type { NodeWorkStatus } from '@shared/node-work-status'
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { BridgeLink, CanvasNodeState, ProjectKanban } from '@shared/types'
 import { AGENT_CONFIG, BUILTIN_AGENT_IDS, type AgentId } from '@shared/agents/config'
@@ -104,13 +105,14 @@ interface SwimlaneProps {
   onAiName?: (projectId: string, nodeId: string) => void
   /** Set a card's node color (the card modal's Color button), routed by the lane's project. */
   onSetColor?: (projectId: string, nodeId: string, color: string) => void
+  onSetWorkStatus?: (projectId: string, nodeId: string, status: NodeWorkStatus | undefined) => void
   /** Start a card's held launch now (its QUEUED chip's ▶) — Canvas's `run` path, headless for a
    *  background lane. */
   onRunQueued?: (projectId: string, nodeId: string) => void
 }
 
 const Swimlane = memo(function Swimlane({
-  projectId, projectName, projectIndex, projectColor, board, sessions, ropes, nodes, onChangeBoard, onOpenNode, onCreateNode, onDeleteNode, onDeleteNodes, selectionOwner, onSelectionOwner, onRenameNode, onEditSticky, onBrowserNav, onSetIcon, modalNodeId, modalView, onModalChange, liveTeams, highlight, nodeActionItems, sessionActionItems, onAiName, onSetColor, onRunQueued
+  projectId, projectName, projectIndex, projectColor, board, sessions, ropes, nodes, onChangeBoard, onOpenNode, onCreateNode, onDeleteNode, onDeleteNodes, selectionOwner, onSelectionOwner, onRenameNode, onEditSticky, onBrowserNav, onSetIcon, modalNodeId, modalView, onModalChange, liveTeams, highlight, nodeActionItems, sessionActionItems, onAiName, onSetColor, onSetWorkStatus, onRunQueued
 }: SwimlaneProps) {
   const dragRef = useRef<{ kind: 'column'; id: string } | { kind: 'card'; id: string } | null>(null)
   const setModalNodeId = useCallback(
@@ -290,6 +292,7 @@ const Swimlane = memo(function Swimlane({
           key={s.id}
           session={s}
           meta={cardMeta(board, s.id)}
+          onSetWorkStatus={onSetWorkStatus ? (nodeId, status) => onSetWorkStatus(projectId, nodeId, status) : undefined}
           labels={labelsByCard.get(s.id) ?? []}
           onOpen={setModalNodeId}
           selected={selection.set.has(s.id)}
@@ -430,6 +433,7 @@ const Swimlane = memo(function Swimlane({
           onBrowserNav={(patch) => onBrowserNav(projectId, modalNodeId, patch)}
           onSetIcon={(icon) => onSetIcon(projectId, modalNodeId, icon)}
           onSetColor={onSetColor ? (color) => onSetColor(projectId, modalNodeId, color) : undefined}
+          onSetWorkStatus={onSetWorkStatus ? (status) => onSetWorkStatus(projectId, modalNodeId, status) : undefined}
           sessionActions={sessionActionItems ? () => sessionActionItems(modalNodeId, projectId) : undefined}
           onRunQueued={runQueued ? () => runQueued(modalNodeId) : undefined}
           onDelete={() => onDeleteNode(projectId, modalNodeId)}
@@ -468,6 +472,7 @@ export interface GlobalKanbanViewProps {
   onAiName?: (projectId: string, nodeId: string) => void
   /** Canvas's color write for a card of any lane (`setCardColor`, routed per project). Optional. */
   onSetColor?: (projectId: string, nodeId: string, color: string) => void
+  onSetWorkStatus?: (projectId: string, nodeId: string, status: NodeWorkStatus | undefined) => void
   /** Start a card's held launch now (its QUEUED chip's ▶) — Canvas's `run` path, headless for a
    *  background lane. */
   onRunQueued?: (projectId: string, nodeId: string) => void
@@ -477,7 +482,7 @@ export interface GlobalKanbanViewProps {
   onModalNodeChange?: (nodeId: string | null) => void
 }
 
-export const GlobalKanbanView = memo(function GlobalKanbanView({ live = null, onModalNodeChange, nodeActionItems, sessionActionItems, onAiName, onSetColor, onRunQueued }: GlobalKanbanViewProps) {
+export const GlobalKanbanView = memo(function GlobalKanbanView({ live = null, onModalNodeChange, nodeActionItems, sessionActionItems, onAiName, onSetColor, onSetWorkStatus, onRunQueued }: GlobalKanbanViewProps) {
   // Same rule as the per-project board: the canvas is covered but mounted underneath.
   useEffect(() => markCanvasCovered(document.documentElement), [])
   const boardStyle = useBoardWallpaperStyle()
@@ -653,6 +658,7 @@ export const GlobalKanbanView = memo(function GlobalKanbanView({ live = null, on
               sessionActionItems={sessionActionItems}
               onAiName={onAiName}
               onSetColor={onSetColor}
+              onSetWorkStatus={onSetWorkStatus}
               onRunQueued={onRunQueued}
             />
           )

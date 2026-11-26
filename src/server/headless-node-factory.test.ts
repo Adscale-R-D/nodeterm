@@ -984,6 +984,57 @@ describe('HeadlessNodeFactory', () => {
     )
   })
 
+  describe('set-status (@shared/node-work-status)', () => {
+    const nodeOf = async (id: string): Promise<CanvasNodeState | undefined> =>
+      (await new WorkspaceStore().load({ sideline: false })).projects[0].nodes.find((n) => n.id === id)
+
+    it('writes the CALLER\'s status, persists it in the project file and publishes the node', async () => {
+      published.length = 0
+      const r = await factory.setStatus('term-source', { status: 'ready', note: 'scope agreed\nwith Jakub' })
+      expect(r).toMatchObject({ ok: true, result: { changed: true } })
+      expect(await nodeOf('term-source')).toMatchObject({
+        workStatus: { kind: 'ready', note: 'scope agreed with Jakub', by: 'agent' }
+      })
+      // In the git-ignored project file too, not only the index cache.
+      const file = JSON.parse(fs.readFileSync(path.join(projectDir, '.nodeterm', 'project.json'), 'utf8'))
+      expect(file.nodes.find((n: { id: string }) => n.id === 'term-source').workStatus.kind).toBe('ready')
+      expect(published.map((n) => n.id)).toEqual(['term-source'])
+      // Nothing about any other node changed.
+      expect((await nodeOf('term-owned'))?.workStatus).toBeUndefined()
+    })
+
+    it('the same status again changes and publishes nothing; a new note replaces it; none clears it', async () => {
+      await factory.setStatus('term-source', { status: 'waiting', note: 'asked the author' })
+      published.length = 0
+      expect(await factory.setStatus('term-source', { status: 'waiting', note: 'asked the author' })).toMatchObject({
+        ok: true,
+        result: { changed: false }
+      })
+      expect(published).toEqual([])
+      await factory.setStatus('term-source', { status: 'waiting', note: 'asked again' })
+      expect((await nodeOf('term-source'))?.workStatus).toMatchObject({ kind: 'waiting', note: 'asked again' })
+      expect(await factory.setStatus('term-source', { status: 'none' })).toMatchObject({ ok: true, result: { changed: true } })
+      expect((await nodeOf('term-source'))?.workStatus).toBeUndefined()
+    })
+
+    it('refuses another node, an unknown kind and an unknown flag, writing nothing', async () => {
+      published.length = 0
+      expect(await factory.setStatus('term-source', { status: 'ready', node: 'term-owned' })).toMatchObject({
+        ok: false,
+        error: expect.stringContaining('set-status-not-self')
+      })
+      expect(await factory.setStatus('term-source', { status: 'done' })).toMatchObject({ ok: false })
+      expect(await factory.setStatus('term-source', { status: 'ready', color: 'red' })).toMatchObject({ ok: false })
+      expect(published).toEqual([])
+      expect((await nodeOf('term-owned'))?.workStatus).toBeUndefined()
+      expect((await nodeOf('term-source'))?.workStatus).toBeUndefined()
+    })
+
+    it('a node naming itself in --node is accepted', async () => {
+      expect(await factory.setStatus('term-source', { status: 'blocked', node: 'term-source' })).toMatchObject({ ok: true })
+    })
+  })
+
   it('slides a new group frame off a sibling its members only touched, members and all (fork)', async () => {
     const workspace = await store.load({ sideline: false })
     const nodes = workspace.projects[0].nodes

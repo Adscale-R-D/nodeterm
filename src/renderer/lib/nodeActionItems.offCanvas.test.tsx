@@ -37,7 +37,7 @@ function input(nodes: CanvasNodeState[], over: Partial<OffCanvasCtxInput> = {}):
     gatewayError: '',
     grokModels: () => [],
     cursorModels: () => [],
-    writes: { setColor: vi.fn(), pickIcon: vi.fn() },
+    writes: { setColor: vi.fn(), pickIcon: vi.fn(), setWorkStatus: vi.fn() },
     connectedProjectIdForHost: () => undefined,
     refuse: vi.fn(),
     ...over

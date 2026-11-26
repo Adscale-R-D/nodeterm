@@ -1478,6 +1478,10 @@ being a node (`docs/integration-principal.md`). Before touching it:
   (`src/shared/integration-jira.ts`); never store or open a URL a caller sent. A session's own
   links (`link-pr`, `link-jira` shim verbs) are a second store merged at the same two board sources:
   add a new link kind to both, never to one.
+- **A node's work status (`set-status`, the `Status ▸` menu) is sticky node data.** Read it only
+  through `normalizeWorkStatus` (`src/shared/node-work-status.ts`), draw it only with
+  `WorkStatusChip`, and never clear it from an automatic path (a turn, a hook event, an unread ack):
+  that it stays until the session or the person changes it is the whole feature.
 
 ## User-owned agent settings
 

@@ -307,6 +307,7 @@ import { NodeColorSwatches } from '../components/NodeColorSwatches'
 import { AccountChip, useAccountChip } from '../components/AccountChip'
 import { IssueRefChip } from '../components/IssueRefChip'
 import { IntegrationChip } from '../components/IntegrationChip'
+import { WorkStatusChip } from '../components/WorkStatusChip'
 import { TeamProgressChip } from '../components/TeamProgressChip'
 import { PortsChip } from '../components/PortsChip'
 import { useTeamStations } from '../state/teamStations'
@@ -6342,6 +6343,15 @@ export function TerminalNode({
         )}
         {/* Opened by an integration principal (docs/integration-principal.md): display only. */}
         <IntegrationChip marker={data.integration} />
+        {/* Where this session's work stands (@shared/node-work-status): sticky, set by the session
+            (`set-status`) or here. The same chip the board card and the card modal draw. */}
+        <WorkStatusChip
+          status={data.workStatus}
+          onSet={(workStatus) => {
+            updateNodeData(id, { workStatus })
+            markWorkspaceDirty()
+          }}
+        />
         {/* The GitHub issue this session was started on — opens it on the board (the issue lane
             lives there), the same thing the session's board card does with its own `#N`. */}
         <IssueRefChip

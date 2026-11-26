@@ -792,6 +792,42 @@ describe('issueRef serialization (GitHub issue binding)', () => {
   })
 })
 
+describe('work status at the serializer seams (@shared/node-work-status)', () => {
+  const state = (workStatus: unknown) => ({
+    id: 't1',
+    kind: 'terminal',
+    position: { x: 0, y: 0 },
+    size: { width: 600, height: 400 },
+    title: 'T',
+    color: '#0a84ff',
+    group: null,
+    workStatus
+  })
+  const ok = { kind: 'ready', note: 'scope agreed', at: 10, by: 'agent' }
+
+  it('round-trips a status through the live canvas and back (the next autosave keeps it)', () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const flow = nodeStatesToFlow([state(ok) as any])
+    expect(flow[0].data.workStatus).toEqual(ok)
+    expect(flowToNodeStates(flow)[0].workStatus).toEqual(ok)
+  })
+
+  it('a hostile value becomes no status, in and out, and the node is kept', () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const flow = nodeStatesToFlow([state({ kind: 'ready; rm -rf ~', at: 1 }) as any])
+    expect(flow[0].id).toBe('t1')
+    expect(flow[0].data.workStatus).toBeUndefined()
+    flow[0].data.workStatus = { kind: 'ready', at: 'soon' } as never
+    expect(flowToNodeStates(flow)[0].workStatus).toBeUndefined()
+  })
+
+  it('a duplicate does not inherit it (the copy is a new session)', () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const [node] = nodeStatesToFlow([state(ok) as any])
+    expect(duplicateNode(node).data.workStatus).toBeUndefined()
+  })
+})
+
 describe('resolveNewNodeAccount', () => {
   const accounts = [{ id: 'a1', label: 'work', createdAt: 0 }]
   it('prefers the explicit pick', () =>

@@ -1,4 +1,5 @@
 import type { CanvasNodeState } from '@shared/types'
+import { normalizeWorkStatus } from '@shared/node-work-status'
 import { SYSTEM_NODE_COLORS } from '../state/workspace'
 import type { KanbanSession } from '../components/kanban/KanbanView'
 import type { ModalSpawn } from '../components/kanban/ModalTerminal'
@@ -62,6 +63,7 @@ export function toKanbanSessionState(n: CanvasNodeState): KanbanSession | null {
     color: n.color ?? SYSTEM_NODE_COLORS[0],
     kind: 'terminal',
     agentId: n.agentId,
+    workStatus: normalizeWorkStatus(n.workStatus),
     ...(n.pendingLaunch ? { pendingLaunch: n.pendingLaunch } : {}),
     spawn
   }

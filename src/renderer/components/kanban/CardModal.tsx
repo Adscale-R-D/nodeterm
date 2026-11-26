@@ -29,6 +29,8 @@ import { AccountChip, useAccountChip } from '../AccountChip'
 import { isBrowserRuntime } from '@renderer/bridge/runtime'
 import { IssueRefChip } from '../IssueRefChip'
 import { IntegrationChip } from '../IntegrationChip'
+import { WorkStatusChip } from '../WorkStatusChip'
+import type { NodeWorkStatus } from '@shared/node-work-status'
 import { TeamProgressChip } from '../TeamProgressChip'
 import { PortsChip } from '../PortsChip'
 import { QueuedLaunchChip } from './QueuedLaunchChip'
@@ -116,6 +118,8 @@ interface CardModalProps {
   onBrowserNav: (patch: { url?: string; title?: string }) => void
   /** Icon write-through. `undefined` clears it — the dialog's cancel never reaches here. */
   onSetIcon: (icon: NodeIcon | undefined) => void
+  /** Change the session's work status from the modal's chip (@shared/node-work-status). */
+  onSetWorkStatus?: (status: NodeWorkStatus | undefined) => void
   /** The session's `#N` chip (it was started on a GitHub issue): open that issue. Absent = no chip
    *  (a board with no issue lane to open it on). The node header and the session card show the
    *  same chip — the canvas and the board are two views of one node. */
@@ -151,7 +155,7 @@ interface CardModalProps {
  *  canvas under it) stay mounted. Terminal cards carry the node header's actions too:
  *  search / dictate / AI-name / the ⌘M view — ChatPanel or the output markdown, the same face the
  *  canvas node shows (the node itself is hidden under the board). */
-export function CardModal({ session, projectId, projectName, projectColor, columnTitle, board, onChangeBoard, onClose, portsProjectId, onOpenCanvas, onRename, onEditSticky, onBrowserNav, onSetIcon, onOpenIssue, mentionables, team, onTravel, initialView, onSetColor, onDelete, onAiName, sessionActions, onRunQueued }: CardModalProps) {
+export function CardModal({ session, projectId, projectName, projectColor, columnTitle, board, onChangeBoard, onClose, portsProjectId, onOpenCanvas, onRename, onEditSticky, onBrowserNav, onSetIcon, onSetWorkStatus, onOpenIssue, mentionables, team, onTravel, initialView, onSetColor, onDelete, onAiName, sessionActions, onRunQueued }: CardModalProps) {
   const { api, source: coreSource } = useSession()
   // The header slot decides "icon or smiley" on the NORMALIZED value, the answer NodeIconView
   // itself gives — on the raw one, an invalid stored icon drew an empty, un-muted slot.
@@ -545,6 +549,7 @@ export function CardModal({ session, projectId, projectName, projectColor, colum
           </div>
           {isTerminal && onOpenIssue && <IssueRefChip issueRef={session.issueRef} onOpen={onOpenIssue} />}
           {isTerminal && <IntegrationChip marker={session.integration} />}
+          {isTerminal && <WorkStatusChip status={session.workStatus} onSet={onSetWorkStatus} />}
           {isTerminal && team && team.length > 0 && onTravel && <TeamProgressChip stations={team} onTravel={onTravel} statusStore={agentStatusStore} />}
           {isTerminal && session.pendingLaunch && (
             <QueuedLaunchChip nodeId={session.id} pending={session.pendingLaunch} firstOpen={session.launchFirstOpen} onRun={onRunQueued} />

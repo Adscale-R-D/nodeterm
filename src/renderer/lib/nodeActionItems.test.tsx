@@ -36,6 +36,7 @@ function fakeCtx(nodes: CanvasNode[], over: Partial<NodeActionCtx> = {}): NodeAc
     removeFromGroup: noop,
     setNodesColor: vi.fn(),
     pickNodeIcon: vi.fn(),
+    setNodesWorkStatus: vi.fn(),
     duplicateNodes: noop,
     snapNodeToZone: () => true,
     toggleCollapseNodes: noop,
@@ -103,6 +104,7 @@ describe('buildNodeActionItems — the canvas node menu, moved verbatim', () => 
       '—',
       '[colors]',
       'Set icon…',
+      'Status ▸',
       '—',
       'Duplicate',
       'Snap to zone ▸',
@@ -205,6 +207,7 @@ describe('buildNodeActionItems — filters', () => {
       '—',
       '[colors]',
       'Set icon…',
+      'Status ▸',
       '—',
       'Duplicate',
       'Snap to zone ▸',
@@ -221,7 +224,7 @@ describe('buildNodeActionItems — filters', () => {
           allow: BOARD_NODE_ACTION_IDS
         })
       )
-    ).toEqual(['[colors]', 'Set icon…', '—', 'Refresh terminal'])
+    ).toEqual(['[colors]', 'Set icon…', 'Status ▸', '—', 'Refresh terminal'])
   })
 
   it('no spatial row is ever on the board list, nor a row the board owns itself', () => {

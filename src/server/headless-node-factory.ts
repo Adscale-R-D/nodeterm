@@ -1,3 +1,4 @@
+import { normalizeWorkStatus, parseSetStatusArgs, workStatusLine, type NodeWorkStatus } from '../shared/node-work-status'
 import type { TextDeliveryResult } from '../shared/text-delivery'
 import { isLaunchShell } from '../shared/agents/pane'
 import { randomBytes, randomUUID } from 'node:crypto'
@@ -1674,6 +1675,42 @@ export class HeadlessNodeFactory {
       // Metadata only. In particular, Server Edition never mirrors `/rename` into the pane.
       await this.publishPersisted([source.project.id])
       return { ok: true, message: `renamed ${id} to "${title}"` }
+    })
+  }
+
+  /** `set-status --status <kind|none> [--note <line>]` (@shared/node-work-status): where the CALLER's
+   *  own work stands, written onto its node so the canvas header, the card and the card modal show it.
+   *  Self only — there is no target to own, so no creator check; `--node` may only name the caller. */
+  setStatus(sourceNodeId: string, args: Record<string, string>): Promise<ServerControlReply> {
+    return this.runExclusive(async () => {
+      const req = parseSetStatusArgs(args, sourceNodeId)
+      if ('error' in req) return { ok: false, error: req.error, message: req.error }
+      const workspace = await this.loadForEdit()
+      const source = sourceProject(workspace, sourceNodeId)
+      if (!source) return { ok: false, error: 'source node is not in exactly one saved project' }
+      if (!sourceCanControl(source.node, this.deps.agentIdOf)) {
+        return { ok: false, error: 'source node is not a control-capable agent' }
+      }
+      const before = normalizeWorkStatus(source.node.workStatus)
+      const next: NodeWorkStatus | undefined = req.clear
+        ? undefined
+        : { kind: req.kind, ...(req.note ? { note: req.note } : {}), at: Date.now(), by: 'agent' }
+      if (!before && !next) return { ok: true, message: 'status already clear', result: { status: null, changed: false } }
+      if (before && next && before.kind === next.kind && before.note === next.note) {
+        return { ok: true, message: `status unchanged: ${workStatusLine(before)}`, result: { status: before, changed: false } }
+      }
+      source.project.nodes = source.project.nodes.map((node) => {
+        if (node.id !== sourceNodeId) return node
+        const { workStatus: _old, ...rest } = node
+        return next ? { ...rest, workStatus: next } : rest
+      })
+      await this.castAndSave(workspace)
+      await this.publishPersisted([source.project.id])
+      return {
+        ok: true,
+        message: next ? `status set: ${workStatusLine(next)}` : 'status cleared',
+        result: { status: next ?? null, changed: true }
+      }
     })
   }
 

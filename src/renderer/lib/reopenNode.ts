@@ -22,6 +22,7 @@ import { normalizeRunConfig } from '@shared/run-config'
 import { normalizeSimulatorConfig } from '@shared/simulator'
 import { absolutePosition, type FocusableNode } from './nodeFocus'
 import { normalizeNodeIcon } from '@shared/node-icon'
+import { normalizeWorkStatus } from '@shared/node-work-status'
 import { normalizeTerminalFontSize } from '../terminal/terminal-font-zoom'
 
 export type RestorableNodeKind = Exclude<NodeKind, 'group' | 'subagent' | 'loop'>
@@ -127,6 +128,10 @@ function withCosmetics(node: CanvasNode, data: NodeData): CanvasNode {
   // serializers use: the persisted twin comes from the hand-editable workspace.json.
   const terminalFontSize = normalizeTerminalFontSize(data.terminalFontSize)
   if (terminalFontSize !== undefined) cosmetics.terminalFontSize = terminalFontSize
+  // The work status comes back with the node: a reopen resumes the same conversation, and the status
+  // says where that conversation's work stood. Same validator as the serializers.
+  const workStatus = normalizeWorkStatus(data.workStatus)
+  if (workStatus) cosmetics.workStatus = workStatus
   return { ...node, data: { ...node.data, ...cosmetics } }
 }
 

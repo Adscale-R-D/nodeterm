@@ -615,6 +615,7 @@ import {
 import { nodeIconDialog } from '../components/NodeIconPicker'
 import { applyIconChoice } from '../lib/nodeIconChoice'
 import type { NodeIcon } from '@shared/node-icon'
+import type { NodeWorkStatus } from '@shared/node-work-status'
 import {
   formatIssueRef,
   issueKey,
@@ -9472,6 +9473,18 @@ export function Canvas() {
     [setNodes, markDirty]
   )
 
+  /** Write the work status of the listed nodes (`undefined` clears it, @shared/node-work-status).
+   *  The live-canvas funnel for the node menu, the chip and the card modal; the store path for a
+   *  project the canvas does not hold is `nodeWritesFor`. */
+  const setNodesWorkStatus = useCallback(
+    (ids: string[], workStatus: NodeWorkStatus | undefined) => {
+      const set = new Set(ids)
+      setNodes((ns) => ns.map((n) => (set.has(n.id) && n.type === 'terminal' ? { ...n, data: { ...n.data, workStatus } } : n)))
+      markDirty()
+    },
+    [setNodes, markDirty]
+  )
+
   /** Write a node's icon (`undefined` clears it). The single funnel for every surface that sets
    *  one — the node menu, the node header and the kanban card modal — so the canvas is marked
    *  dirty exactly once per change and in one place. */
@@ -9518,7 +9531,7 @@ export function Canvas() {
         isLive: () =>
           liveCanvasHolds(nodesProjectIdRef.current, useProjects.getState().activeProjectId, projectId),
         liveHas: (nodeId) => nodesRef.current.some((n) => n.id === nodeId),
-        live: { setColor: setNodesColor, setIcon: setNodeIcon, pickIcon: pickNodeIcon },
+        live: { setColor: setNodesColor, setIcon: setNodeIcon, pickIcon: pickNodeIcon, setWorkStatus: setNodesWorkStatus },
         storedNode: (nodeId) =>
           useProjects.getState().getProject(projectId)?.nodes.find((n) => n.id === nodeId),
         recolorStored: (nodeId, color) => useProjects.getState().recolorNode(projectId, nodeId, color),
@@ -9530,6 +9543,11 @@ export function Canvas() {
           const node = st.getProject(projectId)?.nodes.find((n) => n.id === nodeId)
           if (node) st.applyOwnNodeMutation(projectId, { op: 'upsert', node: { ...node, icon } })
         },
+        setStoredWorkStatus: (nodeId, workStatus) => {
+          const st = useProjects.getState()
+          const node = st.getProject(projectId)?.nodes.find((n) => n.id === nodeId)
+          if (node) st.applyOwnNodeMutation(projectId, { op: 'upsert', node: { ...node, workStatus } })
+        },
         // `persist`, not `writeDisk`: the snapshot must carry the live canvas too. `writeDisk`
         // alone writes the store's copy and then clears `dirty` — so a live edit still inside the
         // autosave debounce was marked saved without ever reaching disk.
@@ -9538,7 +9556,7 @@ export function Canvas() {
         toast: (message) =>
           window.dispatchEvent(new CustomEvent('nodeterm:toast', { detail: { kind: 'error', message } }))
       }),
-    [setNodesColor, setNodeIcon, pickNodeIcon, persist]
+    [setNodesColor, setNodeIcon, pickNodeIcon, setNodesWorkStatus, persist]
   )
 
   const alignToGrid = useCallback(
@@ -11103,6 +11121,7 @@ export function Canvas() {
       removeFromGroup,
       setNodesColor,
       pickNodeIcon,
+      setNodesWorkStatus,
       duplicateNodes,
       snapNodeToZone,
       toggleCollapseNodes,
@@ -11129,6 +11148,7 @@ export function Canvas() {
       removeFromGroup,
       setNodesColor,
       pickNodeIcon,
+      setNodesWorkStatus,
       duplicateNodes,
       snapNodeToZone,
       toggleCollapseNodes,
@@ -11201,6 +11221,16 @@ export function Canvas() {
   const setCardColor = useCallback(
     (projectId: string, nodeId: string, color: string) => nodeWritesFor(projectId).setColor([nodeId], color),
     [nodeWritesFor]
+  )
+  // A card's work status (the chip on the card and in its modal), through the same write router.
+  const setCardWorkStatus = useCallback(
+    (projectId: string, nodeId: string, status: NodeWorkStatus | undefined) =>
+      nodeWritesFor(projectId).setWorkStatus([nodeId], status),
+    [nodeWritesFor]
+  )
+  const setActiveCardWorkStatus = useCallback(
+    (nodeId: string, status: NodeWorkStatus | undefined) => setCardWorkStatus(activeProjectId, nodeId, status),
+    [setCardWorkStatus, activeProjectId]
   )
   const setActiveCardColor = useCallback(
     (nodeId: string, color: string) => setCardColor(activeProjectId, nodeId, color),
@@ -19799,6 +19829,7 @@ export function Canvas() {
           sessionActionItems={boardSessionActionItems}
           onAiName={aiNameFromKanban}
           onSetColor={setCardColor}
+          onSetWorkStatus={setCardWorkStatus}
           onRunQueued={runQueuedFromOmni}
         />
       ) : perProjectKanbanOpen && (
@@ -19819,6 +19850,7 @@ export function Canvas() {
           sessionActionItems={activeBoardSessionActionItems}
           onAiName={aiNameFromActiveKanban}
           onSetColor={setActiveCardColor}
+          onSetWorkStatus={setActiveCardWorkStatus}
           onRunQueued={runActiveQueuedFromBoard}
           onAutoMoveFromPulls={autoMoveCardFromPulls}
           issueAgentMenu={issueAgentMenu}

@@ -3,6 +3,14 @@ import { LINK_ENDPOINT_NOT_FOUND } from '../shared/canvas-link'
 // CLI source. No electron imports, so this module + CONTROL_CLI_SCRIPT are unit-testable.
 // Electron/ipc/server wiring lives in canvas-control.ts + index.ts + hook-server.ts.
 import { INTEGRATION_GRANT_VERBS, NODE_LINK_VERBS } from '../shared/integration-principal'
+import {
+  SET_STATUS_REQUIRES,
+  SET_STATUS_VERB,
+  WORK_STATUS_CLEAR,
+  WORK_STATUS_KINDS,
+  WORK_STATUS_LABELS,
+  WORK_STATUS_NOTE_MAX
+} from '../shared/node-work-status'
 import { INTEGRATION_JIRA_MAX, JIRA_CATEGORIES } from '../shared/integration-jira'
 import { INTEGRATION_PULLS_MAX } from '../shared/integration-principal'
 import { HOOK_CURL_HEADERS_SH } from './agents/hook-curl-config-sh'
@@ -230,6 +238,22 @@ function nodeLinkDocLines(): string[] {
     '  an integration declared the same ticket on your card, its record (read from Jira) is shown.',
     `- \`${unlinkJira} --ticket <KEY>\`; \`${links}\` — your card's links (and any an integration declared).`,
     '  Only your own card; every flag takes a value.'
+  ]
+}
+
+/** A session's own work status (@shared/node-work-status). Kinds and bounds come from that module. */
+function workStatusDocLines(): string[] {
+  const kinds = WORK_STATUS_KINDS.map((k) => `\`${k}\` (${WORK_STATUS_LABELS[k]})`).join(', ')
+  return [
+    'Work status (nodeterm Server Edition only; the desktop refuses it by name). Say where YOUR work',
+    'stands, as a chip on your node and your kanban card that STAYS until you or the person change it',
+    '(it is not cleared by a new turn, by the person opening you, or by a restart):',
+    `- \`${SET_STATUS_VERB} --status ${[...WORK_STATUS_KINDS, WORK_STATUS_CLEAR].join('|')} [--note "<one line>"]\` — ${kinds};`,
+    `  \`${WORK_STATUS_CLEAR}\` clears it. The note (up to ${WORK_STATUS_NOTE_MAX} characters, one line) says why, e.g.`,
+    '  `--status ready --note "scope agreed with the ticket author"`. Setting it again replaces both.',
+    '  Update it when your phase changes: `investigating` while you work something out, `waiting` when you',
+    '  are blocked on a person (a ticket author, a reviewer), `ready` when your part is done and the person',
+    '  can take it further, `blocked` when you cannot go on. Only your own node; every flag takes a value.'
   ]
 }
 
@@ -565,6 +589,7 @@ export type ControlVerb =
   | 'settings'
   | 'report-issue'
   | 'report-outcome'
+  | 'set-status'
   | 'issues'
   | 'prs'
   | 'integration-grant'
@@ -636,6 +661,9 @@ const VERBS: ControlVerb[] = [
   // `--after-success` waits for a reported success. Answered by the shell's control handler, never
   // forwarded to a canvas. Verified-only (requiresVerified).
   'report-outcome',
+  // Where the caller's OWN work stands (@shared/node-work-status): a sticky chip on its node and card.
+  // Server Edition writes it on the node; the desktop refuses it by name. Verified-only.
+  'set-status',
   // The board's GitHub lane, READ-ONLY (core/github/control-read.ts): issue cards with their column,
   // bound sessions and dispatch state; pull requests with CI at the current head, mergeability and
   // linked cards. Answered by the shell's control handler from the GitHub service's cache — no
@@ -805,6 +833,7 @@ export function parseControlRequest(
   if (browserRefusal) return { error: browserRefusal }
   if (v === 'close' && !args.node) return { error: 'close requires --node <id>' }
   if (v === 'run' && !args.node) return { error: 'run requires --node <id>' }
+  if (v === 'set-status' && !args.status) return { error: SET_STATUS_REQUIRES }
   if ((v === 'integration-grant' || v === 'integration-revoke') && (!args.principal || !args.key)) {
     return { error: `${v} requires --principal <name> --key <key>` }
   }
@@ -1183,6 +1212,7 @@ export function buildCanvasControlInstructions(shimPath: string): string {
     ...githubReadDocLines(),
     ...integrationGrantDocLines(),
     ...nodeLinkDocLines(),
+    ...workStatusDocLines(),
     ...settingsVerbDocLines(),
     ...reportIssueDocLines(),
     ...browserVerbDocLines(),
@@ -1834,6 +1864,8 @@ ${githubReadDocLines().join('\n')}
 
 ${integrationGrantDocLines().join('\n')}
 ${nodeLinkDocLines().join('\n')}
+
+${workStatusDocLines().join('\n')}
 ${settingsVerbDocLines().join('\n')}
 ${reportIssueDocLines().join('\n')}
 ${browserVerbDocLines().join('\n')}

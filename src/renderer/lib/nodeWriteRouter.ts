@@ -12,6 +12,7 @@
  * caller's `toast`).
  */
 import type { NodeIcon } from '@shared/node-icon'
+import type { NodeWorkStatus } from '@shared/node-work-status'
 import type { CanvasNodeState } from '@shared/types'
 import type { NodeIconChoice } from '../components/NodeIconPicker'
 import { applyIconChoice } from './nodeIconChoice'
@@ -25,6 +26,8 @@ export interface NodeWrites {
   setIcon: (nodeId: string, icon: NodeIcon | undefined) => void
   /** Open the icon picker for the node, then write the answer. */
   pickIcon: (nodeId: string) => void
+  /** Set (`undefined` clears) the work status of the listed nodes (@shared/node-work-status). */
+  setWorkStatus: (ids: string[], status: NodeWorkStatus | undefined) => void
 }
 
 export interface NodeWriteRouterDeps {
@@ -38,6 +41,7 @@ export interface NodeWriteRouterDeps {
   storedNode: (nodeId: string) => CanvasNodeState | undefined
   recolorStored: (nodeId: string, color: string) => void
   setStoredIcon: (nodeId: string, icon: NodeIcon | undefined) => void
+  setStoredWorkStatus: (nodeId: string, status: NodeWorkStatus | undefined) => void
   /** Canvas `persist` (commit the live canvas, then write): false when the save was refused. */
   persist: () => Promise<boolean>
   iconDialog: (opts: { nodeId: string; title: string; icon?: NodeIcon }) => Promise<NodeIconChoice>
@@ -76,6 +80,19 @@ export function createNodeWriteRouter(d: NodeWriteRouterDeps): NodeWrites {
       void save()
     },
     setIcon,
+    setWorkStatus(ids, status) {
+      if (d.isLive()) {
+        const live = ids.filter((id) => d.liveHas(id))
+        if (live.length < ids.length) d.toast(NODE_GONE_MESSAGE)
+        if (live.length > 0) d.live.setWorkStatus(live, status)
+        return
+      }
+      const present = ids.filter((id) => d.storedNode(id))
+      if (present.length < ids.length) d.toast(NODE_GONE_MESSAGE)
+      if (present.length === 0) return
+      for (const id of present) d.setStoredWorkStatus(id, status)
+      void save()
+    },
     pickIcon(nodeId) {
       if (d.isLive()) {
         if (d.liveHas(nodeId)) d.live.pickIcon(nodeId)

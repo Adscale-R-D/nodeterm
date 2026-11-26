@@ -203,6 +203,7 @@ describe('where the verbs sit in the routing tables', () => {
     // node's pane, so only a caller provably this node may make it; new verbs.
     // `link-pr` / `unlink-pr` / `link-jira` / `unlink-jira` / `links`: the card is resolved from the
     // CALLER's node, so only a caller provably that node may write it; new verbs.
+    // `set-status` (@shared/node-work-status): written onto the CALLER's node; new verb.
     expect([...requiresVerified].sort()).toEqual([
       'integration-grant',
       'integration-grants',
@@ -219,11 +220,16 @@ describe('where the verbs sit in the routing tables', () => {
       'report-outcome',
       'run',
       'send',
+      'set-status',
       'settings',
       'sticky',
       'unlink-jira',
       'unlink-pr'
     ])
+  })
+
+  it('the set-status refusal is its own flat sentence, not the messaging one', () => {
+    expect(verifiedRefusalFor('set-status')).toBe('Status change refused.')
   })
 
   it('the issues / prs refusal is its own flat sentence, not the messaging one', () => {

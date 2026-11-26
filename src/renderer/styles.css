@@ -12717,6 +12717,56 @@ button.pull-checks__name {
 }
 /* "via <integration> · <key>" (components/IntegrationChip): the node was opened by an integration
    principal. Same quiet outline as `#N`, not clickable; it shrinks before the title does. */
+/* A node's WORK STATUS (@shared/node-work-status): an outline pill with a coloured dot, never filled
+   and never animated, so it reads as a different kind of fact from the RUNNING / NEEDS YOU badges. */
+.work-status-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: 6px;
+  padding: 0 7px 0 6px;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 260px;
+  border: 1px solid rgba(var(--tint-rgb), 0.18);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.work-status-chip--button {
+  cursor: pointer;
+}
+.work-status-chip--button:hover {
+  border-color: rgba(var(--tint-rgb), 0.34);
+}
+.work-status-chip__label {
+  flex: 0 0 auto;
+}
+.work-status-chip__note {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--muted);
+}
+.work-status-dot {
+  display: inline-block;
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+}
+.work-status-dot--investigating { background: var(--sys-indigo); }
+.work-status-dot--waiting { background: var(--sys-yellow); }
+.work-status-dot--ready { background: var(--sys-green); }
+.work-status-dot--blocked { background: var(--sys-red); }
+.work-status-chip--ready { border-color: color-mix(in srgb, var(--sys-green) 45%, transparent); }
+.work-status-chip--blocked { border-color: color-mix(in srgb, var(--sys-red) 40%, transparent); }
+
 .integration-chip {
   margin-left: 6px;
   padding: 0 6px;

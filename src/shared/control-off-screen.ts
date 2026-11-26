@@ -92,6 +92,9 @@ const STORE_ANSWERED_VERBS: ReadonlySet<string> = new Set([
   // A station's report about ITSELF, recorded in core by the shell's control handler and never
   // forwarded to a canvas — and the station reporting is, by definition, often not on screen.
   'report-outcome',
+  // A node's own work status: written on the Server Edition by its control handler, refused by name
+  // on the desktop. Never a canvas at either end, and never a reason to travel the user's view.
+  'set-status',
   // The board's GitHub lane, read by the shell's control handler out of the GitHub service's cache
   // (core/github/control-read.ts). A read needs no canvas at either end, and a background
   // orchestrator polling `prs` must never travel the user's view.

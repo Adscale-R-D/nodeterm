@@ -620,6 +620,13 @@ export interface CanvasNodeState {
    */
   integration?: import('./integration-principal').IntegrationMarker
   /**
+   * Where this node's work stands — Investigating / Waiting on someone / Ready to go / Blocked, plus
+   * an optional note (@shared/node-work-status). Set by the session itself (`set-status`) or by the
+   * person (node and card menus), and STICKY: nothing clears it but one of them. Display only, so
+   * hostile input: `normalizeWorkStatus` runs at both serializer seams and in every reader.
+   */
+  workStatus?: import('./node-work-status').NodeWorkStatus
+  /**
    * The node id of the agent that OPENED this node through a canvas-control open verb
    * (`open-agent`/`open-claude`/`open-terminal`, `spawn-team`, `verify`) — recorded where that verb
    * draws its lineage rope. It is what lets the app tell the right agent when this station stops

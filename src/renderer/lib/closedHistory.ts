@@ -140,6 +140,8 @@ export function stateToReopenSnapshot(entry: ClosedSessionEntry): ReopenNodeSnap
       // Re-validated, not copied: this entry was read from hand-editable workspace.json.
       icon: normalizeNodeIcon(n.icon),
       terminalFontSize: n.terminalFontSize,
+      // Re-validated in `withCosmetics` (same hand-editable file).
+      workStatus: n.workStatus,
       shell: n.shell,
       cwd: n.cwd,
       text: n.text,

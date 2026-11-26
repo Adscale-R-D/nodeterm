@@ -3,6 +3,7 @@ import { groupBoundBranch, nearestBoundBranch } from '@shared/pull-card-links'
 import type { NodeIcon } from '@shared/node-icon'
 import { normalizeIssueRef } from '@shared/github-issue-ref'
 import { normalizeIntegrationMarker } from '@shared/integration-principal'
+import { normalizeWorkStatus } from '@shared/node-work-status'
 import { SYSTEM_NODE_COLORS, type CanvasNode } from '../state/workspace'
 import type { KanbanSession } from '../components/kanban/KanbanView'
 import type { PendingLaunch } from '@shared/types'
@@ -55,6 +56,7 @@ export function toKanbanSession(n: CanvasNode): KanbanSession | null {
     // by this, and a malformed value must bind to nothing rather than to a wrong card.
     issueRef: normalizeIssueRef(n.data.issueRef),
     integration: normalizeIntegrationMarker(n.data.integration),
+    workStatus: normalizeWorkStatus(n.data.workStatus),
     // The held launch always rides the card; whether a first-open launch still in flight hides the
     // chip is decided by the chip itself (lib/pendingLaunch `firstOpenInFlight`, the node's own
     // predicate), because only it reads the delivery store — a delivery that failed before the

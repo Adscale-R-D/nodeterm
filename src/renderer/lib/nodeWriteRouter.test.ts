@@ -15,10 +15,11 @@ function deps(over: Partial<NodeWriteRouterDeps> = {}): NodeWriteRouterDeps {
   return {
     isLive: () => false,
     liveHas: (id) => id === 'n1',
-    live: { setColor: vi.fn(), setIcon: vi.fn(), pickIcon: vi.fn() },
+    live: { setColor: vi.fn(), setIcon: vi.fn(), pickIcon: vi.fn(), setWorkStatus: vi.fn() },
     storedNode: (id) => (id === 'n1' ? stored('n1') : undefined),
     recolorStored: vi.fn(),
     setStoredIcon: vi.fn(),
+    setStoredWorkStatus: vi.fn(),
     persist: vi.fn(async () => true),
     iconDialog: vi.fn(async () => ({ type: 'emoji', value: '🚀' }) as never),
     toast: vi.fn(),

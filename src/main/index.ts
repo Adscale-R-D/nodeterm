@@ -4616,6 +4616,12 @@ app.whenReady().then(async () => {
       const msg = `${verb}-unsupported: integration principals are a nodeterm Server Edition feature; this desktop has none. Do not retry.`
       return { ok: false, error: msg, message: msg }
     }
+    // The work-status verb writes the caller's node on the Server Edition; the desktop has no
+    // headless writer for it (a person sets it here from the node and card menus).
+    if (verb === 'set-status') {
+      const msg = 'set-status-unsupported: the work-status verb is a nodeterm Server Edition feature; on the desktop the person sets it from the node or card menu. Do not retry.'
+      return { ok: false, error: msg, message: msg }
+    }
     // Card links are kept by the Server Edition's link store; the desktop board does not read them.
     if ((NODE_LINK_VERBS as readonly string[]).includes(verb)) {
       const msg = `${verb}-unsupported: card links (link-pr, link-jira) are a nodeterm Server Edition feature. Do not retry.`

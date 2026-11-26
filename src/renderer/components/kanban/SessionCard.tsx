@@ -16,6 +16,8 @@ import { JiraTicketChips } from './JiraTicketChips'
 import type { IssueRef } from '@shared/github-issue-ref'
 import { IssueRefChip } from '../IssueRefChip'
 import { IntegrationChip } from '../IntegrationChip'
+import { WorkStatusChip } from '../WorkStatusChip'
+import type { NodeWorkStatus } from '@shared/node-work-status'
 import { cardBadge } from '../../lib/kanbanStatusChips'
 import { cardAssignees } from '@shared/kanban-labels'
 import { TeamProgressChip } from '../TeamProgressChip'
@@ -42,6 +44,9 @@ interface SessionCardProps {
   onDropAt: (nodeId: string, side: 'before' | 'after') => void
   /** Right-click on the card — opens the actions menu at the cursor. */
   onContext: (nodeId: string, x: number, y: number) => void
+  /** Change the card's work status from its chip (@shared/node-work-status). A stable callback
+   *  taking the node id, like `onContext`, so the memoized card is not re-rendered per board render. */
+  onSetWorkStatus?: (nodeId: string, status: NodeWorkStatus | undefined) => void
   /** Pull requests linked to this card through its worktree branch (stable array per card). */
   pulls?: GitHubPullStatus[]
   pullFreshness?: PullStatusFreshness
@@ -81,7 +86,7 @@ interface SessionCardProps {
 export const SessionCard = memo(function SessionCard({
   session, meta, labels = [], onOpen, onDragStart, onDragEnd, onDropAt, onContext, pulls, pullRepository,
   pullFreshness = 'fresh', onOpenIssue, team, onTravel, columnCategory, ports, onOpenPort, onRunQueued,
-  statusStore, selected = false, onSelectClick
+  statusStore, selected = false, onSelectClick, onSetWorkStatus
 }: SessionCardProps) {
   // THIS card's agent status, subscribed per card rather than threaded down from the board.
   // KanbanView used to hold `useAgentStatus((s) => s.byId)` and pass the map through the column:
@@ -186,6 +191,7 @@ export const SessionCard = memo(function SessionCard({
           <IssueRefChip issueRef={session.issueRef} onOpen={onOpenIssue} />
         )}
         {session.kind === 'terminal' && <IntegrationChip marker={session.integration} />}
+        {session.kind === 'terminal' && <WorkStatusChip status={session.workStatus} onSet={onSetWorkStatus ? (st) => onSetWorkStatus(session.id, st) : undefined} compact />}
         {session.kind === 'terminal' && team && team.length > 0 && onTravel && (
           <TeamProgressChip stations={team} onTravel={onTravel} statusStore={statusStore} />
         )}

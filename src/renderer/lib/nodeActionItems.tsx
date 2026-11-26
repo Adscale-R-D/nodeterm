@@ -63,6 +63,8 @@ import { tidySeparators } from './tidySeparators'
 import { transferConversationItems, type TransferConversationHandler } from './transferItems'
 import { isHidden } from './ui-visibility'
 import type { NodeWrites } from './nodeWriteRouter'
+import { normalizeWorkStatus, type NodeWorkStatus } from '@shared/node-work-status'
+import { WorkStatusDot, workStatusMenuItems } from '../components/WorkStatusChip'
 
 /** The agent a terminal node was CREATED as. Deliberately NOT `agentIdOf`, whose extra hook-status
  *  fallback also reports a plain terminal someone typed `claude` into by hand: TerminalNode's
@@ -80,6 +82,7 @@ export type NodeActionId =
   | 'grouping'
   | 'colors'
   | 'icon'
+  | 'work-status'
   | 'duplicate'
   | 'snap-zone'
   | 'collapse'
@@ -140,6 +143,7 @@ export const BOARD_NODE_ACTION_IDS = [
   'stop-agent-control',
   'colors',
   'icon',
+  'work-status',
   'refresh-terminal',
   'restart',
   'switch-model',
@@ -202,6 +206,8 @@ export interface NodeActionCtx {
   removeFromGroup: (ids: string[]) => void
   setNodesColor: (ids: string[], color: string) => void
   pickNodeIcon: (nodeId: string) => void
+  /** Set (or, with `undefined`, clear) the work status of every listed node (@shared/node-work-status). */
+  setNodesWorkStatus: (ids: string[], status: NodeWorkStatus | undefined) => void
   duplicateNodes: (ids: string[], at?: { x: number; y: number }) => void
   snapNodeToZone: (zone: ZoneId, nodeId?: string) => boolean
   toggleCollapseNodes: (ids: string[]) => void
@@ -368,6 +374,24 @@ export function buildNodeActionSections(
               }
             ] as MenuItem[])
           : []
+    },
+    // Session nodes only (the chip is drawn on terminal nodes and their cards), any number of them:
+    // marking a batch "Ready to go" at once is a real use. Offered as a submenu so the four kinds and
+    // Clear do not crowd the first level.
+    {
+      id: 'work-status',
+      items: (() => {
+        if (isHidden('work-status', hidden)) return []
+        const targets = ids.map((id) => ctx.nodes.find((n) => n.id === id)).filter((n) => n?.type === 'terminal')
+        if (!targets.length || targets.length !== ids.length) return []
+        const statuses = targets.map((n) => normalizeWorkStatus(n?.data.workStatus))
+        // Show the current one ticked only when every target shares it.
+        const shared = statuses.every((st) => st?.kind === statuses[0]?.kind) ? statuses[0] : undefined
+        const anySet = statuses.some(Boolean)
+        const rows = workStatusMenuItems(shared, (status) => ctx.setNodesWorkStatus(ids, status))
+        if (anySet && !shared) rows.push({ type: 'separator' }, { label: 'Clear status', onClick: () => ctx.setNodesWorkStatus(ids, undefined) })
+        return [{ type: 'submenu', label: 'Status', icon: <WorkStatusDot kind={shared?.kind ?? 'ready'} />, children: rows }] as MenuItem[]
+      })()
     },
     SEPARATOR,
     {
@@ -928,7 +952,7 @@ export interface OffCanvasCtxInput {
   /** Only called for a cursor node: an empty memo spawns `cursor-agent models`. */
   cursorModels: () => GatewayModel[]
   /** The project's write router (Canvas `nodeWritesFor(projectId)`). */
-  writes: Pick<NodeWrites, 'setColor' | 'pickIcon'>
+  writes: Pick<NodeWrites, 'setColor' | 'pickIcon' | 'setWorkStatus'>
   connectedProjectIdForHost: (host?: string) => string | undefined
   /** Raised by every row that needs the live canvas. None of them is on a board today
    *  (`BOARD_NODE_ACTION_IDS`); this keeps the day one is added from failing in silence. */
@@ -969,6 +993,7 @@ export function offCanvasNodeActionCtx(o: OffCanvasCtxInput): NodeActionCtx {
     removeFromGroup: refuse,
     setNodesColor: o.writes.setColor,
     pickNodeIcon: o.writes.pickIcon,
+    setNodesWorkStatus: o.writes.setWorkStatus,
     duplicateNodes: refuse,
     snapNodeToZone: () => {
       o.refuse()

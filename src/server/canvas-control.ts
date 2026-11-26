@@ -417,6 +417,7 @@ export async function initServerCanvasControl(
     board: (sourceNodeId, args) => factory.board(sourceNodeId, args),
     assign: (sourceNodeId, args) => factory.assign(sourceNodeId, args),
     run: (sourceNodeId, args, verified) => factory.run(sourceNodeId, args, verified),
+    setStatus: (sourceNodeId, args) => factory.setStatus(sourceNodeId, args),
     // A station's report about ITSELF (core/station-outcome-store.ts, the same handler the desktop
     // runs). A report can release an armed dependent, so the factory re-evaluates its arms.
     reportOutcome: (sourceNodeId, args, verified) =>

@@ -46,6 +46,9 @@ import { issueWorktreeMenuRow, type IssueWorktreeMenuAnswer } from '../../lib/is
 import type { GitHubCloseReason, GitHubIssueCardView } from '@shared/github-issues'
 import { issueKey, issueRefFromHtmlUrl, issueUrl, type IssueRef } from '@shared/github-issue-ref'
 import type { IntegrationMarker } from '@shared/integration-principal'
+import { WORK_STATUS_KINDS, WORK_STATUS_LABELS, WORK_STATUS_SHORT, type NodeWorkStatus, type WorkStatusKind } from '@shared/node-work-status'
+import { matchesWorkStatus, workStatusByCard, workStatusCounts } from '../../lib/kanbanWorkStatusFilter'
+import { WorkStatusDot } from '../WorkStatusChip'
 import { NO_ISSUE_RUNS, boundRunsByIssue, type IssueRun } from '../../lib/issueRuns'
 import { useGitHubIssues } from '../../state/githubIssues'
 import { agentStatusForProject, useSession, useSessionRegistryVersion } from '../../session/session'
@@ -89,6 +92,8 @@ export interface KanbanSession {
   issueRef?: IssueRef
   /** Opened by an integration principal: shown as a chip, never read as authority. */
   integration?: IntegrationMarker
+  /** Where the session's work stands (@shared/node-work-status). Sticky; terminal cards only. */
+  workStatus?: NodeWorkStatus
   /** The node's user-chosen icon (see @shared/node-icon). The board is the canvas's other view of
    *  the same session, so a session the user marked with an icon carries it here too. Terminal
    *  cards only in v1 — that is the only kind whose canvas node offers the action, and a card
@@ -163,6 +168,7 @@ export interface KanbanViewProps {
   onAiName?: (nodeId: string) => void
   /** Set a card's node color — the card modal's Color button. Optional: no button without it. */
   onSetColor?: (nodeId: string, color: string) => void
+  onSetWorkStatus?: (nodeId: string, status: NodeWorkStatus | undefined) => void
   /** Start a card's held launch now (its QUEUED chip's ▶) — Canvas's `run` path. */
   onRunQueued?: (nodeId: string) => void
   /** The board moving a session card itself because its linked pull requests merged (Canvas owns
@@ -264,7 +270,7 @@ function useCanvasCovered(): void {
 
 export const KanbanView = memo(function KanbanView({
   board, sessions, onChange, onOpenNode, onCreateNode, onRenameNode, onEditSticky, onDeleteNode,
-  onDeleteNodes, onModalNodeChange, onBrowserNav, onSetIcon, nodeActionItems, sessionActionItems, onAiName, onSetColor, onRunQueued, onAutoMoveFromPulls, issueAgentMenu,
+  onDeleteNodes, onModalNodeChange, onBrowserNav, onSetIcon, nodeActionItems, sessionActionItems, onAiName, onSetColor, onSetWorkStatus, onRunQueued, onAutoMoveFromPulls, issueAgentMenu,
   issueWorktreeMenu, teams, onIssueMoved
 }: KanbanViewProps) {
   useCanvasCovered()
@@ -300,6 +306,8 @@ export const KanbanView = memo(function KanbanView({
   // Status chips (Running / Needs you / Unread) — TRANSIENT component state, never persisted and
   // never part of a saved view: they filter on second-by-second agent state (lib/kanbanStatusChips).
   const [statusChips, setStatusChips] = useState<StatusChip[]>([])
+  // The work-status filter (lib/kanbanWorkStatusFilter): component state, reset with the chips.
+  const [workFilter, setWorkFilter] = useState<WorkStatusKind[]>([])
   const [source, setSource] = useState<KanbanSource>('all')
   // One GitHub summary modal for both kinds; the kind decides whether it offers a move.
   const [modalIssue, setModalIssue] = useState<
@@ -480,6 +488,7 @@ export const KanbanView = memo(function KanbanView({
     setModalIssue(null)
     setIssueMenu(null)
     setStatusChips([])
+    setWorkFilter([])
     // Entering a board (or switching projects under it) restores the view this user last applied
     // there; a view a teammate has since deleted is simply not found.
     const k = boardRef.current
@@ -606,6 +615,10 @@ export const KanbanView = memo(function KanbanView({
   const statusSig = statusStore((st) => statusChipSig(st.byId, chipCards))
   const statusFacts = useMemo(() => parseStatusChipSig(statusSig), [statusSig])
   const statusCounts = useMemo(() => chipCounts(statusFacts), [statusFacts])
+  const workByCard = useMemo(() => workStatusByCard(sessions), [sessions])
+  const workCounts = useMemo(() => workStatusCounts(workByCard), [workByCard])
+  const toggleWorkFilter = (kind: WorkStatusKind): void =>
+    setWorkFilter((cur) => (cur.includes(kind) ? cur.filter((k) => k !== kind) : [...cur, kind]))
   const toggleStatusChip = (chip: StatusChip): void =>
     setStatusChips((cur) => (cur.includes(chip) ? cur.filter((c) => c !== chip) : [...cur, chip]))
 
@@ -711,12 +724,13 @@ export const KanbanView = memo(function KanbanView({
     const hasMember = (id: string): boolean =>
       cardAssignees(cardMeta(board, id)).some((a) => assigneeFilter.includes(a.name))
     const vis = (ids: string[]): string[] =>
-      activeLocalFilter.length || assigneeFilter.length || statusChips.length
+      activeLocalFilter.length || assigneeFilter.length || statusChips.length || workFilter.length
         ? ids.filter(
           (id) =>
             (!activeLocalFilter.length || cardMatchesLabelFilter(board, id, activeLocalFilter)) &&
             (!assigneeFilter.length || hasMember(id)) &&
-            matchesStatusChips(statusFacts, id, statusChips)
+            matchesStatusChips(statusFacts, id, statusChips) &&
+            matchesWorkStatus(workByCard, id, workFilter)
         )
         : ids
     const toCards = (ids: string[]): KanbanSession[] => {
@@ -727,7 +741,7 @@ export const KanbanView = memo(function KanbanView({
       ungrouped: toCards(vis(unassigned(board, sessionIds))),
       byColumn: new Map(board.columns.map((c) => [c.id, toCards(vis(assignedTo(board, c.id)))]))
     }
-  }, [board, byId, sessionIds, activeLocalFilter, assigneeFilter, statusChips, statusFacts])
+  }, [board, byId, sessionIds, activeLocalFilter, assigneeFilter, statusChips, statusFacts, workFilter, workByCard])
 
   // Lifecycle: the board's progress (null when no column says what "complete" means) and the
   // columns this user sees — `closed` ones only when they asked for them.
@@ -987,6 +1001,7 @@ export const KanbanView = memo(function KanbanView({
             key={s.id}
             session={s}
             meta={metaOf(s.id)}
+            onSetWorkStatus={onSetWorkStatus}
             labels={labelsOf(s.id)}
             onOpen={setModalNodeId}
             selected={selection.set.has(s.id)}
@@ -1183,6 +1198,28 @@ export const KanbanView = memo(function KanbanView({
             )
           })}
         </div>
+        {/* Work status (@shared/node-work-status): shown only for kinds some card reports, or one
+            that is switched on (so it can always be switched off again). */}
+        {WORK_STATUS_KINDS.some((k) => workCounts[k] > 0 || workFilter.includes(k)) && (
+          <div className="kanban-status-chips" role="group" aria-label="Filter by work status">
+            {WORK_STATUS_KINDS.filter((k) => workCounts[k] > 0 || workFilter.includes(k)).map((k) => {
+              const on = workFilter.includes(k)
+              return (
+                <button
+                  key={k}
+                  className={`kanban-status-chip kanban-work-chip${on ? ' kanban-status-chip--on' : ''}`}
+                  aria-pressed={on}
+                  title={`Show only sessions marked "${WORK_STATUS_LABELS[k]}"`}
+                  onClick={() => toggleWorkFilter(k)}
+                >
+                  <WorkStatusDot kind={k} />
+                  {WORK_STATUS_SHORT[k]}
+                  <span className="kanban-status-chip__count">{workCounts[k]}</span>
+                </button>
+              )
+            })}
+          </div>
+        )}
         <div className="kanban-header__filter">
           <button
             className={`kanban-filter-btn${filterCount ? ' kanban-filter-btn--on' : ''}`}
@@ -1371,6 +1408,7 @@ export const KanbanView = memo(function KanbanView({
           onBrowserNav={(patch) => onBrowserNav(modalNodeId, patch)}
           onSetIcon={(icon) => onSetIcon(modalNodeId, icon)}
           onSetColor={onSetColor ? (color) => onSetColor(modalNodeId, color) : undefined}
+          onSetWorkStatus={onSetWorkStatus ? (status) => onSetWorkStatus(modalNodeId, status) : undefined}
           sessionActions={sessionActionItems ? () => sessionActionItems(modalNodeId) : undefined}
           onRunQueued={onRunQueued ? () => onRunQueued(modalNodeId) : undefined}
           onDelete={() => onDeleteNode(modalNodeId)}

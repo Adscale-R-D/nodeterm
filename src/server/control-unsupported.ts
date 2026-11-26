@@ -101,6 +101,8 @@ export interface ServerEditionControlActions {
   settings(sourceNodeId: string, args: Record<string, string>): Promise<ServerControlReply>
   /** `run --node <id>` (#925): deliver a retained launch for the node's creator. */
   run(sourceNodeId: string, args: Record<string, string>, verified: boolean): Promise<ServerControlReply>
+  /** `set-status` (@shared/node-work-status): the caller's own work status, on its own node. */
+  setStatus(sourceNodeId: string, args: Record<string, string>): Promise<ServerControlReply>
   /** `report-outcome` (@shared/station-outcome): a station's report about ITSELF — no creator check,
    *  because it touches no other node. */
   reportOutcome(sourceNodeId: string, args: Record<string, string>, verified: boolean): Promise<ServerControlReply>
@@ -146,6 +148,7 @@ const SERVER_V1_VERBS: ReadonlySet<string> = new Set([
   'assign',
   'run',
   'report-outcome',
+  'set-status',
   'issues',
   'prs',
   'integration-grant',
@@ -228,6 +231,8 @@ export function createServerEditionControlHandler(actions: ServerEditionControlA
         return actions.run(nodeId, command.args, verified)
       case 'report-outcome':
         return actions.reportOutcome(nodeId, command.args, verified)
+      case 'set-status':
+        return actions.setStatus(nodeId, command.args)
       case 'issues':
       case 'prs':
         return actions.githubRead(command.verb, nodeId, command.args)
